@@ -13,6 +13,9 @@ pub struct SelectStatement {
     pub columns: Vec<Column>,
     pub from: String,
     pub where_clause: Option<Expression>,
+    pub order_by: Option<Vec<OrderByExpr>>,
+    pub limit: Option<usize>,
+    pub offset: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -119,4 +122,10 @@ pub enum Value {
     Text(String),
     #[allow(dead_code)]
     Boolean(bool),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct OrderByExpr {
+    pub expr: Expression,
+    pub asc: bool,
 }

@@ -1,6 +1,7 @@
 use crate::ast::*;
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
+use std::cmp::Ordering;
 
 pub struct Database {
     tables: HashMap<String, Table>,
@@ -116,12 +117,7 @@ fn execute_select(stmt: SelectStatement) -> Result<String, String> {
         }
     }
     
-    for idx in &column_indices {
-        result.push_str(&format!("{}\t", table.columns[*idx].name));
-    }
-    result.push('\n');
-    result.push_str(&"-".repeat(40));
-    result.push('\n');
+    let mut filtered_rows: Vec<&Vec<Value>> = Vec::new();
     
     for row in &table.rows {
         let include_row = if let Some(ref where_expr) = stmt.where_clause {
@@ -131,11 +127,42 @@ fn execute_select(stmt: SelectStatement) -> Result<String, String> {
         };
         
         if include_row {
-            for idx in &column_indices {
-                result.push_str(&format!("{}\t", format_value(&row[*idx])));
-            }
-            result.push('\n');
+            filtered_rows.push(row);
         }
+    }
+    
+    if let Some(ref order_by) = stmt.order_by {
+        filtered_rows.sort_by(|a, b| {
+            for order_expr in order_by {
+                let a_val = evaluate_value_expression(&order_expr.expr, &table.columns, a)
+                    .unwrap_or(Value::Null);
+                let b_val = evaluate_value_expression(&order_expr.expr, &table.columns, b)
+                    .unwrap_or(Value::Null);
+                
+                let cmp = compare_values_for_sort(&a_val, &b_val);
+                if cmp != Ordering::Equal {
+                    return if order_expr.asc { cmp } else { cmp.reverse() };
+                }
+            }
+            Ordering::Equal
+        });
+    }
+    
+    let offset = stmt.offset.unwrap_or(0);
+    let limit = stmt.limit.unwrap_or(filtered_rows.len());
+    
+    for idx in &column_indices {
+        result.push_str(&format!("{}\t", table.columns[*idx].name));
+    }
+    result.push('\n');
+    result.push_str(&"-".repeat(40));
+    result.push('\n');
+    
+    for row in filtered_rows.iter().skip(offset).take(limit) {
+        for idx in &column_indices {
+            result.push_str(&format!("{}\t", format_value(&row[*idx])));
+        }
+        result.push('\n');
     }
     
     Ok(result)
@@ -282,5 +309,22 @@ fn format_value(value: &Value) -> String {
         Value::Float(f) => f.to_string(),
         Value::Text(s) => s.clone(),
         Value::Boolean(b) => b.to_string(),
+    }
+}
+
+fn compare_values_for_sort(left: &Value, right: &Value) -> Ordering {
+    match (left, right) {
+        (Value::Null, Value::Null) => Ordering::Equal,
+        (Value::Null, _) => Ordering::Less,
+        (_, Value::Null) => Ordering::Greater,
+        (Value::Integer(l), Value::Integer(r)) => l.cmp(r),
+        (Value::Float(l), Value::Float(r)) => {
+            if l < r { Ordering::Less }
+            else if l > r { Ordering::Greater }
+            else { Ordering::Equal }
+        }
+        (Value::Text(l), Value::Text(r)) => l.cmp(r),
+        (Value::Boolean(l), Value::Boolean(r)) => l.cmp(r),
+        _ => Ordering::Equal,
     }
 }

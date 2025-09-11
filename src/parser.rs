@@ -66,10 +66,41 @@ impl Parser {
             None
         };
         
+        let order_by = if *self.current_token() == Token::Order {
+            self.advance();
+            self.consume(Token::By)?;
+            Some(self.parse_order_by()?)
+        } else {
+            None
+        };
+        
+        let limit = if *self.current_token() == Token::Limit {
+            self.advance();
+            match self.advance() {
+                Token::Number(n) => Some(n as usize),
+                _ => return Err("Expected number after LIMIT".to_string()),
+            }
+        } else {
+            None
+        };
+        
+        let offset = if *self.current_token() == Token::Offset {
+            self.advance();
+            match self.advance() {
+                Token::Number(n) => Some(n as usize),
+                _ => return Err("Expected number after OFFSET".to_string()),
+            }
+        } else {
+            None
+        };
+        
         Ok(Statement::Select(SelectStatement {
             columns,
             from: table,
             where_clause,
+            order_by,
+            limit,
+            offset,
         }))
     }
 
@@ -488,6 +519,34 @@ impl Parser {
             }
             _ => Err(format!("Unexpected token in expression: {:?}", self.current_token())),
         }
+    }
+    
+    fn parse_order_by(&mut self) -> Result<Vec<OrderByExpr>, String> {
+        let mut order_exprs = Vec::new();
+        
+        loop {
+            let expr = self.parse_expression()?;
+            
+            let asc = if *self.current_token() == Token::Asc {
+                self.advance();
+                true
+            } else if *self.current_token() == Token::Desc {
+                self.advance();
+                false
+            } else {
+                true
+            };
+            
+            order_exprs.push(OrderByExpr { expr, asc });
+            
+            if *self.current_token() == Token::Comma {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+        
+        Ok(order_exprs)
     }
 }
 

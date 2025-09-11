@@ -15,6 +15,12 @@ pub enum Token {
     And,
     Or,
     Not,
+    Order,
+    By,
+    Asc,
+    Desc,
+    Limit,
+    Offset,
     
     Identifier(String),
     Number(i64),
@@ -234,6 +240,12 @@ fn match_keyword(ident: &str) -> Token {
         "AND" => Token::And,
         "OR" => Token::Or,
         "NOT" => Token::Not,
+        "ORDER" => Token::Order,
+        "BY" => Token::By,
+        "ASC" => Token::Asc,
+        "DESC" => Token::Desc,
+        "LIMIT" => Token::Limit,
+        "OFFSET" => Token::Offset,
         _ => Token::Identifier(ident.to_string()),
     }
 }
