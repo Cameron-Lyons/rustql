@@ -21,38 +21,38 @@ pub enum Token {
     Desc,
     Limit,
     Offset,
-    
+
     Identifier(String),
     Number(i64),
     Float(f64),
     StringLiteral(String),
-    
+
     LeftParen,
     RightParen,
     Comma,
     Semicolon,
     Star,
-    
+
     Equal,
     NotEqual,
     LessThan,
     LessThanOrEqual,
     GreaterThan,
     GreaterThanOrEqual,
-    
+
     Plus,
     Minus,
     #[allow(dead_code)]
     Multiply,
     Divide,
-    
+
     Eof,
 }
 
 pub fn tokenize(input: &str) -> Result<Vec<Token>, String> {
     let mut tokens = Vec::new();
     let mut chars = input.chars().peekable();
-    
+
     while let Some(&ch) = chars.peek() {
         match ch {
             ' ' | '\t' | '\n' | '\r' => {
@@ -134,7 +134,7 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, String> {
                     tokens.push(Token::NotEqual);
                     chars.next();
                 } else {
-                    return Err(format!("Unexpected character: !", ));
+                    return Err(format!("Unexpected character: !",));
                 }
             }
             '\'' => {
@@ -164,7 +164,7 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, String> {
             }
         }
     }
-    
+
     tokens.push(Token::Eof);
     Ok(tokens)
 }
@@ -185,7 +185,7 @@ fn read_identifier(chars: &mut std::iter::Peekable<std::str::Chars>) -> String {
 fn read_number(chars: &mut std::iter::Peekable<std::str::Chars>) -> String {
     let mut num = String::new();
     let mut has_dot = false;
-    
+
     while let Some(&ch) = chars.peek() {
         if ch.is_ascii_digit() {
             num.push(ch);
@@ -201,13 +201,16 @@ fn read_number(chars: &mut std::iter::Peekable<std::str::Chars>) -> String {
     num
 }
 
-fn read_string(chars: &mut std::iter::Peekable<std::str::Chars>, delimiter: char) -> Result<String, String> {
+fn read_string(
+    chars: &mut std::iter::Peekable<std::str::Chars>,
+    delimiter: char,
+) -> Result<String, String> {
     let mut string_val = String::new();
     let mut escaped = false;
-    
+
     while let Some(&ch) = chars.peek() {
         chars.next();
-        
+
         if escaped {
             string_val.push(ch);
             escaped = false;
@@ -219,7 +222,7 @@ fn read_string(chars: &mut std::iter::Peekable<std::str::Chars>, delimiter: char
             string_val.push(ch);
         }
     }
-    
+
     Err(format!("Unterminated string literal"))
 }
 
@@ -249,3 +252,4 @@ fn match_keyword(ident: &str) -> Token {
         _ => Token::Identifier(ident.to_string()),
     }
 }
+

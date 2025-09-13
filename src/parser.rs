@@ -25,7 +25,11 @@ impl Parser {
             self.current += 1;
             Ok(())
         } else {
-            Err(format!("Expected {:?}, found {:?}", expected, self.current_token()))
+            Err(format!(
+                "Expected {:?}, found {:?}",
+                expected,
+                self.current_token()
+            ))
         }
     }
 
@@ -49,23 +53,23 @@ impl Parser {
 
     fn parse_select(&mut self) -> Result<Statement, String> {
         self.consume(Token::Select)?;
-        
+
         let columns = self.parse_columns()?;
-        
+
         self.consume(Token::From)?;
-        
+
         let table = match self.advance() {
             Token::Identifier(name) => name,
             _ => return Err("Expected table name".to_string()),
         };
-        
+
         let where_clause = if *self.current_token() == Token::Where {
             self.advance();
             Some(self.parse_expression()?)
         } else {
             None
         };
-        
+
         let order_by = if *self.current_token() == Token::Order {
             self.advance();
             self.consume(Token::By)?;
@@ -73,7 +77,7 @@ impl Parser {
         } else {
             None
         };
-        
+
         let limit = if *self.current_token() == Token::Limit {
             self.advance();
             match self.advance() {
@@ -83,7 +87,7 @@ impl Parser {
         } else {
             None
         };
-        
+
         let offset = if *self.current_token() == Token::Offset {
             self.advance();
             match self.advance() {
@@ -93,7 +97,7 @@ impl Parser {
         } else {
             None
         };
-        
+
         Ok(Statement::Select(SelectStatement {
             columns,
             from: table,
@@ -106,7 +110,7 @@ impl Parser {
 
     fn parse_columns(&mut self) -> Result<Vec<Column>, String> {
         let mut columns = Vec::new();
-        
+
         if *self.current_token() == Token::Star {
             self.advance();
             columns.push(Column::All);
@@ -119,34 +123,34 @@ impl Parser {
                     }
                     _ => break,
                 }
-                
+
                 if *self.current_token() != Token::Comma {
                     break;
                 }
                 self.advance();
             }
         }
-        
+
         if columns.is_empty() {
             return Err("Expected column names or *".to_string());
         }
-        
+
         Ok(columns)
     }
 
     fn parse_insert(&mut self) -> Result<Statement, String> {
         self.consume(Token::Insert)?;
         self.consume(Token::Into)?;
-        
+
         let table = match self.advance() {
             Token::Identifier(name) => name,
             _ => return Err("Expected table name".to_string()),
         };
-        
+
         let columns = if *self.current_token() == Token::LeftParen {
             self.advance();
             let mut cols = Vec::new();
-            
+
             loop {
                 match self.current_token() {
                     Token::Identifier(name) => {
@@ -155,24 +159,24 @@ impl Parser {
                     }
                     _ => break,
                 }
-                
+
                 if *self.current_token() == Token::Comma {
                     self.advance();
                 } else {
                     break;
                 }
             }
-            
+
             self.consume(Token::RightParen)?;
             Some(cols)
         } else {
             None
         };
-        
+
         self.consume(Token::Values)?;
-        
+
         let values = self.parse_values()?;
-        
+
         Ok(Statement::Insert(InsertStatement {
             table,
             columns,
@@ -182,31 +186,31 @@ impl Parser {
 
     fn parse_values(&mut self) -> Result<Vec<Vec<Value>>, String> {
         let mut all_values = Vec::new();
-        
+
         loop {
             self.consume(Token::LeftParen)?;
             let mut values = Vec::new();
-            
+
             loop {
                 values.push(self.parse_value()?);
-                
+
                 if *self.current_token() == Token::Comma {
                     self.advance();
                 } else {
                     break;
                 }
             }
-            
+
             self.consume(Token::RightParen)?;
             all_values.push(values);
-            
+
             if *self.current_token() == Token::Comma {
                 self.advance();
             } else {
                 break;
             }
         }
-        
+
         Ok(all_values)
     }
 
@@ -221,23 +225,23 @@ impl Parser {
 
     fn parse_update(&mut self) -> Result<Statement, String> {
         self.consume(Token::Update)?;
-        
+
         let table = match self.advance() {
             Token::Identifier(name) => name,
             _ => return Err("Expected table name".to_string()),
         };
-        
+
         self.consume(Token::Set)?;
-        
+
         let assignments = self.parse_assignments()?;
-        
+
         let where_clause = if *self.current_token() == Token::Where {
             self.advance();
             Some(self.parse_expression()?)
         } else {
             None
         };
-        
+
         Ok(Statement::Update(UpdateStatement {
             table,
             assignments,
@@ -247,45 +251,45 @@ impl Parser {
 
     fn parse_assignments(&mut self) -> Result<Vec<Assignment>, String> {
         let mut assignments = Vec::new();
-        
+
         loop {
             let column = match self.advance() {
                 Token::Identifier(name) => name,
                 _ => return Err("Expected column name".to_string()),
             };
-            
+
             self.consume(Token::Equal)?;
-            
+
             let value = self.parse_value()?;
-            
+
             assignments.push(Assignment { column, value });
-            
+
             if *self.current_token() == Token::Comma {
                 self.advance();
             } else {
                 break;
             }
         }
-        
+
         Ok(assignments)
     }
 
     fn parse_delete(&mut self) -> Result<Statement, String> {
         self.consume(Token::Delete)?;
         self.consume(Token::From)?;
-        
+
         let table = match self.advance() {
             Token::Identifier(name) => name,
             _ => return Err("Expected table name".to_string()),
         };
-        
+
         let where_clause = if *self.current_token() == Token::Where {
             self.advance();
             Some(self.parse_expression()?)
         } else {
             None
         };
-        
+
         Ok(Statement::Delete(DeleteStatement {
             table,
             where_clause,
@@ -295,18 +299,18 @@ impl Parser {
     fn parse_create(&mut self) -> Result<Statement, String> {
         self.consume(Token::Create)?;
         self.consume(Token::Table)?;
-        
+
         let name = match self.advance() {
             Token::Identifier(name) => name,
             _ => return Err("Expected table name".to_string()),
         };
-        
+
         self.consume(Token::LeftParen)?;
-        
+
         let columns = self.parse_column_definitions()?;
-        
+
         self.consume(Token::RightParen)?;
-        
+
         Ok(Statement::CreateTable(CreateTableStatement {
             name,
             columns,
@@ -315,42 +319,40 @@ impl Parser {
 
     fn parse_column_definitions(&mut self) -> Result<Vec<ColumnDefinition>, String> {
         let mut columns = Vec::new();
-        
+
         loop {
             let name = match self.advance() {
                 Token::Identifier(name) => name,
                 _ => return Err("Expected column name".to_string()),
             };
-            
+
             let data_type = self.parse_data_type()?;
-            
+
             columns.push(ColumnDefinition {
                 name,
                 data_type,
                 nullable: true,
             });
-            
+
             if *self.current_token() == Token::Comma {
                 self.advance();
             } else {
                 break;
             }
         }
-        
+
         Ok(columns)
     }
 
     fn parse_data_type(&mut self) -> Result<DataType, String> {
         match self.advance() {
-            Token::Identifier(name) => {
-                match name.to_uppercase().as_str() {
-                    "INT" | "INTEGER" => Ok(DataType::Integer),
-                    "FLOAT" | "REAL" | "DOUBLE" => Ok(DataType::Float),
-                    "TEXT" | "VARCHAR" | "STRING" => Ok(DataType::Text),
-                    "BOOL" | "BOOLEAN" => Ok(DataType::Boolean),
-                    _ => Err(format!("Unknown data type: {}", name)),
-                }
-            }
+            Token::Identifier(name) => match name.to_uppercase().as_str() {
+                "INT" | "INTEGER" => Ok(DataType::Integer),
+                "FLOAT" | "REAL" | "DOUBLE" => Ok(DataType::Float),
+                "TEXT" | "VARCHAR" | "STRING" => Ok(DataType::Text),
+                "BOOL" | "BOOLEAN" => Ok(DataType::Boolean),
+                _ => Err(format!("Unknown data type: {}", name)),
+            },
             _ => Err("Expected data type".to_string()),
         }
     }
@@ -358,12 +360,12 @@ impl Parser {
     fn parse_drop(&mut self) -> Result<Statement, String> {
         self.consume(Token::Drop)?;
         self.consume(Token::Table)?;
-        
+
         let name = match self.advance() {
             Token::Identifier(name) => name,
             _ => return Err("Expected table name".to_string()),
         };
-        
+
         Ok(Statement::DropTable(DropTableStatement { name }))
     }
 
@@ -373,7 +375,7 @@ impl Parser {
 
     fn parse_or(&mut self) -> Result<Expression, String> {
         let mut expr = self.parse_and()?;
-        
+
         while *self.current_token() == Token::Or {
             self.advance();
             let right = self.parse_and()?;
@@ -383,13 +385,13 @@ impl Parser {
                 right: Box::new(right),
             };
         }
-        
+
         Ok(expr)
     }
 
     fn parse_and(&mut self) -> Result<Expression, String> {
         let mut expr = self.parse_comparison()?;
-        
+
         while *self.current_token() == Token::And {
             self.advance();
             let right = self.parse_comparison()?;
@@ -399,13 +401,13 @@ impl Parser {
                 right: Box::new(right),
             };
         }
-        
+
         Ok(expr)
     }
 
     fn parse_comparison(&mut self) -> Result<Expression, String> {
         let mut expr = self.parse_term()?;
-        
+
         loop {
             let op = match self.current_token() {
                 Token::Equal => BinaryOperator::Equal,
@@ -416,7 +418,7 @@ impl Parser {
                 Token::GreaterThanOrEqual => BinaryOperator::GreaterThanOrEqual,
                 _ => break,
             };
-            
+
             self.advance();
             let right = self.parse_term()?;
             expr = Expression::BinaryOp {
@@ -425,20 +427,20 @@ impl Parser {
                 right: Box::new(right),
             };
         }
-        
+
         Ok(expr)
     }
 
     fn parse_term(&mut self) -> Result<Expression, String> {
         let mut expr = self.parse_factor()?;
-        
+
         loop {
             let op = match self.current_token() {
                 Token::Plus => BinaryOperator::Plus,
                 Token::Minus => BinaryOperator::Minus,
                 _ => break,
             };
-            
+
             self.advance();
             let right = self.parse_factor()?;
             expr = Expression::BinaryOp {
@@ -447,20 +449,20 @@ impl Parser {
                 right: Box::new(right),
             };
         }
-        
+
         Ok(expr)
     }
 
     fn parse_factor(&mut self) -> Result<Expression, String> {
         let mut expr = self.parse_unary()?;
-        
+
         loop {
             let op = match self.current_token() {
                 Token::Star => BinaryOperator::Multiply,
                 Token::Divide => BinaryOperator::Divide,
                 _ => break,
             };
-            
+
             self.advance();
             let right = self.parse_unary()?;
             expr = Expression::BinaryOp {
@@ -469,7 +471,7 @@ impl Parser {
                 right: Box::new(right),
             };
         }
-        
+
         Ok(expr)
     }
 
@@ -517,16 +519,19 @@ impl Parser {
                 self.consume(Token::RightParen)?;
                 Ok(expr)
             }
-            _ => Err(format!("Unexpected token in expression: {:?}", self.current_token())),
+            _ => Err(format!(
+                "Unexpected token in expression: {:?}",
+                self.current_token()
+            )),
         }
     }
-    
+
     fn parse_order_by(&mut self) -> Result<Vec<OrderByExpr>, String> {
         let mut order_exprs = Vec::new();
-        
+
         loop {
             let expr = self.parse_expression()?;
-            
+
             let asc = if *self.current_token() == Token::Asc {
                 self.advance();
                 true
@@ -536,16 +541,16 @@ impl Parser {
             } else {
                 true
             };
-            
+
             order_exprs.push(OrderByExpr { expr, asc });
-            
+
             if *self.current_token() == Token::Comma {
                 self.advance();
             } else {
                 break;
             }
         }
-        
+
         Ok(order_exprs)
     }
 }
@@ -554,3 +559,4 @@ pub fn parse(tokens: Vec<Token>) -> Result<Statement, String> {
     let mut parser = Parser::new(tokens);
     parser.parse_statement()
 }
+
