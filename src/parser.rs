@@ -559,4 +559,3 @@ pub fn parse(tokens: Vec<Token>) -> Result<Statement, String> {
     let mut parser = Parser::new(tokens);
     parser.parse_statement()
 }
-

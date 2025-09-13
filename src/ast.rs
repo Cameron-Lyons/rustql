@@ -1,3 +1,5 @@
+use serde::{Deserialize, Serialize};
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Statement {
     Select(SelectStatement),
@@ -56,14 +58,14 @@ pub struct CreateTableStatement {
     pub columns: Vec<ColumnDefinition>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ColumnDefinition {
     pub name: String,
     pub data_type: DataType,
     pub nullable: bool,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum DataType {
     Integer,
     Float,
@@ -113,7 +115,7 @@ pub enum UnaryOperator {
     Minus,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Value {
     #[allow(dead_code)]
     Null,
@@ -129,4 +131,3 @@ pub struct OrderByExpr {
     pub expr: Expression,
     pub asc: bool,
 }
-

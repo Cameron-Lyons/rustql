@@ -1,12 +1,19 @@
 use crate::ast::*;
+use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::HashMap;
+use std::fs;
+use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 
+const DATABASE_FILE: &str = "rustql_data.json";
+
+#[derive(Serialize, Deserialize)]
 pub struct Database {
     tables: HashMap<String, Table>,
 }
 
+#[derive(Serialize, Deserialize)]
 struct Table {
     columns: Vec<ColumnDefinition>,
     rows: Vec<Vec<Value>>,
@@ -18,13 +25,30 @@ impl Database {
             tables: HashMap::new(),
         }
     }
+
+    fn load() -> Self {
+        if Path::new(DATABASE_FILE).exists() {
+            let data = fs::read_to_string(DATABASE_FILE).unwrap_or_default();
+            serde_json::from_str(&data).unwrap_or_else(|_| Database::new())
+        } else {
+            Database::new()
+        }
+    }
+
+    fn save(&self) -> Result<(), String> {
+        let data = serde_json::to_string_pretty(self)
+            .map_err(|e| format!("Failed to serialize database: {}", e))?;
+        fs::write(DATABASE_FILE, data)
+            .map_err(|e| format!("Failed to write database file: {}", e))?;
+        Ok(())
+    }
 }
 
 static DATABASE: OnceLock<Mutex<Database>> = OnceLock::new();
 
 fn get_database() -> std::sync::MutexGuard<'static, Database> {
     DATABASE
-        .get_or_init(|| Mutex::new(Database::new()))
+        .get_or_init(|| Mutex::new(Database::load()))
         .lock()
         .unwrap()
 }
@@ -55,6 +79,7 @@ fn execute_create_table(stmt: CreateTableStatement) -> Result<String, String> {
         },
     );
 
+    db.save()?;
     Ok(format!("Table '{}' created", stmt.name))
 }
 
@@ -62,6 +87,7 @@ fn execute_drop_table(stmt: DropTableStatement) -> Result<String, String> {
     let mut db = get_database();
 
     if db.tables.remove(&stmt.name).is_some() {
+        db.save()?;
         Ok(format!("Table '{}' dropped", stmt.name))
     } else {
         Err(format!("Table '{}' does not exist", stmt.name))
@@ -90,6 +116,7 @@ fn execute_insert(stmt: InsertStatement) -> Result<String, String> {
         table.rows.push(values);
     }
 
+    db.save()?;
     Ok(format!("{} row(s) inserted", row_count))
 }
 
@@ -209,6 +236,7 @@ fn execute_update(stmt: UpdateStatement) -> Result<String, String> {
         }
     }
 
+    db.save()?;
     Ok(format!("{} row(s) updated", updated_count))
 }
 
@@ -231,6 +259,7 @@ fn execute_delete(stmt: DeleteStatement) -> Result<String, String> {
     }
 
     let deleted_count = initial_count - table.rows.len();
+    db.save()?;
     Ok(format!("{} row(s) deleted", deleted_count))
 }
 
@@ -278,31 +307,34 @@ fn evaluate_value_expression(
 }
 
 fn compare_values(left: &Value, op: &BinaryOperator, right: &Value) -> Result<bool, String> {
-    match (left, right, op) {
-        (Value::Integer(l), Value::Integer(r), op) => Ok(match op {
-            BinaryOperator::Equal => l == r,
-            BinaryOperator::NotEqual => l != r,
-            BinaryOperator::LessThan => l < r,
-            BinaryOperator::LessThanOrEqual => l <= r,
-            BinaryOperator::GreaterThan => l > r,
-            BinaryOperator::GreaterThanOrEqual => l >= r,
-            _ => return Err("Invalid operator for integers".to_string()),
-        }),
-        (Value::Float(l), Value::Float(r), op) => Ok(match op {
+    // Convert values to compatible types for comparison
+    let (left_num, right_num) = match (left, right) {
+        (Value::Integer(l), Value::Integer(r)) => (Some(*l as f64), Some(*r as f64)),
+        (Value::Float(l), Value::Float(r)) => (Some(*l), Some(*r)),
+        (Value::Integer(l), Value::Float(r)) => (Some(*l as f64), Some(*r)),
+        (Value::Float(l), Value::Integer(r)) => (Some(*l), Some(*r as f64)),
+        _ => (None, None),
+    };
+
+    if let (Some(l), Some(r)) = (left_num, right_num) {
+        Ok(match op {
             BinaryOperator::Equal => (l - r).abs() < f64::EPSILON,
             BinaryOperator::NotEqual => (l - r).abs() >= f64::EPSILON,
             BinaryOperator::LessThan => l < r,
             BinaryOperator::LessThanOrEqual => l <= r,
             BinaryOperator::GreaterThan => l > r,
             BinaryOperator::GreaterThanOrEqual => l >= r,
-            _ => return Err("Invalid operator for floats".to_string()),
-        }),
-        (Value::Text(l), Value::Text(r), op) => Ok(match op {
-            BinaryOperator::Equal => l == r,
-            BinaryOperator::NotEqual => l != r,
-            _ => return Err("Invalid operator for strings".to_string()),
-        }),
-        _ => Err("Type mismatch in comparison".to_string()),
+            _ => return Err("Invalid operator for numeric comparison".to_string()),
+        })
+    } else {
+        match (left, right, op) {
+            (Value::Text(l), Value::Text(r), op) => Ok(match op {
+                BinaryOperator::Equal => l == r,
+                BinaryOperator::NotEqual => l != r,
+                _ => return Err("Invalid operator for strings".to_string()),
+            }),
+            _ => Err("Type mismatch in comparison".to_string()),
+        }
     }
 }
 
@@ -331,9 +363,28 @@ fn compare_values_for_sort(left: &Value, right: &Value) -> Ordering {
                 Ordering::Equal
             }
         }
+        (Value::Integer(l), Value::Float(r)) => {
+            let l = *l as f64;
+            if l < *r {
+                Ordering::Less
+            } else if l > *r {
+                Ordering::Greater
+            } else {
+                Ordering::Equal
+            }
+        }
+        (Value::Float(l), Value::Integer(r)) => {
+            let r = *r as f64;
+            if l < &r {
+                Ordering::Less
+            } else if l > &r {
+                Ordering::Greater
+            } else {
+                Ordering::Equal
+            }
+        }
         (Value::Text(l), Value::Text(r)) => l.cmp(r),
         (Value::Boolean(l), Value::Boolean(r)) => l.cmp(r),
         _ => Ordering::Equal,
     }
 }
-
