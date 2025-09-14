@@ -15,6 +15,8 @@ pub struct SelectStatement {
     pub columns: Vec<Column>,
     pub from: String,
     pub where_clause: Option<Expression>,
+    pub group_by: Option<Vec<String>>,
+    pub having: Option<Expression>,
     pub order_by: Option<Vec<OrderByExpr>>,
     pub limit: Option<usize>,
     pub offset: Option<usize>,
@@ -24,6 +26,23 @@ pub struct SelectStatement {
 pub enum Column {
     All,
     Named(String),
+    Function(AggregateFunction),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct AggregateFunction {
+    pub function: AggregateFunctionType,
+    pub expr: Box<Expression>,
+    pub alias: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum AggregateFunctionType {
+    Count,
+    Sum,
+    Avg,
+    Min,
+    Max,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -130,4 +149,56 @@ pub enum Value {
 pub struct OrderByExpr {
     pub expr: Expression,
     pub asc: bool,
+}
+
+impl Eq for Value {}
+
+impl PartialOrd for Value {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Value {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        use std::cmp::Ordering;
+        match (self, other) {
+            (Value::Null, Value::Null) => Ordering::Equal,
+            (Value::Null, _) => Ordering::Less,
+            (_, Value::Null) => Ordering::Greater,
+            (Value::Integer(a), Value::Integer(b)) => a.cmp(b),
+            (Value::Float(a), Value::Float(b)) => {
+                if a < b {
+                    Ordering::Less
+                } else if a > b {
+                    Ordering::Greater
+                } else {
+                    Ordering::Equal
+                }
+            }
+            (Value::Integer(a), Value::Float(b)) => {
+                let a = *a as f64;
+                if a < *b {
+                    Ordering::Less
+                } else if a > *b {
+                    Ordering::Greater
+                } else {
+                    Ordering::Equal
+                }
+            }
+            (Value::Float(a), Value::Integer(b)) => {
+                let b = *b as f64;
+                if a < &b {
+                    Ordering::Less
+                } else if a > &b {
+                    Ordering::Greater
+                } else {
+                    Ordering::Equal
+                }
+            }
+            (Value::Text(a), Value::Text(b)) => a.cmp(b),
+            (Value::Boolean(a), Value::Boolean(b)) => a.cmp(b),
+            _ => Ordering::Equal,
+        }
+    }
 }

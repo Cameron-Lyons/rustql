@@ -1,14 +1,8 @@
-mod ast;
-mod executor;
-mod lexer;
-mod parser;
-
+use rustql::process_query;
 use std::io::{self, Write};
 
 fn main() {
-    // Check if running in non-interactive mode (input is piped)
     if atty::is(atty::Stream::Stdin) {
-        // Interactive mode
         println!("RustQL - SQL Engine in Rust");
         println!("Type 'exit' to quit\n");
 
@@ -36,7 +30,6 @@ fn main() {
             }
         }
     } else {
-        // Non-interactive mode - process single query from stdin
         let mut input = String::new();
         io::stdin().read_line(&mut input).unwrap();
         let query = input.trim();
@@ -48,10 +41,4 @@ fn main() {
             }
         }
     }
-}
-
-fn process_query(query: &str) -> Result<String, String> {
-    let tokens = lexer::tokenize(query)?;
-    let statement = parser::parse(tokens)?;
-    executor::execute(statement)
 }

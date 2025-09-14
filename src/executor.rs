@@ -1,31 +1,26 @@
 use crate::ast::*;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
-
 const DATABASE_FILE: &str = "rustql_data.json";
-
 #[derive(Serialize, Deserialize)]
 pub struct Database {
     tables: HashMap<String, Table>,
 }
-
 #[derive(Serialize, Deserialize)]
 struct Table {
     columns: Vec<ColumnDefinition>,
     rows: Vec<Vec<Value>>,
 }
-
 impl Database {
     fn new() -> Self {
         Database {
             tables: HashMap::new(),
         }
     }
-
     fn load() -> Self {
         if Path::new(DATABASE_FILE).exists() {
             let data = fs::read_to_string(DATABASE_FILE).unwrap_or_default();
@@ -34,7 +29,6 @@ impl Database {
             Database::new()
         }
     }
-
     fn save(&self) -> Result<(), String> {
         let data = serde_json::to_string_pretty(self)
             .map_err(|e| format!("Failed to serialize database: {}", e))?;
@@ -43,16 +37,13 @@ impl Database {
         Ok(())
     }
 }
-
 static DATABASE: OnceLock<Mutex<Database>> = OnceLock::new();
-
 fn get_database() -> std::sync::MutexGuard<'static, Database> {
     DATABASE
         .get_or_init(|| Mutex::new(Database::load()))
         .lock()
         .unwrap()
 }
-
 pub fn execute(statement: Statement) -> Result<String, String> {
     match statement {
         Statement::CreateTable(stmt) => execute_create_table(stmt),
@@ -63,14 +54,20 @@ pub fn execute(statement: Statement) -> Result<String, String> {
         Statement::Delete(stmt) => execute_delete(stmt),
     }
 }
-
+#[cfg(test)]
+pub fn reset_database_state() {
+    if Path::new(DATABASE_FILE).exists() {
+        fs::remove_file(DATABASE_FILE).ok();
+    }
+    let mut db = get_database();
+    db.tables.clear();
+    db.save().ok();
+}
 fn execute_create_table(stmt: CreateTableStatement) -> Result<String, String> {
     let mut db = get_database();
-
     if db.tables.contains_key(&stmt.name) {
         return Err(format!("Table '{}' already exists", stmt.name));
     }
-
     db.tables.insert(
         stmt.name.clone(),
         Table {
@@ -78,14 +75,11 @@ fn execute_create_table(stmt: CreateTableStatement) -> Result<String, String> {
             rows: Vec::new(),
         },
     );
-
     db.save()?;
     Ok(format!("Table '{}' created", stmt.name))
 }
-
 fn execute_drop_table(stmt: DropTableStatement) -> Result<String, String> {
     let mut db = get_database();
-
     if db.tables.remove(&stmt.name).is_some() {
         db.save()?;
         Ok(format!("Table '{}' dropped", stmt.name))
@@ -93,17 +87,13 @@ fn execute_drop_table(stmt: DropTableStatement) -> Result<String, String> {
         Err(format!("Table '{}' does not exist", stmt.name))
     }
 }
-
 fn execute_insert(stmt: InsertStatement) -> Result<String, String> {
     let mut db = get_database();
-
     let table = db
         .tables
         .get_mut(&stmt.table)
         .ok_or_else(|| format!("Table '{}' does not exist", stmt.table))?;
-
     let row_count = stmt.values.len();
-
     for values in stmt.values {
         if values.len() != table.columns.len() {
             return Err(format!(
@@ -112,24 +102,38 @@ fn execute_insert(stmt: InsertStatement) -> Result<String, String> {
                 values.len()
             ));
         }
-
         table.rows.push(values);
     }
-
     db.save()?;
     Ok(format!("{} row(s) inserted", row_count))
 }
-
 fn execute_select(stmt: SelectStatement) -> Result<String, String> {
     let db = get_database();
-
     let table = db
         .tables
         .get(&stmt.from)
         .ok_or_else(|| format!("Table '{}' does not exist", stmt.from))?;
-
-    let mut result = String::new();
-
+    let mut filtered_rows: Vec<&Vec<Value>> = Vec::new();
+    for row in &table.rows {
+        let include_row = if let Some(ref where_expr) = stmt.where_clause {
+            evaluate_expression(where_expr, &table.columns, row)?
+        } else {
+            true
+        };
+        if include_row {
+            filtered_rows.push(row);
+        }
+    }
+    if let Some(ref _group_by_cols) = stmt.group_by {
+        return execute_select_with_grouping(stmt, table, filtered_rows);
+    }
+    let has_aggregate = stmt
+        .columns
+        .iter()
+        .any(|col| matches!(col, Column::Function(_)));
+    if has_aggregate {
+        return execute_select_with_aggregates(stmt, table, filtered_rows);
+    }
     let column_indices: Vec<usize> = match &stmt.columns[0] {
         Column::All => (0..table.columns.len()).collect(),
         Column::Named(_) => stmt
@@ -144,28 +148,13 @@ fn execute_select(stmt: SelectStatement) -> Result<String, String> {
                 _ => usize::MAX,
             })
             .collect(),
+        _ => return Err("Invalid column type".to_string()),
     };
-
     for idx in &column_indices {
         if *idx == usize::MAX {
             return Err("Column not found".to_string());
         }
     }
-
-    let mut filtered_rows: Vec<&Vec<Value>> = Vec::new();
-
-    for row in &table.rows {
-        let include_row = if let Some(ref where_expr) = stmt.where_clause {
-            evaluate_expression(where_expr, &table.columns, row)?
-        } else {
-            true
-        };
-
-        if include_row {
-            filtered_rows.push(row);
-        }
-    }
-
     if let Some(ref order_by) = stmt.order_by {
         filtered_rows.sort_by(|a, b| {
             for order_expr in order_by {
@@ -173,7 +162,6 @@ fn execute_select(stmt: SelectStatement) -> Result<String, String> {
                     .unwrap_or(Value::Null);
                 let b_val = evaluate_value_expression(&order_expr.expr, &table.columns, b)
                     .unwrap_or(Value::Null);
-
                 let cmp = compare_values_for_sort(&a_val, &b_val);
                 if cmp != Ordering::Equal {
                     return if order_expr.asc { cmp } else { cmp.reverse() };
@@ -182,44 +170,272 @@ fn execute_select(stmt: SelectStatement) -> Result<String, String> {
             Ordering::Equal
         });
     }
-
     let offset = stmt.offset.unwrap_or(0);
     let limit = stmt.limit.unwrap_or(filtered_rows.len());
-
+    let mut result = String::new();
     for idx in &column_indices {
         result.push_str(&format!("{}\t", table.columns[*idx].name));
     }
     result.push('\n');
     result.push_str(&"-".repeat(40));
     result.push('\n');
-
     for row in filtered_rows.iter().skip(offset).take(limit) {
         for idx in &column_indices {
             result.push_str(&format!("{}\t", format_value(&row[*idx])));
         }
         result.push('\n');
     }
-
     Ok(result)
 }
-
+fn execute_select_with_aggregates(
+    stmt: SelectStatement,
+    table: &Table,
+    rows: Vec<&Vec<Value>>,
+) -> Result<String, String> {
+    let mut result = String::new();
+    for col in &stmt.columns {
+        match col {
+            Column::Function(agg) => {
+                let name = match &agg.alias {
+                    Some(alias) => alias.clone(),
+                    None => format!("{:?}(*)", agg.function),
+                };
+                result.push_str(&format!("{}\t", name));
+            }
+            Column::Named(name) => {
+                result.push_str(&format!("{}\t", name));
+            }
+            _ => {}
+        }
+    }
+    result.push('\n');
+    result.push_str(&"-".repeat(40));
+    result.push('\n');
+    for col in &stmt.columns {
+        match col {
+            Column::Function(agg) => {
+                let value = compute_aggregate(&agg.function, &agg.expr, table, &rows)?;
+                result.push_str(&format!("{}\t", format_value(&value)));
+            }
+            _ => {
+                return Err(
+                    "Cannot mix aggregate and non-aggregate columns without GROUP BY".to_string(),
+                )
+            }
+        }
+    }
+    result.push('\n');
+    Ok(result)
+}
+fn execute_select_with_grouping(
+    stmt: SelectStatement,
+    table: &Table,
+    rows: Vec<&Vec<Value>>,
+) -> Result<String, String> {
+    let group_by_indices: Vec<usize> = stmt
+        .group_by
+        .as_ref()
+        .unwrap()
+        .iter()
+        .map(|name| {
+            table
+                .columns
+                .iter()
+                .position(|c| &c.name == name)
+                .ok_or_else(|| format!("Column '{}' not found", name))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut groups: BTreeMap<Vec<Value>, Vec<&Vec<Value>>> = BTreeMap::new();
+    for row in rows {
+        let key: Vec<Value> = group_by_indices
+            .iter()
+            .map(|&idx| row[idx].clone())
+            .collect();
+        groups.entry(key).or_insert_with(Vec::new).push(row);
+    }
+    let mut result = String::new();
+    for col in &stmt.columns {
+        match col {
+            Column::Function(agg) => {
+                let name = match &agg.alias {
+                    Some(alias) => alias.clone(),
+                    None => format!("{:?}(*)", agg.function),
+                };
+                result.push_str(&format!("{}\t", name));
+            }
+            Column::Named(name) => {
+                result.push_str(&format!("{}\t", name));
+            }
+            _ => {}
+        }
+    }
+    result.push('\n');
+    result.push_str(&"-".repeat(40));
+    result.push('\n');
+    for (_group_key, group_rows) in groups {
+        if let Some(ref having_expr) = stmt.having {
+            let should_include = evaluate_having(&having_expr, &stmt.columns, table, &group_rows)?;
+            if !should_include {
+                continue;
+            }
+        }
+        for col in &stmt.columns {
+            match col {
+                Column::Function(agg) => {
+                    let value = compute_aggregate(&agg.function, &agg.expr, table, &group_rows)?;
+                    result.push_str(&format!("{}\t", format_value(&value)));
+                }
+                Column::Named(name) => {
+                    if let Some(idx) = stmt
+                        .group_by
+                        .as_ref()
+                        .unwrap()
+                        .iter()
+                        .position(|n| n == name)
+                    {
+                        let group_idx = group_by_indices[idx];
+                        result.push_str(&format!("{}\t", format_value(&group_rows[0][group_idx])));
+                    } else {
+                        return Err(format!("Column '{}' must appear in GROUP BY clause", name));
+                    }
+                }
+                _ => {}
+            }
+        }
+        result.push('\n');
+    }
+    Ok(result)
+}
+fn compute_aggregate(
+    func: &AggregateFunctionType,
+    expr: &Expression,
+    table: &Table,
+    rows: &[&Vec<Value>],
+) -> Result<Value, String> {
+    match func {
+        AggregateFunctionType::Count => {
+            if matches!(expr, Expression::Column(name) if name == "*") {
+                Ok(Value::Integer(rows.len() as i64))
+            } else {
+                let mut count = 0;
+                for row in rows {
+                    let val = evaluate_value_expression(expr, &table.columns, row)?;
+                    if !matches!(val, Value::Null) {
+                        count += 1;
+                    }
+                }
+                Ok(Value::Integer(count))
+            }
+        }
+        AggregateFunctionType::Sum => {
+            let mut sum = 0.0;
+            let mut has_value = false;
+            for row in rows {
+                let val = evaluate_value_expression(expr, &table.columns, row)?;
+                match val {
+                    Value::Integer(n) => {
+                        sum += n as f64;
+                        has_value = true;
+                    }
+                    Value::Float(f) => {
+                        sum += f;
+                        has_value = true;
+                    }
+                    Value::Null => {}
+                    _ => return Err("SUM requires numeric values".to_string()),
+                }
+            }
+            if has_value {
+                Ok(Value::Float(sum))
+            } else {
+                Ok(Value::Null)
+            }
+        }
+        AggregateFunctionType::Avg => {
+            let mut sum = 0.0;
+            let mut count = 0;
+            for row in rows {
+                let val = evaluate_value_expression(expr, &table.columns, row)?;
+                match val {
+                    Value::Integer(n) => {
+                        sum += n as f64;
+                        count += 1;
+                    }
+                    Value::Float(f) => {
+                        sum += f;
+                        count += 1;
+                    }
+                    Value::Null => {}
+                    _ => return Err("AVG requires numeric values".to_string()),
+                }
+            }
+            if count > 0 {
+                Ok(Value::Float(sum / count as f64))
+            } else {
+                Ok(Value::Null)
+            }
+        }
+        AggregateFunctionType::Min => {
+            let mut min_val: Option<Value> = None;
+            for row in rows {
+                let val = evaluate_value_expression(expr, &table.columns, row)?;
+                if !matches!(val, Value::Null) {
+                    min_val = Some(match min_val {
+                        None => val,
+                        Some(ref current) => {
+                            if compare_values_for_sort(&val, current) == Ordering::Less {
+                                val
+                            } else {
+                                current.clone()
+                            }
+                        }
+                    });
+                }
+            }
+            Ok(min_val.unwrap_or(Value::Null))
+        }
+        AggregateFunctionType::Max => {
+            let mut max_val: Option<Value> = None;
+            for row in rows {
+                let val = evaluate_value_expression(expr, &table.columns, row)?;
+                if !matches!(val, Value::Null) {
+                    max_val = Some(match max_val {
+                        None => val,
+                        Some(ref current) => {
+                            if compare_values_for_sort(&val, current) == Ordering::Greater {
+                                val
+                            } else {
+                                current.clone()
+                            }
+                        }
+                    });
+                }
+            }
+            Ok(max_val.unwrap_or(Value::Null))
+        }
+    }
+}
+fn evaluate_having(
+    _expr: &Expression,
+    _columns: &[Column],
+    _table: &Table,
+    _rows: &[&Vec<Value>],
+) -> Result<bool, String> {
+    Ok(true)
+}
 fn execute_update(stmt: UpdateStatement) -> Result<String, String> {
     let mut db = get_database();
-
     let table = db
         .tables
         .get_mut(&stmt.table)
         .ok_or_else(|| format!("Table '{}' does not exist", stmt.table))?;
-
     let mut updated_count = 0;
-
     for row in &mut table.rows {
         let should_update = if let Some(ref where_expr) = stmt.where_clause {
             evaluate_expression(where_expr, &table.columns, row)?
         } else {
             true
         };
-
         if should_update {
             for assignment in &stmt.assignments {
                 if let Some(idx) = table
@@ -235,21 +451,16 @@ fn execute_update(stmt: UpdateStatement) -> Result<String, String> {
             updated_count += 1;
         }
     }
-
     db.save()?;
     Ok(format!("{} row(s) updated", updated_count))
 }
-
 fn execute_delete(stmt: DeleteStatement) -> Result<String, String> {
     let mut db = get_database();
-
     let table = db
         .tables
         .get_mut(&stmt.table)
         .ok_or_else(|| format!("Table '{}' does not exist", stmt.table))?;
-
     let initial_count = table.rows.len();
-
     if let Some(ref where_expr) = stmt.where_clause {
         table
             .rows
@@ -257,12 +468,10 @@ fn execute_delete(stmt: DeleteStatement) -> Result<String, String> {
     } else {
         table.rows.clear();
     }
-
     let deleted_count = initial_count - table.rows.len();
     db.save()?;
     Ok(format!("{} row(s) deleted", deleted_count))
 }
-
 fn evaluate_expression(
     expr: &Expression,
     columns: &[ColumnDefinition],
@@ -287,7 +496,6 @@ fn evaluate_expression(
         _ => Err("Invalid expression in WHERE clause".to_string()),
     }
 }
-
 fn evaluate_value_expression(
     expr: &Expression,
     columns: &[ColumnDefinition],
@@ -295,6 +503,9 @@ fn evaluate_value_expression(
 ) -> Result<Value, String> {
     match expr {
         Expression::Column(name) => {
+            if name == "*" {
+                return Ok(Value::Integer(1));
+            }
             let idx = columns
                 .iter()
                 .position(|c| &c.name == name)
@@ -305,9 +516,7 @@ fn evaluate_value_expression(
         _ => Err("Complex expressions not yet supported".to_string()),
     }
 }
-
 fn compare_values(left: &Value, op: &BinaryOperator, right: &Value) -> Result<bool, String> {
-    // Convert values to compatible types for comparison
     let (left_num, right_num) = match (left, right) {
         (Value::Integer(l), Value::Integer(r)) => (Some(*l as f64), Some(*r as f64)),
         (Value::Float(l), Value::Float(r)) => (Some(*l), Some(*r)),
@@ -315,7 +524,6 @@ fn compare_values(left: &Value, op: &BinaryOperator, right: &Value) -> Result<bo
         (Value::Float(l), Value::Integer(r)) => (Some(*l), Some(*r as f64)),
         _ => (None, None),
     };
-
     if let (Some(l), Some(r)) = (left_num, right_num) {
         Ok(match op {
             BinaryOperator::Equal => (l - r).abs() < f64::EPSILON,
@@ -337,7 +545,6 @@ fn compare_values(left: &Value, op: &BinaryOperator, right: &Value) -> Result<bo
         }
     }
 }
-
 fn format_value(value: &Value) -> String {
     match value {
         Value::Null => "NULL".to_string(),
@@ -347,7 +554,6 @@ fn format_value(value: &Value) -> String {
         Value::Boolean(b) => b.to_string(),
     }
 }
-
 fn compare_values_for_sort(left: &Value, right: &Value) -> Ordering {
     match (left, right) {
         (Value::Null, Value::Null) => Ordering::Equal,
@@ -388,3 +594,4 @@ fn compare_values_for_sort(left: &Value, right: &Value) -> Ordering {
         _ => Ordering::Equal,
     }
 }
+

@@ -1,3 +1,58 @@
 {
-  "tables": {}
+  "tables": {
+    "users": {
+      "columns": [
+        {
+          "name": "id",
+          "data_type": "Integer",
+          "nullable": true
+        },
+        {
+          "name": "name",
+          "data_type": "Text",
+          "nullable": true
+        },
+        {
+          "name": "age",
+          "data_type": "Integer",
+          "nullable": true
+        }
+      ],
+      "rows": [
+        [
+          {
+            "Integer": 1
+          },
+          {
+            "Text": "Alice"
+          },
+          {
+            "Integer": 25
+          }
+        ],
+        [
+          {
+            "Integer": 2
+          },
+          {
+            "Text": "Bob"
+          },
+          {
+            "Integer": 30
+          }
+        ],
+        [
+          {
+            "Integer": 3
+          },
+          {
+            "Text": "Charlie"
+          },
+          {
+            "Integer": 35
+          }
+        ]
+      ]
+    }
+  }
 }

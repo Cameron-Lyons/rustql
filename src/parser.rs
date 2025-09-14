@@ -70,6 +70,21 @@ impl Parser {
             None
         };
 
+        let group_by = if *self.current_token() == Token::Group {
+            self.advance();
+            self.consume(Token::By)?;
+            Some(self.parse_group_by()?)
+        } else {
+            None
+        };
+
+        let having = if *self.current_token() == Token::Having {
+            self.advance();
+            Some(self.parse_expression()?)
+        } else {
+            None
+        };
+
         let order_by = if *self.current_token() == Token::Order {
             self.advance();
             self.consume(Token::By)?;
@@ -102,6 +117,8 @@ impl Parser {
             columns,
             from: table,
             where_clause,
+            group_by,
+            having,
             order_by,
             limit,
             offset,
@@ -116,13 +133,28 @@ impl Parser {
             columns.push(Column::All);
         } else {
             loop {
-                match self.current_token() {
+                let column = match self.current_token() {
+                    Token::Count | Token::Sum | Token::Avg | Token::Min | Token::Max => {
+                        self.parse_aggregate_function()?
+                    }
                     Token::Identifier(name) => {
-                        columns.push(Column::Named(name.clone()));
+                        let name = name.clone();
                         self.advance();
+
+                        if *self.current_token() == Token::As {
+                            self.advance();
+                            match self.advance() {
+                                Token::Identifier(_alias) => Column::Named(name),
+                                _ => return Err("Expected alias after AS".to_string()),
+                            }
+                        } else {
+                            Column::Named(name)
+                        }
                     }
                     _ => break,
-                }
+                };
+
+                columns.push(column);
 
                 if *self.current_token() != Token::Comma {
                     break;
@@ -133,6 +165,63 @@ impl Parser {
 
         if columns.is_empty() {
             return Err("Expected column names or *".to_string());
+        }
+
+        Ok(columns)
+    }
+
+    fn parse_aggregate_function(&mut self) -> Result<Column, String> {
+        let func_type = match self.advance() {
+            Token::Count => AggregateFunctionType::Count,
+            Token::Sum => AggregateFunctionType::Sum,
+            Token::Avg => AggregateFunctionType::Avg,
+            Token::Min => AggregateFunctionType::Min,
+            Token::Max => AggregateFunctionType::Max,
+            _ => return Err("Expected aggregate function".to_string()),
+        };
+
+        self.consume(Token::LeftParen)?;
+
+        let expr = if *self.current_token() == Token::Star {
+            self.advance();
+            Box::new(Expression::Column("*".to_string()))
+        } else {
+            Box::new(self.parse_expression()?)
+        };
+
+        self.consume(Token::RightParen)?;
+
+        let alias = if *self.current_token() == Token::As {
+            self.advance();
+            match self.advance() {
+                Token::Identifier(name) => Some(name),
+                _ => return Err("Expected alias after AS".to_string()),
+            }
+        } else {
+            None
+        };
+
+        Ok(Column::Function(AggregateFunction {
+            function: func_type,
+            expr,
+            alias,
+        }))
+    }
+
+    fn parse_group_by(&mut self) -> Result<Vec<String>, String> {
+        let mut columns = Vec::new();
+
+        loop {
+            match self.advance() {
+                Token::Identifier(name) => columns.push(name),
+                _ => return Err("Expected column name in GROUP BY".to_string()),
+            }
+
+            if *self.current_token() == Token::Comma {
+                self.advance();
+            } else {
+                break;
+            }
         }
 
         Ok(columns)
