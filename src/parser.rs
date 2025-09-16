@@ -242,14 +242,9 @@ impl Parser {
             self.advance();
             let mut cols = Vec::new();
 
-            loop {
-                match self.current_token() {
-                    Token::Identifier(name) => {
-                        cols.push(name.clone());
-                        self.advance();
-                    }
-                    _ => break,
-                }
+            while let Token::Identifier(name) = self.current_token() {
+                cols.push(name.clone());
+                self.advance();
 
                 if *self.current_token() == Token::Comma {
                     self.advance();
@@ -713,3 +708,4 @@ pub fn parse(tokens: Vec<Token>) -> Result<Statement, String> {
     let mut parser = Parser::new(tokens);
     parser.parse_statement()
 }
+
