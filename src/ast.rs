@@ -8,18 +8,35 @@ pub enum Statement {
     Delete(DeleteStatement),
     CreateTable(CreateTableStatement),
     DropTable(DropTableStatement),
+    AlterTable(AlterTableStatement),
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SelectStatement {
     pub columns: Vec<Column>,
     pub from: String,
+    pub joins: Vec<Join>,
     pub where_clause: Option<Expression>,
     pub group_by: Option<Vec<String>>,
     pub having: Option<Expression>,
     pub order_by: Option<Vec<OrderByExpr>>,
     pub limit: Option<usize>,
     pub offset: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Join {
+    pub join_type: JoinType,
+    pub table: String,
+    pub on: Expression,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum JoinType {
+    Inner,
+    Left,
+    Right,
+    Full,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -98,6 +115,19 @@ pub struct DropTableStatement {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct AlterTableStatement {
+    pub table: String,
+    pub operation: AlterOperation,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum AlterOperation {
+    AddColumn(ColumnDefinition),
+    DropColumn(String),
+    RenameColumn { old: String, new: String },
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum Expression {
     BinaryOp {
         left: Box<Expression>,
@@ -110,6 +140,7 @@ pub enum Expression {
     },
     Column(String),
     Value(Value),
+    Function(AggregateFunction),
 }
 
 #[derive(Debug, Clone, PartialEq)]

@@ -25,7 +25,14 @@ pub fn reset_database() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Once;
+
+    static INIT: Once = Once::new();
+
     fn setup_test() {
+        INIT.call_once(|| {
+            // First test run - initialize
+        });
         reset_database();
     }
     #[test]

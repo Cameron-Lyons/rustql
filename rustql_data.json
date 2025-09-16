@@ -1,5 +1,81 @@
 {
   "tables": {
+    "sales": {
+      "columns": [
+        {
+          "name": "id",
+          "data_type": "Integer",
+          "nullable": true
+        },
+        {
+          "name": "product",
+          "data_type": "Text",
+          "nullable": true
+        },
+        {
+          "name": "amount",
+          "data_type": "Float",
+          "nullable": true
+        }
+      ],
+      "rows": [
+        [
+          {
+            "Integer": 1
+          },
+          {
+            "Text": "Apple"
+          },
+          {
+            "Float": 100.0
+          }
+        ],
+        [
+          {
+            "Integer": 2
+          },
+          {
+            "Text": "Apple"
+          },
+          {
+            "Float": 150.0
+          }
+        ],
+        [
+          {
+            "Integer": 3
+          },
+          {
+            "Text": "Banana"
+          },
+          {
+            "Float": 50.0
+          }
+        ],
+        [
+          {
+            "Integer": 4
+          },
+          {
+            "Text": "Banana"
+          },
+          {
+            "Float": 75.0
+          }
+        ],
+        [
+          {
+            "Integer": 5
+          },
+          {
+            "Text": "Orange"
+          },
+          {
+            "Float": 200.0
+          }
+        ]
+      ]
+    },
     "users": {
       "columns": [
         {

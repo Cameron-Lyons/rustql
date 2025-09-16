@@ -47,6 +47,7 @@ impl Parser {
             Token::Delete => self.parse_delete(),
             Token::Create => self.parse_create(),
             Token::Drop => self.parse_drop(),
+            Token::Alter => self.parse_alter(),
             _ => Err(format!("Unexpected token: {:?}", self.current_token())),
         }
     }
@@ -116,6 +117,7 @@ impl Parser {
         Ok(Statement::Select(SelectStatement {
             columns,
             from: table,
+            joins: Vec::new(), // TODO: implement JOIN parsing
             where_clause,
             group_by,
             having,
@@ -458,6 +460,58 @@ impl Parser {
         Ok(Statement::DropTable(DropTableStatement { name }))
     }
 
+    fn parse_alter(&mut self) -> Result<Statement, String> {
+        self.consume(Token::Alter)?;
+        self.consume(Token::Table)?;
+
+        let table = match self.advance() {
+            Token::Identifier(name) => name,
+            _ => return Err("Expected table name".to_string()),
+        };
+
+        let operation = match self.current_token() {
+            Token::Add => {
+                self.advance();
+                self.consume(Token::Column)?;
+                let name = match self.advance() {
+                    Token::Identifier(n) => n,
+                    _ => return Err("Expected column name".to_string()),
+                };
+                let data_type = self.parse_data_type()?;
+                AlterOperation::AddColumn(ColumnDefinition {
+                    name,
+                    data_type,
+                    nullable: true,
+                })
+            }
+            Token::Drop => {
+                self.advance();
+                self.consume(Token::Column)?;
+                match self.advance() {
+                    Token::Identifier(name) => AlterOperation::DropColumn(name),
+                    _ => return Err("Expected column name".to_string()),
+                }
+            }
+            Token::Rename => {
+                self.advance();
+                self.consume(Token::Column)?;
+                let old = match self.advance() {
+                    Token::Identifier(n) => n,
+                    _ => return Err("Expected column name".to_string()),
+                };
+                self.consume(Token::To)?;
+                let new = match self.advance() {
+                    Token::Identifier(n) => n,
+                    _ => return Err("Expected new column name".to_string()),
+                };
+                AlterOperation::RenameColumn { old, new }
+            }
+            _ => return Err("Expected ADD, DROP, or RENAME after ALTER TABLE".to_string()),
+        };
+
+        Ok(Statement::AlterTable(AlterTableStatement { table, operation }))
+    }
+
     fn parse_expression(&mut self) -> Result<Expression, String> {
         self.parse_or()
     }
@@ -586,6 +640,14 @@ impl Parser {
 
     fn parse_primary(&mut self) -> Result<Expression, String> {
         match self.current_token().clone() {
+            Token::Count | Token::Sum | Token::Avg | Token::Min | Token::Max => {
+                let agg = self.parse_aggregate_function()?;
+                if let Column::Function(func) = agg {
+                    Ok(Expression::Function(func))
+                } else {
+                    Err("Expected aggregate function".to_string())
+                }
+            }
             Token::Identifier(name) => {
                 self.advance();
                 Ok(Expression::Column(name))

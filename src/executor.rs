@@ -4,7 +4,6 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::Path;
-use std::sync::{Mutex, OnceLock};
 const DATABASE_FILE: &str = "rustql_data.json";
 #[derive(Serialize, Deserialize)]
 pub struct Database {
@@ -37,12 +36,25 @@ impl Database {
         Ok(())
     }
 }
+use std::sync::{Mutex, OnceLock};
+
 static DATABASE: OnceLock<Mutex<Database>> = OnceLock::new();
+
 fn get_database() -> std::sync::MutexGuard<'static, Database> {
-    DATABASE
-        .get_or_init(|| Mutex::new(Database::load()))
-        .lock()
-        .unwrap()
+    #[cfg(test)]
+    {
+        DATABASE
+            .get_or_init(|| Mutex::new(Database::new()))
+            .lock()
+            .unwrap()
+    }
+    #[cfg(not(test))]
+    {
+        DATABASE
+            .get_or_init(|| Mutex::new(Database::load()))
+            .lock()
+            .unwrap()
+    }
 }
 pub fn execute(statement: Statement) -> Result<String, String> {
     match statement {
@@ -52,16 +64,13 @@ pub fn execute(statement: Statement) -> Result<String, String> {
         Statement::Select(stmt) => execute_select(stmt),
         Statement::Update(stmt) => execute_update(stmt),
         Statement::Delete(stmt) => execute_delete(stmt),
+        Statement::AlterTable(stmt) => execute_alter_table(stmt),
     }
 }
 #[cfg(test)]
 pub fn reset_database_state() {
-    if Path::new(DATABASE_FILE).exists() {
-        fs::remove_file(DATABASE_FILE).ok();
-    }
     let mut db = get_database();
     db.tables.clear();
-    db.save().ok();
 }
 fn execute_create_table(stmt: CreateTableStatement) -> Result<String, String> {
     let mut db = get_database();
@@ -75,12 +84,14 @@ fn execute_create_table(stmt: CreateTableStatement) -> Result<String, String> {
             rows: Vec::new(),
         },
     );
+    #[cfg(not(test))]
     db.save()?;
     Ok(format!("Table '{}' created", stmt.name))
 }
 fn execute_drop_table(stmt: DropTableStatement) -> Result<String, String> {
     let mut db = get_database();
     if db.tables.remove(&stmt.name).is_some() {
+        #[cfg(not(test))]
         db.save()?;
         Ok(format!("Table '{}' dropped", stmt.name))
     } else {
@@ -104,6 +115,7 @@ fn execute_insert(stmt: InsertStatement) -> Result<String, String> {
         }
         table.rows.push(values);
     }
+    #[cfg(not(test))]
     db.save()?;
     Ok(format!("{} row(s) inserted", row_count))
 }
@@ -416,12 +428,66 @@ fn compute_aggregate(
     }
 }
 fn evaluate_having(
-    _expr: &Expression,
+    expr: &Expression,
     _columns: &[Column],
-    _table: &Table,
-    _rows: &[&Vec<Value>],
+    table: &Table,
+    rows: &[&Vec<Value>],
 ) -> Result<bool, String> {
-    Ok(true)
+    match expr {
+        Expression::BinaryOp { left, op, right } => {
+            match op {
+                BinaryOperator::And => {
+                    Ok(evaluate_having(left, _columns, table, rows)?
+                        && evaluate_having(right, _columns, table, rows)?)
+                }
+                BinaryOperator::Or => {
+                    Ok(evaluate_having(left, _columns, table, rows)?
+                        || evaluate_having(right, _columns, table, rows)?)
+                }
+                _ => {
+                    let left_val = evaluate_having_value(left, _columns, table, rows)?;
+                    let right_val = evaluate_having_value(right, _columns, table, rows)?;
+                    compare_values(&left_val, op, &right_val)
+                }
+            }
+        }
+        Expression::UnaryOp { op, expr } => match op {
+            UnaryOperator::Not => Ok(!evaluate_having(expr, _columns, table, rows)?),
+            _ => Err("Unsupported unary operation in HAVING clause".to_string()),
+        },
+        _ => Err("Invalid expression in HAVING clause".to_string()),
+    }
+}
+
+fn evaluate_having_value(
+    expr: &Expression,
+    _columns: &[Column],
+    table: &Table,
+    rows: &[&Vec<Value>],
+) -> Result<Value, String> {
+    match expr {
+        Expression::Function(agg) => {
+            compute_aggregate(&agg.function, &agg.expr, table, rows)
+        }
+        Expression::Value(val) => Ok(val.clone()),
+        Expression::Column(name) => {
+            // In HAVING, column names should refer to grouped columns
+            if !rows.is_empty() {
+                if let Some(idx) = table
+                    .columns
+                    .iter()
+                    .position(|c| &c.name == name)
+                {
+                    Ok(rows[0][idx].clone())
+                } else {
+                    Err(format!("Column '{}' not found in HAVING clause", name))
+                }
+            } else {
+                Err("No rows in group for HAVING clause".to_string())
+            }
+        }
+        _ => Err("Complex expressions not yet supported in HAVING".to_string()),
+    }
 }
 fn execute_update(stmt: UpdateStatement) -> Result<String, String> {
     let mut db = get_database();
@@ -451,6 +517,7 @@ fn execute_update(stmt: UpdateStatement) -> Result<String, String> {
             updated_count += 1;
         }
     }
+    #[cfg(not(test))]
     db.save()?;
     Ok(format!("{} row(s) updated", updated_count))
 }
@@ -469,6 +536,7 @@ fn execute_delete(stmt: DeleteStatement) -> Result<String, String> {
         table.rows.clear();
     }
     let deleted_count = initial_count - table.rows.len();
+    #[cfg(not(test))]
     db.save()?;
     Ok(format!("{} row(s) deleted", deleted_count))
 }
@@ -554,6 +622,92 @@ fn format_value(value: &Value) -> String {
         Value::Boolean(b) => b.to_string(),
     }
 }
+fn execute_alter_table(stmt: AlterTableStatement) -> Result<String, String> {
+    let mut db = get_database();
+
+    let table = db
+        .tables
+        .get_mut(&stmt.table)
+        .ok_or_else(|| format!("Table '{}' does not exist", stmt.table))?;
+
+    match stmt.operation {
+        AlterOperation::AddColumn(col_def) => {
+            // Check if column already exists
+            if table.columns.iter().any(|c| c.name == col_def.name) {
+                return Err(format!("Column '{}' already exists", col_def.name));
+            }
+
+            // Add the column definition
+            table.columns.push(col_def.clone());
+
+            // Add default value to all existing rows
+            let default_value = match col_def.data_type {
+                DataType::Integer => Value::Integer(0),
+                DataType::Float => Value::Float(0.0),
+                DataType::Text => Value::Text(String::new()),
+                DataType::Boolean => Value::Boolean(false),
+            };
+
+            for row in &mut table.rows {
+                row.push(default_value.clone());
+            }
+
+            #[cfg(not(test))]
+            db.save()?;
+
+            Ok(format!("Column '{}' added to table '{}'", col_def.name, stmt.table))
+        }
+        AlterOperation::DropColumn(col_name) => {
+            // Find the column index
+            let col_index = table
+                .columns
+                .iter()
+                .position(|c| c.name == col_name)
+                .ok_or_else(|| format!("Column '{}' does not exist", col_name))?;
+
+            // Remove the column definition
+            table.columns.remove(col_index);
+
+            // Remove the column data from all rows
+            for row in &mut table.rows {
+                if col_index < row.len() {
+                    row.remove(col_index);
+                }
+            }
+
+            #[cfg(not(test))]
+            db.save()?;
+
+            Ok(format!("Column '{}' dropped from table '{}'", col_name, stmt.table))
+        }
+        AlterOperation::RenameColumn { old, new } => {
+            // Check if column exists
+            let col_exists = table.columns.iter().any(|c| c.name == old);
+            if !col_exists {
+                return Err(format!("Column '{}' does not exist", old));
+            }
+
+            // Check if new name already exists
+            if table.columns.iter().any(|c| c.name == new && c.name != old) {
+                return Err(format!("Column '{}' already exists", new));
+            }
+
+            // Find and rename the column
+            for column in &mut table.columns {
+                if column.name == old {
+                    column.name = new.clone();
+                    break;
+                }
+            }
+
+            #[cfg(not(test))]
+            db.save()?;
+
+            Ok(format!("Column '{}' renamed to '{}' in table '{}'", old, new, stmt.table))
+        }
+    }
+}
+
 fn compare_values_for_sort(left: &Value, right: &Value) -> Ordering {
     match (left, right) {
         (Value::Null, Value::Null) => Ordering::Equal,
