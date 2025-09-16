@@ -267,4 +267,3 @@ mod tests {
         assert!(result.unwrap_err().contains("Column count mismatch"));
     }
 }
-

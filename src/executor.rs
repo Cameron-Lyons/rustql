@@ -232,7 +232,7 @@ fn execute_select_with_aggregates(
             _ => {
                 return Err(
                     "Cannot mix aggregate and non-aggregate columns without GROUP BY".to_string(),
-                )
+                );
             }
         }
     }
@@ -434,23 +434,17 @@ fn evaluate_having(
     rows: &[&Vec<Value>],
 ) -> Result<bool, String> {
     match expr {
-        Expression::BinaryOp { left, op, right } => {
-            match op {
-                BinaryOperator::And => {
-                    Ok(evaluate_having(left, _columns, table, rows)?
-                        && evaluate_having(right, _columns, table, rows)?)
-                }
-                BinaryOperator::Or => {
-                    Ok(evaluate_having(left, _columns, table, rows)?
-                        || evaluate_having(right, _columns, table, rows)?)
-                }
-                _ => {
-                    let left_val = evaluate_having_value(left, _columns, table, rows)?;
-                    let right_val = evaluate_having_value(right, _columns, table, rows)?;
-                    compare_values(&left_val, op, &right_val)
-                }
+        Expression::BinaryOp { left, op, right } => match op {
+            BinaryOperator::And => Ok(evaluate_having(left, _columns, table, rows)?
+                && evaluate_having(right, _columns, table, rows)?),
+            BinaryOperator::Or => Ok(evaluate_having(left, _columns, table, rows)?
+                || evaluate_having(right, _columns, table, rows)?),
+            _ => {
+                let left_val = evaluate_having_value(left, _columns, table, rows)?;
+                let right_val = evaluate_having_value(right, _columns, table, rows)?;
+                compare_values(&left_val, op, &right_val)
             }
-        }
+        },
         Expression::UnaryOp { op, expr } => match op {
             UnaryOperator::Not => Ok(!evaluate_having(expr, _columns, table, rows)?),
             _ => Err("Unsupported unary operation in HAVING clause".to_string()),
@@ -466,18 +460,12 @@ fn evaluate_having_value(
     rows: &[&Vec<Value>],
 ) -> Result<Value, String> {
     match expr {
-        Expression::Function(agg) => {
-            compute_aggregate(&agg.function, &agg.expr, table, rows)
-        }
+        Expression::Function(agg) => compute_aggregate(&agg.function, &agg.expr, table, rows),
         Expression::Value(val) => Ok(val.clone()),
         Expression::Column(name) => {
             // In HAVING, column names should refer to grouped columns
             if !rows.is_empty() {
-                if let Some(idx) = table
-                    .columns
-                    .iter()
-                    .position(|c| &c.name == name)
-                {
+                if let Some(idx) = table.columns.iter().position(|c| &c.name == name) {
                     Ok(rows[0][idx].clone())
                 } else {
                     Err(format!("Column '{}' not found in HAVING clause", name))
@@ -632,15 +620,12 @@ fn execute_alter_table(stmt: AlterTableStatement) -> Result<String, String> {
 
     match stmt.operation {
         AlterOperation::AddColumn(col_def) => {
-            // Check if column already exists
             if table.columns.iter().any(|c| c.name == col_def.name) {
                 return Err(format!("Column '{}' already exists", col_def.name));
             }
 
-            // Add the column definition
             table.columns.push(col_def.clone());
 
-            // Add default value to all existing rows
             let default_value = match col_def.data_type {
                 DataType::Integer => Value::Integer(0),
                 DataType::Float => Value::Float(0.0),
@@ -655,20 +640,20 @@ fn execute_alter_table(stmt: AlterTableStatement) -> Result<String, String> {
             #[cfg(not(test))]
             db.save()?;
 
-            Ok(format!("Column '{}' added to table '{}'", col_def.name, stmt.table))
+            Ok(format!(
+                "Column '{}' added to table '{}'",
+                col_def.name, stmt.table
+            ))
         }
         AlterOperation::DropColumn(col_name) => {
-            // Find the column index
             let col_index = table
                 .columns
                 .iter()
                 .position(|c| c.name == col_name)
                 .ok_or_else(|| format!("Column '{}' does not exist", col_name))?;
 
-            // Remove the column definition
             table.columns.remove(col_index);
 
-            // Remove the column data from all rows
             for row in &mut table.rows {
                 if col_index < row.len() {
                     row.remove(col_index);
@@ -678,21 +663,21 @@ fn execute_alter_table(stmt: AlterTableStatement) -> Result<String, String> {
             #[cfg(not(test))]
             db.save()?;
 
-            Ok(format!("Column '{}' dropped from table '{}'", col_name, stmt.table))
+            Ok(format!(
+                "Column '{}' dropped from table '{}'",
+                col_name, stmt.table
+            ))
         }
         AlterOperation::RenameColumn { old, new } => {
-            // Check if column exists
             let col_exists = table.columns.iter().any(|c| c.name == old);
             if !col_exists {
                 return Err(format!("Column '{}' does not exist", old));
             }
 
-            // Check if new name already exists
             if table.columns.iter().any(|c| c.name == new && c.name != old) {
                 return Err(format!("Column '{}' already exists", new));
             }
 
-            // Find and rename the column
             for column in &mut table.columns {
                 if column.name == old {
                     column.name = new.clone();
@@ -703,7 +688,10 @@ fn execute_alter_table(stmt: AlterTableStatement) -> Result<String, String> {
             #[cfg(not(test))]
             db.save()?;
 
-            Ok(format!("Column '{}' renamed to '{}' in table '{}'", old, new, stmt.table))
+            Ok(format!(
+                "Column '{}' renamed to '{}' in table '{}'",
+                old, new, stmt.table
+            ))
         }
     }
 }
@@ -748,4 +736,3 @@ fn compare_values_for_sort(left: &Value, right: &Value) -> Ordering {
         _ => Ordering::Equal,
     }
 }
-

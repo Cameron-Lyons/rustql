@@ -509,7 +509,10 @@ impl Parser {
             _ => return Err("Expected ADD, DROP, or RENAME after ALTER TABLE".to_string()),
         };
 
-        Ok(Statement::AlterTable(AlterTableStatement { table, operation }))
+        Ok(Statement::AlterTable(AlterTableStatement {
+            table,
+            operation,
+        }))
     }
 
     fn parse_expression(&mut self) -> Result<Expression, String> {
