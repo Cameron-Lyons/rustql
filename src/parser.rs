@@ -117,7 +117,7 @@ impl Parser {
         Ok(Statement::Select(SelectStatement {
             columns,
             from: table,
-            joins: Vec::new(), // TODO: implement JOIN parsing
+            joins: Vec::new(),
             where_clause,
             group_by,
             having,
@@ -708,4 +708,3 @@ pub fn parse(tokens: Vec<Token>) -> Result<Statement, String> {
     let mut parser = Parser::new(tokens);
     parser.parse_statement()
 }
-

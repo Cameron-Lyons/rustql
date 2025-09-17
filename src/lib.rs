@@ -30,9 +30,7 @@ mod tests {
     static INIT: Once = Once::new();
 
     fn setup_test() {
-        INIT.call_once(|| {
-            // First test run - initialize
-        });
+        INIT.call_once(|| {});
         reset_database();
     }
     #[test]

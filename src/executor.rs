@@ -4,6 +4,7 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::Path;
+
 const DATABASE_FILE: &str = "rustql_data.json";
 #[derive(Serialize, Deserialize)]
 pub struct Database {
@@ -463,7 +464,6 @@ fn evaluate_having_value(
         Expression::Function(agg) => compute_aggregate(&agg.function, &agg.expr, table, rows),
         Expression::Value(val) => Ok(val.clone()),
         Expression::Column(name) => {
-            // In HAVING, column names should refer to grouped columns
             if !rows.is_empty() {
                 if let Some(idx) = table.columns.iter().position(|c| &c.name == name) {
                     Ok(rows[0][idx].clone())
