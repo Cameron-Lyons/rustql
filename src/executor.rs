@@ -5,22 +5,28 @@ use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::Path;
 
+#[cfg(not(test))]
 const DATABASE_FILE: &str = "rustql_data.json";
+
 #[derive(Serialize, Deserialize)]
 pub struct Database {
     tables: HashMap<String, Table>,
 }
+
 #[derive(Serialize, Deserialize)]
 struct Table {
     columns: Vec<ColumnDefinition>,
     rows: Vec<Vec<Value>>,
 }
+
 impl Database {
     fn new() -> Self {
         Database {
             tables: HashMap::new(),
         }
     }
+
+    #[cfg(not(test))]
     fn load() -> Self {
         if Path::new(DATABASE_FILE).exists() {
             let data = fs::read_to_string(DATABASE_FILE).unwrap_or_default();
@@ -29,6 +35,8 @@ impl Database {
             Database::new()
         }
     }
+
+    #[cfg(not(test))]
     fn save(&self) -> Result<(), String> {
         let data = serde_json::to_string_pretty(self)
             .map_err(|e| format!("Failed to serialize database: {}", e))?;
@@ -37,6 +45,7 @@ impl Database {
         Ok(())
     }
 }
+
 use std::sync::{Mutex, OnceLock};
 
 static DATABASE: OnceLock<Mutex<Database>> = OnceLock::new();
@@ -57,6 +66,7 @@ fn get_database() -> std::sync::MutexGuard<'static, Database> {
             .unwrap()
     }
 }
+
 pub fn execute(statement: Statement) -> Result<String, String> {
     match statement {
         Statement::CreateTable(stmt) => execute_create_table(stmt),
@@ -68,11 +78,13 @@ pub fn execute(statement: Statement) -> Result<String, String> {
         Statement::AlterTable(stmt) => execute_alter_table(stmt),
     }
 }
+
 #[cfg(test)]
 pub fn reset_database_state() {
     let mut db = get_database();
     db.tables.clear();
 }
+
 fn execute_create_table(stmt: CreateTableStatement) -> Result<String, String> {
     let mut db = get_database();
     if db.tables.contains_key(&stmt.name) {
@@ -89,6 +101,7 @@ fn execute_create_table(stmt: CreateTableStatement) -> Result<String, String> {
     db.save()?;
     Ok(format!("Table '{}' created", stmt.name))
 }
+
 fn execute_drop_table(stmt: DropTableStatement) -> Result<String, String> {
     let mut db = get_database();
     if db.tables.remove(&stmt.name).is_some() {
@@ -99,6 +112,7 @@ fn execute_drop_table(stmt: DropTableStatement) -> Result<String, String> {
         Err(format!("Table '{}' does not exist", stmt.name))
     }
 }
+
 fn execute_insert(stmt: InsertStatement) -> Result<String, String> {
     let mut db = get_database();
     let table = db
@@ -120,12 +134,14 @@ fn execute_insert(stmt: InsertStatement) -> Result<String, String> {
     db.save()?;
     Ok(format!("{} row(s) inserted", row_count))
 }
+
 fn execute_select(stmt: SelectStatement) -> Result<String, String> {
     let db = get_database();
     let table = db
         .tables
         .get(&stmt.from)
         .ok_or_else(|| format!("Table '{}' does not exist", stmt.from))?;
+
     let mut filtered_rows: Vec<&Vec<Value>> = Vec::new();
     for row in &table.rows {
         let include_row = if let Some(ref where_expr) = stmt.where_clause {
@@ -137,16 +153,20 @@ fn execute_select(stmt: SelectStatement) -> Result<String, String> {
             filtered_rows.push(row);
         }
     }
-    if let Some(ref _group_by_cols) = stmt.group_by {
+
+    if let Some(_) = stmt.group_by {
         return execute_select_with_grouping(stmt, table, filtered_rows);
     }
+
     let has_aggregate = stmt
         .columns
         .iter()
         .any(|col| matches!(col, Column::Function(_)));
+
     if has_aggregate {
         return execute_select_with_aggregates(stmt, table, filtered_rows);
     }
+
     let column_indices: Vec<usize> = match &stmt.columns[0] {
         Column::All => (0..table.columns.len()).collect(),
         Column::Named(_) => stmt
@@ -163,11 +183,13 @@ fn execute_select(stmt: SelectStatement) -> Result<String, String> {
             .collect(),
         _ => return Err("Invalid column type".to_string()),
     };
+
     for idx in &column_indices {
         if *idx == usize::MAX {
             return Err("Column not found".to_string());
         }
     }
+
     if let Some(ref order_by) = stmt.order_by {
         filtered_rows.sort_by(|a, b| {
             for order_expr in order_by {
@@ -183,8 +205,10 @@ fn execute_select(stmt: SelectStatement) -> Result<String, String> {
             Ordering::Equal
         });
     }
+
     let offset = stmt.offset.unwrap_or(0);
     let limit = stmt.limit.unwrap_or(filtered_rows.len());
+
     let mut result = String::new();
     for idx in &column_indices {
         result.push_str(&format!("{}\t", table.columns[*idx].name));
@@ -192,14 +216,17 @@ fn execute_select(stmt: SelectStatement) -> Result<String, String> {
     result.push('\n');
     result.push_str(&"-".repeat(40));
     result.push('\n');
+
     for row in filtered_rows.iter().skip(offset).take(limit) {
         for idx in &column_indices {
             result.push_str(&format!("{}\t", format_value(&row[*idx])));
         }
         result.push('\n');
     }
+
     Ok(result)
 }
+
 fn execute_select_with_aggregates(
     stmt: SelectStatement,
     table: &Table,
@@ -209,10 +236,10 @@ fn execute_select_with_aggregates(
     for col in &stmt.columns {
         match col {
             Column::Function(agg) => {
-                let name = match &agg.alias {
-                    Some(alias) => alias.clone(),
-                    None => format!("{:?}(*)", agg.function),
-                };
+                let name = agg
+                    .alias
+                    .clone()
+                    .unwrap_or_else(|| format!("{:?}(*)", agg.function));
                 result.push_str(&format!("{}\t", name));
             }
             Column::Named(name) => {
@@ -224,6 +251,7 @@ fn execute_select_with_aggregates(
     result.push('\n');
     result.push_str(&"-".repeat(40));
     result.push('\n');
+
     for col in &stmt.columns {
         match col {
             Column::Function(agg) => {
@@ -240,6 +268,7 @@ fn execute_select_with_aggregates(
     result.push('\n');
     Ok(result)
 }
+
 fn execute_select_with_grouping(
     stmt: SelectStatement,
     table: &Table,
@@ -258,6 +287,7 @@ fn execute_select_with_grouping(
                 .ok_or_else(|| format!("Column '{}' not found", name))
         })
         .collect::<Result<Vec<_>, _>>()?;
+
     let mut groups: BTreeMap<Vec<Value>, Vec<&Vec<Value>>> = BTreeMap::new();
     for row in rows {
         let key: Vec<Value> = group_by_indices
@@ -266,14 +296,15 @@ fn execute_select_with_grouping(
             .collect();
         groups.entry(key).or_insert_with(Vec::new).push(row);
     }
+
     let mut result = String::new();
     for col in &stmt.columns {
         match col {
             Column::Function(agg) => {
-                let name = match &agg.alias {
-                    Some(alias) => alias.clone(),
-                    None => format!("{:?}(*)", agg.function),
-                };
+                let name = agg
+                    .alias
+                    .clone()
+                    .unwrap_or_else(|| format!("{:?}(*)", agg.function));
                 result.push_str(&format!("{}\t", name));
             }
             Column::Named(name) => {
@@ -285,6 +316,7 @@ fn execute_select_with_grouping(
     result.push('\n');
     result.push_str(&"-".repeat(40));
     result.push('\n');
+
     for (_group_key, group_rows) in groups {
         if let Some(ref having_expr) = stmt.having {
             let should_include = evaluate_having(&having_expr, &stmt.columns, table, &group_rows)?;
@@ -319,6 +351,7 @@ fn execute_select_with_grouping(
     }
     Ok(result)
 }
+
 fn compute_aggregate(
     func: &AggregateFunctionType,
     expr: &Expression,
@@ -428,6 +461,7 @@ fn compute_aggregate(
         }
     }
 }
+
 fn evaluate_having(
     expr: &Expression,
     _columns: &[Column],
@@ -477,6 +511,7 @@ fn evaluate_having_value(
         _ => Err("Complex expressions not yet supported in HAVING".to_string()),
     }
 }
+
 fn execute_update(stmt: UpdateStatement) -> Result<String, String> {
     let mut db = get_database();
     let table = db
@@ -509,6 +544,7 @@ fn execute_update(stmt: UpdateStatement) -> Result<String, String> {
     db.save()?;
     Ok(format!("{} row(s) updated", updated_count))
 }
+
 fn execute_delete(stmt: DeleteStatement) -> Result<String, String> {
     let mut db = get_database();
     let table = db
@@ -528,6 +564,7 @@ fn execute_delete(stmt: DeleteStatement) -> Result<String, String> {
     db.save()?;
     Ok(format!("{} row(s) deleted", deleted_count))
 }
+
 fn evaluate_expression(
     expr: &Expression,
     columns: &[ColumnDefinition],
@@ -552,6 +589,7 @@ fn evaluate_expression(
         _ => Err("Invalid expression in WHERE clause".to_string()),
     }
 }
+
 fn evaluate_value_expression(
     expr: &Expression,
     columns: &[ColumnDefinition],
@@ -572,6 +610,7 @@ fn evaluate_value_expression(
         _ => Err("Complex expressions not yet supported".to_string()),
     }
 }
+
 fn compare_values(left: &Value, op: &BinaryOperator, right: &Value) -> Result<bool, String> {
     let (left_num, right_num) = match (left, right) {
         (Value::Integer(l), Value::Integer(r)) => (Some(*l as f64), Some(*r as f64)),
@@ -601,6 +640,7 @@ fn compare_values(left: &Value, op: &BinaryOperator, right: &Value) -> Result<bo
         }
     }
 }
+
 fn format_value(value: &Value) -> String {
     match value {
         Value::Null => "NULL".to_string(),
@@ -610,9 +650,9 @@ fn format_value(value: &Value) -> String {
         Value::Boolean(b) => b.to_string(),
     }
 }
+
 fn execute_alter_table(stmt: AlterTableStatement) -> Result<String, String> {
     let mut db = get_database();
-
     let table = db
         .tables
         .get_mut(&stmt.table)
@@ -623,23 +663,18 @@ fn execute_alter_table(stmt: AlterTableStatement) -> Result<String, String> {
             if table.columns.iter().any(|c| c.name == col_def.name) {
                 return Err(format!("Column '{}' already exists", col_def.name));
             }
-
             table.columns.push(col_def.clone());
-
             let default_value = match col_def.data_type {
                 DataType::Integer => Value::Integer(0),
                 DataType::Float => Value::Float(0.0),
                 DataType::Text => Value::Text(String::new()),
                 DataType::Boolean => Value::Boolean(false),
             };
-
             for row in &mut table.rows {
                 row.push(default_value.clone());
             }
-
             #[cfg(not(test))]
             db.save()?;
-
             Ok(format!(
                 "Column '{}' added to table '{}'",
                 col_def.name, stmt.table
@@ -651,18 +686,14 @@ fn execute_alter_table(stmt: AlterTableStatement) -> Result<String, String> {
                 .iter()
                 .position(|c| c.name == col_name)
                 .ok_or_else(|| format!("Column '{}' does not exist", col_name))?;
-
             table.columns.remove(col_index);
-
             for row in &mut table.rows {
                 if col_index < row.len() {
                     row.remove(col_index);
                 }
             }
-
             #[cfg(not(test))]
             db.save()?;
-
             Ok(format!(
                 "Column '{}' dropped from table '{}'",
                 col_name, stmt.table
@@ -673,21 +704,17 @@ fn execute_alter_table(stmt: AlterTableStatement) -> Result<String, String> {
             if !col_exists {
                 return Err(format!("Column '{}' does not exist", old));
             }
-
             if table.columns.iter().any(|c| c.name == new && c.name != old) {
                 return Err(format!("Column '{}' already exists", new));
             }
-
             for column in &mut table.columns {
                 if column.name == old {
                     column.name = new.clone();
                     break;
                 }
             }
-
             #[cfg(not(test))]
             db.save()?;
-
             Ok(format!(
                 "Column '{}' renamed to '{}' in table '{}'",
                 old, new, stmt.table
@@ -736,3 +763,4 @@ fn compare_values_for_sort(left: &Value, right: &Value) -> Ordering {
         _ => Ordering::Equal,
     }
 }
+
