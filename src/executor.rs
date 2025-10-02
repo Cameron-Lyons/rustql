@@ -2,7 +2,9 @@ use crate::ast::*;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap};
+#[cfg(not(test))]
 use std::fs;
+#[cfg(not(test))]
 use std::path::Path;
 
 #[cfg(not(test))]
@@ -763,4 +765,3 @@ fn compare_values_for_sort(left: &Value, right: &Value) -> Ordering {
         _ => Ordering::Equal,
     }
 }
-
