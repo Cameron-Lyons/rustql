@@ -1,53 +1,7 @@
 use crate::ast::*;
-use serde::{Deserialize, Serialize};
+use crate::database::{Database, Table};
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, HashMap};
-#[cfg(not(test))]
-use std::fs;
-#[cfg(not(test))]
-use std::path::Path;
-
-#[cfg(not(test))]
-const DATABASE_FILE: &str = "rustql_data.json";
-
-#[derive(Serialize, Deserialize)]
-pub struct Database {
-    tables: HashMap<String, Table>,
-}
-
-#[derive(Serialize, Deserialize)]
-struct Table {
-    columns: Vec<ColumnDefinition>,
-    rows: Vec<Vec<Value>>,
-}
-
-impl Database {
-    fn new() -> Self {
-        Database {
-            tables: HashMap::new(),
-        }
-    }
-
-    #[cfg(not(test))]
-    fn load() -> Self {
-        if Path::new(DATABASE_FILE).exists() {
-            let data = fs::read_to_string(DATABASE_FILE).unwrap_or_default();
-            serde_json::from_str(&data).unwrap_or_else(|_| Database::new())
-        } else {
-            Database::new()
-        }
-    }
-
-    #[cfg(not(test))]
-    fn save(&self) -> Result<(), String> {
-        let data = serde_json::to_string_pretty(self)
-            .map_err(|e| format!("Failed to serialize database: {}", e))?;
-        fs::write(DATABASE_FILE, data)
-            .map_err(|e| format!("Failed to write database file: {}", e))?;
-        Ok(())
-    }
-}
-
+use std::collections::BTreeMap;
 use std::sync::{Mutex, OnceLock};
 
 static DATABASE: OnceLock<Mutex<Database>> = OnceLock::new();
@@ -87,6 +41,7 @@ pub fn reset_database_state() {
     db.tables.clear();
 }
 
+// === CREATE TABLE ===
 fn execute_create_table(stmt: CreateTableStatement) -> Result<String, String> {
     let mut db = get_database();
     if db.tables.contains_key(&stmt.name) {
@@ -104,6 +59,7 @@ fn execute_create_table(stmt: CreateTableStatement) -> Result<String, String> {
     Ok(format!("Table '{}' created", stmt.name))
 }
 
+// === DROP TABLE ===
 fn execute_drop_table(stmt: DropTableStatement) -> Result<String, String> {
     let mut db = get_database();
     if db.tables.remove(&stmt.name).is_some() {
@@ -115,6 +71,7 @@ fn execute_drop_table(stmt: DropTableStatement) -> Result<String, String> {
     }
 }
 
+// === INSERT ===
 fn execute_insert(stmt: InsertStatement) -> Result<String, String> {
     let mut db = get_database();
     let table = db
@@ -137,6 +94,7 @@ fn execute_insert(stmt: InsertStatement) -> Result<String, String> {
     Ok(format!("{} row(s) inserted", row_count))
 }
 
+// === SELECT ===
 fn execute_select(stmt: SelectStatement) -> Result<String, String> {
     let db = get_database();
     let table = db
@@ -229,6 +187,7 @@ fn execute_select(stmt: SelectStatement) -> Result<String, String> {
     Ok(result)
 }
 
+// === SELECT with Aggregates ===
 fn execute_select_with_aggregates(
     stmt: SelectStatement,
     table: &Table,
@@ -271,6 +230,7 @@ fn execute_select_with_aggregates(
     Ok(result)
 }
 
+// === SELECT with GROUP BY ===
 fn execute_select_with_grouping(
     stmt: SelectStatement,
     table: &Table,
@@ -354,6 +314,7 @@ fn execute_select_with_grouping(
     Ok(result)
 }
 
+// === AGGREGATE COMPUTATION ===
 fn compute_aggregate(
     func: &AggregateFunctionType,
     expr: &Expression,
@@ -464,6 +425,7 @@ fn compute_aggregate(
     }
 }
 
+// === HAVING EVALUATION ===
 fn evaluate_having(
     expr: &Expression,
     _columns: &[Column],
@@ -514,6 +476,7 @@ fn evaluate_having_value(
     }
 }
 
+// === UPDATE ===
 fn execute_update(stmt: UpdateStatement) -> Result<String, String> {
     let mut db = get_database();
     let table = db
@@ -547,6 +510,7 @@ fn execute_update(stmt: UpdateStatement) -> Result<String, String> {
     Ok(format!("{} row(s) updated", updated_count))
 }
 
+// === DELETE ===
 fn execute_delete(stmt: DeleteStatement) -> Result<String, String> {
     let mut db = get_database();
     let table = db
@@ -567,6 +531,7 @@ fn execute_delete(stmt: DeleteStatement) -> Result<String, String> {
     Ok(format!("{} row(s) deleted", deleted_count))
 }
 
+// === EXPRESSION EVALUATION ===
 fn evaluate_expression(
     expr: &Expression,
     columns: &[ColumnDefinition],
@@ -653,6 +618,48 @@ fn format_value(value: &Value) -> String {
     }
 }
 
+fn compare_values_for_sort(left: &Value, right: &Value) -> Ordering {
+    match (left, right) {
+        (Value::Null, Value::Null) => Ordering::Equal,
+        (Value::Null, _) => Ordering::Less,
+        (_, Value::Null) => Ordering::Greater,
+        (Value::Integer(l), Value::Integer(r)) => l.cmp(r),
+        (Value::Float(l), Value::Float(r)) => {
+            if l < r {
+                Ordering::Less
+            } else if l > r {
+                Ordering::Greater
+            } else {
+                Ordering::Equal
+            }
+        }
+        (Value::Integer(l), Value::Float(r)) => {
+            let l = *l as f64;
+            if l < *r {
+                Ordering::Less
+            } else if l > *r {
+                Ordering::Greater
+            } else {
+                Ordering::Equal
+            }
+        }
+        (Value::Float(l), Value::Integer(r)) => {
+            let r = *r as f64;
+            if l < &r {
+                Ordering::Less
+            } else if l > &r {
+                Ordering::Greater
+            } else {
+                Ordering::Equal
+            }
+        }
+        (Value::Text(l), Value::Text(r)) => l.cmp(r),
+        (Value::Boolean(l), Value::Boolean(r)) => l.cmp(r),
+        _ => Ordering::Equal,
+    }
+}
+
+// === ALTER TABLE ===
 fn execute_alter_table(stmt: AlterTableStatement) -> Result<String, String> {
     let mut db = get_database();
     let table = db
@@ -725,43 +732,43 @@ fn execute_alter_table(stmt: AlterTableStatement) -> Result<String, String> {
     }
 }
 
-fn compare_values_for_sort(left: &Value, right: &Value) -> Ordering {
-    match (left, right) {
-        (Value::Null, Value::Null) => Ordering::Equal,
-        (Value::Null, _) => Ordering::Less,
-        (_, Value::Null) => Ordering::Greater,
-        (Value::Integer(l), Value::Integer(r)) => l.cmp(r),
-        (Value::Float(l), Value::Float(r)) => {
-            if l < r {
-                Ordering::Less
-            } else if l > r {
-                Ordering::Greater
-            } else {
-                Ordering::Equal
-            }
-        }
-        (Value::Integer(l), Value::Float(r)) => {
-            let l = *l as f64;
-            if l < *r {
-                Ordering::Less
-            } else if l > *r {
-                Ordering::Greater
-            } else {
-                Ordering::Equal
-            }
-        }
-        (Value::Float(l), Value::Integer(r)) => {
-            let r = *r as f64;
-            if l < &r {
-                Ordering::Less
-            } else if l > &r {
-                Ordering::Greater
-            } else {
-                Ordering::Equal
-            }
-        }
-        (Value::Text(l), Value::Text(r)) => l.cmp(r),
-        (Value::Boolean(l), Value::Boolean(r)) => l.cmp(r),
-        _ => Ordering::Equal,
+// === UNIT TESTS ===
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ast::{ColumnDefinition, CreateTableStatement, DataType, Statement};
+
+    #[test]
+    fn test_format_value() {
+        assert_eq!(format_value(&Value::Integer(42)), "42");
+        assert_eq!(format_value(&Value::Null), "NULL");
+    }
+
+    #[test]
+    fn test_compare_values_sort() {
+        use std::cmp::Ordering::*;
+        assert_eq!(
+            compare_values_for_sort(&Value::Integer(1), &Value::Integer(2)),
+            Less
+        );
+    }
+
+    #[test]
+    fn test_create_table() {
+        reset_database_state();
+        let stmt = Statement::CreateTable(CreateTableStatement {
+            name: "users".into(),
+            columns: vec![
+                ColumnDefinition {
+                    name: "id".into(),
+                    data_type: DataType::Integer,
+                },
+                ColumnDefinition {
+                    name: "name".into(),
+                    data_type: DataType::Text,
+                },
+            ],
+        });
+        assert!(execute(stmt).is_ok());
     }
 }
