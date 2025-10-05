@@ -1,5 +1,5 @@
-use rustql::executor::{execute, reset_database_state};
 use rustql::ast::*;
+use rustql::executor::{execute, reset_database_state};
 
 #[test]
 fn test_update_and_delete() {
@@ -8,15 +8,26 @@ fn test_update_and_delete() {
     execute(Statement::CreateTable(CreateTableStatement {
         name: "users".into(),
         columns: vec![
-            ColumnDefinition { name: "id".into(), data_type: DataType::Integer },
-            ColumnDefinition { name: "name".into(), data_type: DataType::Text },
+            ColumnDefinition {
+                name: "id".into(),
+                data_type: DataType::Integer,
+                nullable: false,
+            },
+            ColumnDefinition {
+                name: "name".into(),
+                data_type: DataType::Text,
+                nullable: false,
+            },
         ],
-    })).unwrap();
+    }))
+    .unwrap();
 
     execute(Statement::Insert(InsertStatement {
         table: "users".into(),
+        columns: Some(vec!["id".into(), "name".into()]),
         values: vec![vec![Value::Integer(1), Value::Text("Alice".into())]],
-    })).unwrap();
+    }))
+    .unwrap();
 
     let update = Statement::Update(UpdateStatement {
         table: "users".into(),

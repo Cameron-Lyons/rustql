@@ -11,10 +11,12 @@ fn test_insert() {
             ColumnDefinition {
                 name: "id".to_string(),
                 data_type: DataType::Integer,
+                nullable: false,
             },
             ColumnDefinition {
                 name: "name".to_string(),
                 data_type: DataType::Text,
+                nullable: false,
             },
         ],
     });
@@ -23,6 +25,7 @@ fn test_insert() {
 
     let insert = Statement::Insert(InsertStatement {
         table: "users".to_string(),
+        columns: Some(vec!["id".into(), "name".into()]),
         values: vec![vec![Value::Integer(1), Value::Text("Alice".into())]],
     });
 

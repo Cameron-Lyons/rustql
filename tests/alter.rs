@@ -1,5 +1,5 @@
-use rustql::executor::{execute, reset_database_state};
 use rustql::ast::*;
+use rustql::executor::{execute, reset_database_state};
 
 #[test]
 fn test_alter_table_add_column() {
@@ -10,14 +10,17 @@ fn test_alter_table_add_column() {
         columns: vec![ColumnDefinition {
             name: "id".into(),
             data_type: DataType::Integer,
+            nullable: false,
         }],
-    })).unwrap();
+    }))
+    .unwrap();
 
     let alter = Statement::AlterTable(AlterTableStatement {
         table: "users".into(),
         operation: AlterOperation::AddColumn(ColumnDefinition {
             name: "name".into(),
             data_type: DataType::Text,
+            nullable: false,
         }),
     });
 

@@ -35,13 +35,11 @@ pub fn execute(statement: Statement) -> Result<String, String> {
     }
 }
 
-#[cfg(test)]
 pub fn reset_database_state() {
     let mut db = get_database();
     db.tables.clear();
 }
 
-// === CREATE TABLE ===
 fn execute_create_table(stmt: CreateTableStatement) -> Result<String, String> {
     let mut db = get_database();
     if db.tables.contains_key(&stmt.name) {
@@ -54,16 +52,13 @@ fn execute_create_table(stmt: CreateTableStatement) -> Result<String, String> {
             rows: Vec::new(),
         },
     );
-    #[cfg(not(test))]
     db.save()?;
     Ok(format!("Table '{}' created", stmt.name))
 }
 
-// === DROP TABLE ===
 fn execute_drop_table(stmt: DropTableStatement) -> Result<String, String> {
     let mut db = get_database();
     if db.tables.remove(&stmt.name).is_some() {
-        #[cfg(not(test))]
         db.save()?;
         Ok(format!("Table '{}' dropped", stmt.name))
     } else {
@@ -71,7 +66,6 @@ fn execute_drop_table(stmt: DropTableStatement) -> Result<String, String> {
     }
 }
 
-// === INSERT ===
 fn execute_insert(stmt: InsertStatement) -> Result<String, String> {
     let mut db = get_database();
     let table = db
@@ -89,12 +83,10 @@ fn execute_insert(stmt: InsertStatement) -> Result<String, String> {
         }
         table.rows.push(values);
     }
-    #[cfg(not(test))]
     db.save()?;
     Ok(format!("{} row(s) inserted", row_count))
 }
 
-// === SELECT ===
 fn execute_select(stmt: SelectStatement) -> Result<String, String> {
     let db = get_database();
     let table = db
@@ -187,7 +179,6 @@ fn execute_select(stmt: SelectStatement) -> Result<String, String> {
     Ok(result)
 }
 
-// === SELECT with Aggregates ===
 fn execute_select_with_aggregates(
     stmt: SelectStatement,
     table: &Table,
@@ -230,7 +221,6 @@ fn execute_select_with_aggregates(
     Ok(result)
 }
 
-// === SELECT with GROUP BY ===
 fn execute_select_with_grouping(
     stmt: SelectStatement,
     table: &Table,
@@ -314,7 +304,6 @@ fn execute_select_with_grouping(
     Ok(result)
 }
 
-// === AGGREGATE COMPUTATION ===
 fn compute_aggregate(
     func: &AggregateFunctionType,
     expr: &Expression,
@@ -425,7 +414,6 @@ fn compute_aggregate(
     }
 }
 
-// === HAVING EVALUATION ===
 fn evaluate_having(
     expr: &Expression,
     _columns: &[Column],
@@ -476,7 +464,6 @@ fn evaluate_having_value(
     }
 }
 
-// === UPDATE ===
 fn execute_update(stmt: UpdateStatement) -> Result<String, String> {
     let mut db = get_database();
     let table = db
@@ -505,12 +492,10 @@ fn execute_update(stmt: UpdateStatement) -> Result<String, String> {
             updated_count += 1;
         }
     }
-    #[cfg(not(test))]
     db.save()?;
     Ok(format!("{} row(s) updated", updated_count))
 }
 
-// === DELETE ===
 fn execute_delete(stmt: DeleteStatement) -> Result<String, String> {
     let mut db = get_database();
     let table = db
@@ -526,12 +511,10 @@ fn execute_delete(stmt: DeleteStatement) -> Result<String, String> {
         table.rows.clear();
     }
     let deleted_count = initial_count - table.rows.len();
-    #[cfg(not(test))]
     db.save()?;
     Ok(format!("{} row(s) deleted", deleted_count))
 }
 
-// === EXPRESSION EVALUATION ===
 fn evaluate_expression(
     expr: &Expression,
     columns: &[ColumnDefinition],
@@ -659,7 +642,6 @@ fn compare_values_for_sort(left: &Value, right: &Value) -> Ordering {
     }
 }
 
-// === ALTER TABLE ===
 fn execute_alter_table(stmt: AlterTableStatement) -> Result<String, String> {
     let mut db = get_database();
     let table = db
@@ -682,7 +664,6 @@ fn execute_alter_table(stmt: AlterTableStatement) -> Result<String, String> {
             for row in &mut table.rows {
                 row.push(default_value.clone());
             }
-            #[cfg(not(test))]
             db.save()?;
             Ok(format!(
                 "Column '{}' added to table '{}'",
@@ -701,7 +682,6 @@ fn execute_alter_table(stmt: AlterTableStatement) -> Result<String, String> {
                     row.remove(col_index);
                 }
             }
-            #[cfg(not(test))]
             db.save()?;
             Ok(format!(
                 "Column '{}' dropped from table '{}'",
@@ -722,7 +702,6 @@ fn execute_alter_table(stmt: AlterTableStatement) -> Result<String, String> {
                     break;
                 }
             }
-            #[cfg(not(test))]
             db.save()?;
             Ok(format!(
                 "Column '{}' renamed to '{}' in table '{}'",
@@ -732,7 +711,6 @@ fn execute_alter_table(stmt: AlterTableStatement) -> Result<String, String> {
     }
 }
 
-// === UNIT TESTS ===
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -762,10 +740,12 @@ mod tests {
                 ColumnDefinition {
                     name: "id".into(),
                     data_type: DataType::Integer,
+                    nullable: false,
                 },
                 ColumnDefinition {
                     name: "name".into(),
                     data_type: DataType::Text,
+                    nullable: false,
                 },
             ],
         });

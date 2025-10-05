@@ -1,5 +1,5 @@
-use rustql::executor::{execute, reset_database_state};
 use rustql::ast::*;
+use rustql::executor::{execute, reset_database_state};
 
 #[test]
 fn test_create_and_drop_table() {
@@ -11,10 +11,12 @@ fn test_create_and_drop_table() {
             ColumnDefinition {
                 name: "id".to_string(),
                 data_type: DataType::Integer,
+                nullable: false,
             },
             ColumnDefinition {
                 name: "name".to_string(),
                 data_type: DataType::Text,
+                nullable: false,
             },
         ],
     });

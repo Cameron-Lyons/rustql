@@ -1,12 +1,9 @@
 use crate::ast::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-#[cfg(not(test))]
 use std::fs;
-#[cfg(not(test))]
 use std::path::Path;
 
-#[cfg(not(test))]
 const DATABASE_FILE: &str = "rustql_data.json";
 
 #[derive(Serialize, Deserialize)]
@@ -27,7 +24,6 @@ impl Database {
         }
     }
 
-    #[cfg(not(test))]
     pub fn load() -> Self {
         if Path::new(DATABASE_FILE).exists() {
             let data = fs::read_to_string(DATABASE_FILE).unwrap_or_default();
@@ -37,7 +33,6 @@ impl Database {
         }
     }
 
-    #[cfg(not(test))]
     pub fn save(&self) -> Result<(), String> {
         let data = serde_json::to_string_pretty(self)
             .map_err(|e| format!("Failed to serialize database: {}", e))?;

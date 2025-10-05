@@ -1,5 +1,5 @@
-use rustql::executor::{execute, reset_database_state};
 use rustql::ast::*;
+use rustql::executor::{execute, reset_database_state};
 
 #[test]
 fn test_select_all() {
@@ -8,22 +8,34 @@ fn test_select_all() {
     execute(Statement::CreateTable(CreateTableStatement {
         name: "users".to_string(),
         columns: vec![
-            ColumnDefinition { name: "id".into(), data_type: DataType::Integer },
-            ColumnDefinition { name: "name".into(), data_type: DataType::Text },
+            ColumnDefinition {
+                name: "id".into(),
+                data_type: DataType::Integer,
+                nullable: false,
+            },
+            ColumnDefinition {
+                name: "name".into(),
+                data_type: DataType::Text,
+                nullable: false,
+            },
         ],
-    })).unwrap();
+    }))
+    .unwrap();
 
     execute(Statement::Insert(InsertStatement {
         table: "users".to_string(),
+        columns: Some(vec!["id".into(), "name".into()]),
         values: vec![
             vec![Value::Integer(1), Value::Text("Alice".into())],
             vec![Value::Integer(2), Value::Text("Bob".into())],
         ],
-    })).unwrap();
+    }))
+    .unwrap();
 
     let select = Statement::Select(SelectStatement {
         from: "users".into(),
         columns: vec![Column::All],
+        joins: vec![],
         where_clause: None,
         group_by: None,
         having: None,

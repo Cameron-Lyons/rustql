@@ -1,6 +1,6 @@
 {
   "tables": {
-    "sales": {
+    "messages": {
       "columns": [
         {
           "name": "id",
@@ -8,13 +8,13 @@
           "nullable": true
         },
         {
-          "name": "product",
+          "name": "content",
           "data_type": "Text",
           "nullable": true
         },
         {
-          "name": "amount",
-          "data_type": "Float",
+          "name": "author",
+          "data_type": "Text",
           "nullable": true
         }
       ],
@@ -24,10 +24,10 @@
             "Integer": 1
           },
           {
-            "Text": "Apple"
+            "Text": "Hello World"
           },
           {
-            "Float": 100.0
+            "Text": "Alice"
           }
         ],
         [
@@ -35,43 +35,64 @@
             "Integer": 2
           },
           {
-            "Text": "Apple"
+            "Text": "Goodbye"
           },
           {
-            "Float": 150.0
+            "Text": "Bob"
+          }
+        ]
+      ]
+    },
+    "test_types": {
+      "columns": [
+        {
+          "name": "int_col",
+          "data_type": "Integer",
+          "nullable": true
+        },
+        {
+          "name": "float_col",
+          "data_type": "Float",
+          "nullable": true
+        },
+        {
+          "name": "text_col",
+          "data_type": "Text",
+          "nullable": true
+        },
+        {
+          "name": "bool_col",
+          "data_type": "Boolean",
+          "nullable": true
+        }
+      ],
+      "rows": [
+        [
+          {
+            "Integer": 42
+          },
+          {
+            "Float": 3.14
+          },
+          {
+            "Text": "hello"
+          },
+          {
+            "Integer": 1
           }
         ],
         [
           {
-            "Integer": 3
+            "Integer": -10
           },
           {
-            "Text": "Banana"
+            "Float": -2.5
           },
           {
-            "Float": 50.0
-          }
-        ],
-        [
-          {
-            "Integer": 4
+            "Text": "world"
           },
           {
-            "Text": "Banana"
-          },
-          {
-            "Float": 75.0
-          }
-        ],
-        [
-          {
-            "Integer": 5
-          },
-          {
-            "Text": "Orange"
-          },
-          {
-            "Float": 200.0
+            "Integer": 0
           }
         ]
       ]
@@ -115,6 +136,39 @@
           },
           {
             "Integer": 30
+          }
+        ],
+        [
+          {
+            "Integer": 3
+          },
+          {
+            "Text": "Charlie"
+          },
+          {
+            "Integer": 35
+          }
+        ],
+        [
+          {
+            "Integer": 1
+          },
+          {
+            "Text": "Alice"
+          },
+          {
+            "Integer": 30
+          }
+        ],
+        [
+          {
+            "Integer": 2
+          },
+          {
+            "Text": "Bob"
+          },
+          {
+            "Integer": 25
           }
         ],
         [

@@ -1,10 +1,9 @@
 pub mod ast;
+pub mod database;
 pub mod executor;
 pub mod lexer;
 pub mod parser;
-#[cfg(not(test))]
 use std::fs;
-#[cfg(not(test))]
 use std::path::Path;
 pub fn process_query(query: &str) -> Result<String, String> {
     let tokens = lexer::tokenize(query)?;
@@ -14,7 +13,6 @@ pub fn process_query(query: &str) -> Result<String, String> {
 pub fn reset_database() {
     #[cfg(test)]
     executor::reset_database_state();
-    #[cfg(not(test))]
     {
         let db_file = "rustql_data.json";
         if Path::new(db_file).exists() {

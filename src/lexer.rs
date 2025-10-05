@@ -153,7 +153,7 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, String> {
                     tokens.push(Token::NotEqual);
                     chars.next();
                 } else {
-                    return Err(format!("Unexpected character: !",));
+                    return Err("Unexpected character: !".to_string());
                 }
             }
             '\'' => {
