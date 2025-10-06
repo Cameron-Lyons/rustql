@@ -43,56 +43,82 @@
         ]
       ]
     },
-    "test_types": {
+    "test": {
       "columns": [
         {
-          "name": "int_col",
+          "name": "a",
           "data_type": "Integer",
           "nullable": true
         },
         {
-          "name": "float_col",
-          "data_type": "Float",
+          "name": "b",
+          "data_type": "Integer",
+          "nullable": true
+        }
+      ],
+      "rows": []
+    },
+    "orders": {
+      "columns": [
+        {
+          "name": "id",
+          "data_type": "Integer",
           "nullable": true
         },
         {
-          "name": "text_col",
+          "name": "category",
           "data_type": "Text",
           "nullable": true
         },
         {
-          "name": "bool_col",
-          "data_type": "Boolean",
+          "name": "amount",
+          "data_type": "Float",
           "nullable": true
         }
       ],
       "rows": [
         [
           {
-            "Integer": 42
-          },
-          {
-            "Float": 3.14
-          },
-          {
-            "Text": "hello"
-          },
-          {
             "Integer": 1
+          },
+          {
+            "Text": "Electronics"
+          },
+          {
+            "Float": 100.0
           }
         ],
         [
           {
-            "Integer": -10
+            "Integer": 2
           },
           {
-            "Float": -2.5
+            "Text": "Electronics"
           },
           {
-            "Text": "world"
+            "Float": 200.0
+          }
+        ],
+        [
+          {
+            "Integer": 3
           },
           {
-            "Integer": 0
+            "Text": "Books"
+          },
+          {
+            "Float": 50.0
+          }
+        ],
+        [
+          {
+            "Integer": 4
+          },
+          {
+            "Text": "Books"
+          },
+          {
+            "Float": 75.0
           }
         ]
       ]
@@ -148,38 +174,59 @@
           {
             "Integer": 35
           }
-        ],
+        ]
+      ]
+    },
+    "test_types": {
+      "columns": [
+        {
+          "name": "int_col",
+          "data_type": "Integer",
+          "nullable": true
+        },
+        {
+          "name": "float_col",
+          "data_type": "Float",
+          "nullable": true
+        },
+        {
+          "name": "text_col",
+          "data_type": "Text",
+          "nullable": true
+        },
+        {
+          "name": "bool_col",
+          "data_type": "Boolean",
+          "nullable": true
+        }
+      ],
+      "rows": [
         [
+          {
+            "Integer": 42
+          },
+          {
+            "Float": 3.14
+          },
+          {
+            "Text": "hello"
+          },
           {
             "Integer": 1
-          },
-          {
-            "Text": "Alice"
-          },
-          {
-            "Integer": 30
           }
         ],
         [
           {
-            "Integer": 2
+            "Integer": -10
           },
           {
-            "Text": "Bob"
+            "Float": -2.5
           },
           {
-            "Integer": 25
-          }
-        ],
-        [
-          {
-            "Integer": 3
+            "Text": "world"
           },
           {
-            "Text": "Charlie"
-          },
-          {
-            "Integer": 35
+            "Integer": 0
           }
         ]
       ]

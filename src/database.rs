@@ -6,7 +6,7 @@ use std::path::Path;
 
 const DATABASE_FILE: &str = "rustql_data.json";
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Default)]
 pub struct Database {
     pub tables: HashMap<String, Table>,
 }
@@ -19,17 +19,15 @@ pub struct Table {
 
 impl Database {
     pub fn new() -> Self {
-        Database {
-            tables: HashMap::new(),
-        }
+        Self::default()
     }
 
     pub fn load() -> Self {
         if Path::new(DATABASE_FILE).exists() {
             let data = fs::read_to_string(DATABASE_FILE).unwrap_or_default();
-            serde_json::from_str(&data).unwrap_or_else(|_| Database::new())
+            serde_json::from_str(&data).unwrap_or_default()
         } else {
-            Database::new()
+            Self::default()
         }
     }
 
