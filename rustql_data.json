@@ -1,6 +1,6 @@
 {
   "tables": {
-    "messages": {
+    "users": {
       "columns": [
         {
           "name": "id",
@@ -8,13 +8,13 @@
           "nullable": true
         },
         {
-          "name": "content",
+          "name": "name",
           "data_type": "Text",
           "nullable": true
         },
         {
-          "name": "author",
-          "data_type": "Text",
+          "name": "age",
+          "data_type": "Integer",
           "nullable": true
         }
       ],
@@ -24,10 +24,10 @@
             "Integer": 1
           },
           {
-            "Text": "Hello World"
+            "Text": "Alice"
           },
           {
-            "Text": "Alice"
+            "Integer": 25
           }
         ],
         [
@@ -35,28 +35,24 @@
             "Integer": 2
           },
           {
-            "Text": "Goodbye"
+            "Text": "Bob"
           },
           {
-            "Text": "Bob"
+            "Integer": 30
+          }
+        ],
+        [
+          {
+            "Integer": 3
+          },
+          {
+            "Text": "Charlie"
+          },
+          {
+            "Integer": 35
           }
         ]
       ]
-    },
-    "test": {
-      "columns": [
-        {
-          "name": "a",
-          "data_type": "Integer",
-          "nullable": true
-        },
-        {
-          "name": "b",
-          "data_type": "Integer",
-          "nullable": true
-        }
-      ],
-      "rows": []
     },
     "orders": {
       "columns": [
@@ -123,7 +119,22 @@
         ]
       ]
     },
-    "users": {
+    "test": {
+      "columns": [
+        {
+          "name": "a",
+          "data_type": "Integer",
+          "nullable": true
+        },
+        {
+          "name": "b",
+          "data_type": "Integer",
+          "nullable": true
+        }
+      ],
+      "rows": []
+    },
+    "messages": {
       "columns": [
         {
           "name": "id",
@@ -131,13 +142,13 @@
           "nullable": true
         },
         {
-          "name": "name",
+          "name": "content",
           "data_type": "Text",
           "nullable": true
         },
         {
-          "name": "age",
-          "data_type": "Integer",
+          "name": "author",
+          "data_type": "Text",
           "nullable": true
         }
       ],
@@ -147,10 +158,10 @@
             "Integer": 1
           },
           {
-            "Text": "Alice"
+            "Text": "Hello World"
           },
           {
-            "Integer": 25
+            "Text": "Alice"
           }
         ],
         [
@@ -158,75 +169,10 @@
             "Integer": 2
           },
           {
+            "Text": "Goodbye"
+          },
+          {
             "Text": "Bob"
-          },
-          {
-            "Integer": 30
-          }
-        ],
-        [
-          {
-            "Integer": 3
-          },
-          {
-            "Text": "Charlie"
-          },
-          {
-            "Integer": 35
-          }
-        ]
-      ]
-    },
-    "test_types": {
-      "columns": [
-        {
-          "name": "int_col",
-          "data_type": "Integer",
-          "nullable": true
-        },
-        {
-          "name": "float_col",
-          "data_type": "Float",
-          "nullable": true
-        },
-        {
-          "name": "text_col",
-          "data_type": "Text",
-          "nullable": true
-        },
-        {
-          "name": "bool_col",
-          "data_type": "Boolean",
-          "nullable": true
-        }
-      ],
-      "rows": [
-        [
-          {
-            "Integer": 42
-          },
-          {
-            "Float": 3.14
-          },
-          {
-            "Text": "hello"
-          },
-          {
-            "Integer": 1
-          }
-        ],
-        [
-          {
-            "Integer": -10
-          },
-          {
-            "Float": -2.5
-          },
-          {
-            "Text": "world"
-          },
-          {
-            "Integer": 0
           }
         ]
       ]

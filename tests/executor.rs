@@ -1,4 +1,4 @@
-use rustql::ast::{ColumnDefinition, CreateTableStatement, DataType, Statement};
+use rustql::ast::{ColumnDefinition, CreateTableStatement, DataType, Statement, Value};
 use rustql::executor::*;
 
 #[test]

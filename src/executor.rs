@@ -591,7 +591,7 @@ fn compare_values(left: &Value, op: &BinaryOperator, right: &Value) -> Result<bo
     }
 }
 
-fn format_value(value: &Value) -> String {
+pub fn format_value(value: &Value) -> String {
     match value {
         Value::Null => "NULL".to_string(),
         Value::Integer(n) => n.to_string(),
