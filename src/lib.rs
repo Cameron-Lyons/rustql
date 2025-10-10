@@ -5,6 +5,7 @@ pub mod lexer;
 pub mod parser;
 use std::fs;
 use std::path::Path;
+
 pub fn process_query(query: &str) -> Result<String, String> {
     let tokens = lexer::tokenize(query)?;
     let statement = parser::parse(tokens)?;
