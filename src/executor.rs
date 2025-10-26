@@ -91,7 +91,7 @@ fn execute_select(stmt: SelectStatement) -> Result<String, String> {
     let db = get_database();
     
     if !stmt.joins.is_empty() {
-        return execute_select_with_joins(stmt);
+        return execute_select_with_joins(stmt, &db);
     }
     
     let table = db
@@ -531,17 +531,96 @@ fn evaluate_expression(
                 && evaluate_expression(right, columns, row)?),
             BinaryOperator::Or => Ok(evaluate_expression(left, columns, row)?
                 || evaluate_expression(right, columns, row)?),
+            BinaryOperator::Like => {
+                let left_val = evaluate_value_expression(left, columns, row)?;
+                let right_val = evaluate_value_expression(right, columns, row)?;
+                match (left_val, right_val) {
+                    (Value::Text(text), Value::Text(pattern)) => Ok(match_like(&text, &pattern)),
+                    _ => Err("LIKE operator requires text values".to_string()),
+                }
+            }
+            BinaryOperator::Between => {
+                let left_val = evaluate_value_expression(left, columns, row)?;
+                match &**right {
+                    Expression::BinaryOp { left: lb, op: lb_op, right: rb } if *lb_op == BinaryOperator::And => {
+                        let lower = evaluate_value_expression(lb, columns, row)?;
+                        let upper = evaluate_value_expression(rb, columns, row)?;
+                        Ok(is_between(&left_val, &lower, &upper))
+                    }
+                    _ => Err("BETWEEN requires two values".to_string()),
+                }
+            }
             _ => {
                 let left_val = evaluate_value_expression(left, columns, row)?;
                 let right_val = evaluate_value_expression(right, columns, row)?;
                 compare_values(&left_val, op, &right_val)
             }
         },
+        Expression::In { left, values } => {
+            let left_val = evaluate_value_expression(left, columns, row)?;
+            Ok(values.contains(&left_val))
+        }
         Expression::UnaryOp { op, expr } => match op {
             UnaryOperator::Not => Ok(!evaluate_expression(expr, columns, row)?),
             _ => Err("Unsupported unary operation in WHERE clause".to_string()),
         },
         _ => Err("Invalid expression in WHERE clause".to_string()),
+    }
+}
+
+fn match_like(text: &str, pattern: &str) -> bool {
+    let text_chars: Vec<char> = text.chars().collect();
+    let pattern_chars: Vec<char> = pattern.chars().collect();
+    
+    fn match_pattern(text: &[char], pattern: &[char], text_idx: usize, pattern_idx: usize) -> bool {
+        let text_len = text.len();
+        let pattern_len = pattern.len();
+        
+        if pattern_idx == pattern_len {
+            return text_idx == text_len;
+        }
+        
+        if pattern[pattern_idx] == '%' {
+            if pattern_idx + 1 == pattern_len {
+                return true;
+            }
+            for i in text_idx..=text_len {
+                if match_pattern(text, pattern, i, pattern_idx + 1) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        
+        if pattern[pattern_idx] == '_' {
+            if text_idx < text_len {
+                return match_pattern(text, pattern, text_idx + 1, pattern_idx + 1);
+            }
+            return false;
+        }
+        
+        if text_idx < text_len && text[text_idx] == pattern[pattern_idx] {
+            return match_pattern(text, pattern, text_idx + 1, pattern_idx + 1);
+        }
+        
+        false
+    }
+    
+    match_pattern(&text_chars, &pattern_chars, 0, 0)
+}
+
+fn is_between(val: &Value, lower: &Value, upper: &Value) -> bool {
+    match (val, lower, upper) {
+        (Value::Integer(v), Value::Integer(l), Value::Integer(u)) => *v >= *l && *v <= *u,
+        (Value::Float(v), Value::Float(l), Value::Float(u)) => *v >= *l && *v <= *u,
+        (Value::Integer(v), Value::Integer(l), Value::Float(u)) => *v as f64 >= *l as f64 && *v as f64 <= *u,
+        (Value::Integer(v), Value::Float(l), Value::Integer(u)) => *v as f64 >= *l && *v as f64 <= *u as f64,
+        (Value::Float(v), Value::Integer(l), Value::Integer(u)) => *v >= *l as f64 && *v <= *u as f64,
+        (Value::Float(v), Value::Integer(l), Value::Float(u)) => *v >= *l as f64 && *v <= *u,
+        (Value::Float(v), Value::Float(l), Value::Integer(u)) => *v >= *l && *v <= *u as f64,
+        (Value::Integer(v), Value::Float(l), Value::Float(u)) => *v as f64 >= *l && *v as f64 <= *u,
+        (Value::Text(v), Value::Text(l), Value::Text(u)) => v >= l && v <= u,
+        _ => false,
     }
 }
 
@@ -555,9 +634,14 @@ fn evaluate_value_expression(
             if name == "*" {
                 return Ok(Value::Integer(1));
             }
+            let col_name = if name.contains('.') {
+                name.split('.').last().unwrap_or(name)
+            } else {
+                name
+            };
             let idx = columns
                 .iter()
-                .position(|c| &c.name == name)
+                .position(|c| c.name == col_name)
                 .ok_or_else(|| format!("Column '{}' not found", name))?;
             Ok(row[idx].clone())
         }
@@ -647,9 +731,7 @@ fn compare_values_for_sort(left: &Value, right: &Value) -> Ordering {
     }
 }
 
-fn execute_select_with_joins(stmt: SelectStatement) -> Result<String, String> {
-    let db = get_database();
-    
+fn execute_select_with_joins(stmt: SelectStatement, db: &Database) -> Result<String, String> {
     let main_table = db
         .tables
         .get(&stmt.from)
@@ -677,30 +759,72 @@ fn execute_select_with_joins(stmt: SelectStatement) -> Result<String, String> {
             let mut combined_row = main_row.clone();
             combined_row.extend(join_row.clone());
             
-            let mut pass = true;
+            let mut pass = false;
             if let Expression::BinaryOp { left, op, right } = &join.on {
                 if *op == BinaryOperator::Equal {
                     match (left.as_ref(), right.as_ref()) {
                         (Expression::Column(left_col), Expression::Column(right_col)) => {
-                            let left_col_name = if left_col.contains('.') {
-                                left_col.split('.').last().unwrap_or(left_col)
+                            let left_col_idx: Option<(bool, usize)> = if left_col.contains('.') {
+                                let parts: Vec<&str> = left_col.split('.').collect();
+                                if parts.len() == 2 {
+                                    let table_name = parts[0];
+                                    let col_name = parts[1];
+                                    if table_name == stmt.from {
+                                        main_table.columns.iter().position(|c| c.name == col_name).map(|idx| (true, idx))
+                                    } else if table_name == join.table {
+                                        join_table.columns.iter().position(|c| c.name == col_name).map(|idx| (false, idx))
+                                    } else {
+                                        None
+                                    }
+                                } else {
+                                    None
+                                }
                             } else {
-                                left_col
-                            };
-                            let right_col_name = if right_col.contains('.') {
-                                right_col.split('.').last().unwrap_or(right_col)
-                            } else {
-                                right_col
+                                None
                             };
                             
-                            let left_idx = main_table.columns.iter().position(|c| c.name == left_col_name);
-                            let right_idx = join_table.columns.iter().position(|c| c.name == right_col_name);
+                            let right_col_idx: Option<(bool, usize)> = if right_col.contains('.') {
+                                let parts: Vec<&str> = right_col.split('.').collect();
+                                if parts.len() == 2 {
+                                    let table_name = parts[0];
+                                    let col_name = parts[1];
+                                    if table_name == stmt.from {
+                                        main_table.columns.iter().position(|c| c.name == col_name).map(|idx| (true, idx))
+                                    } else if table_name == join.table {
+                                        join_table.columns.iter().position(|c| c.name == col_name).map(|idx| (false, idx))
+                                    } else {
+                                        None
+                                    }
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            };
                             
-                            if let (Some(left_idx), Some(right_idx)) = (left_idx, right_idx) {
-                                let left_val = &main_row[left_idx];
-                                let right_val = &join_row[right_idx];
-                                if left_val != right_val {
-                                    pass = false;
+                            let left_val = if let Some((in_main, idx)) = left_col_idx {
+                                if in_main {
+                                    Some(&combined_row[idx])
+                                } else {
+                                    Some(&combined_row[main_table.columns.len() + idx])
+                                }
+                            } else {
+                                None
+                            };
+                            
+                            let right_val = if let Some((in_main, idx)) = right_col_idx {
+                                if in_main {
+                                    Some(&combined_row[idx])
+                                } else {
+                                    Some(&combined_row[main_table.columns.len() + idx])
+                                }
+                            } else {
+                                None
+                            };
+                            
+                            if let (Some(lval), Some(rval)) = (left_val, right_val) {
+                                if lval == rval {
+                                    pass = true;
                                 }
                             }
                         }
@@ -709,8 +833,6 @@ fn execute_select_with_joins(stmt: SelectStatement) -> Result<String, String> {
                         }
                     }
                 }
-            } else {
-                return Err("Only equality joins are currently supported".to_string());
             }
             
             if pass {
@@ -744,10 +866,17 @@ fn execute_select_with_joins(stmt: SelectStatement) -> Result<String, String> {
             .columns
             .iter()
             .map(|col| match col {
-                Column::Named(name) => all_columns
-                    .iter()
-                    .position(|c| &c.name == name)
-                    .unwrap_or(usize::MAX),
+                Column::Named(name) => {
+                    let col_name = if name.contains('.') {
+                        name.split('.').last().unwrap_or(name)
+                    } else {
+                        name
+                    };
+                    all_columns
+                        .iter()
+                        .position(|c| &c.name == col_name)
+                        .unwrap_or(usize::MAX)
+                }
                 _ => usize::MAX,
             })
             .collect(),

@@ -1,22 +1,20 @@
 use rustql::{process_query, reset_database};
-use std::sync::{Once, Mutex};
+use std::sync::Mutex;
 
-static INIT: Once = Once::new();
 static GLOBAL_TEST_LOCK: Mutex<()> = Mutex::new(());
 
-fn setup_test() {
-    let _lock = GLOBAL_TEST_LOCK.lock().unwrap();
-    INIT.call_once(|| {});
+fn setup_test() -> std::sync::MutexGuard<'static, ()> {
+    let guard = GLOBAL_TEST_LOCK.lock().unwrap();
     reset_database();
+    guard
 }
 
 #[test]
 fn test_inner_join() {
-    setup_test();
+    let _guard = setup_test();
     
     process_query("CREATE TABLE users (id INTEGER, name TEXT, email TEXT)").unwrap();
     process_query("CREATE TABLE orders (id INTEGER, user_id INTEGER, product TEXT, price FLOAT)").unwrap();
-    
     process_query("INSERT INTO users VALUES (1, 'Alice', 'alice@example.com'), (2, 'Bob', 'bob@example.com'), (3, 'Charlie', 'charlie@example.com')").unwrap();
     process_query("INSERT INTO orders VALUES (101, 1, 'Laptop', 999.99), (102, 1, 'Mouse', 29.99), (103, 2, 'Keyboard', 79.99)").unwrap();
     
@@ -32,7 +30,7 @@ fn test_inner_join() {
 
 #[test]
 fn test_left_join() {
-    setup_test();
+    let _guard = setup_test();
     
     process_query("CREATE TABLE users (id INTEGER, name TEXT)").unwrap();
     process_query("CREATE TABLE orders (id INTEGER, user_id INTEGER, product TEXT)").unwrap();
@@ -52,7 +50,7 @@ fn test_left_join() {
 
 #[test]
 fn test_join_with_where_clause() {
-    setup_test();
+    let _guard = setup_test();
     
     process_query("CREATE TABLE users (id INTEGER, name TEXT, age INTEGER)").unwrap();
     process_query("CREATE TABLE orders (id INTEGER, user_id INTEGER, product TEXT, price FLOAT)").unwrap();
@@ -72,7 +70,7 @@ fn test_join_with_where_clause() {
 
 #[test]
 fn test_join_with_specific_columns() {
-    setup_test();
+    let _guard = setup_test();
     
     process_query("CREATE TABLE users (id INTEGER, name TEXT, email TEXT)").unwrap();
     process_query("CREATE TABLE orders (id INTEGER, user_id INTEGER, product TEXT, quantity INTEGER)").unwrap();
@@ -91,7 +89,7 @@ fn test_join_with_specific_columns() {
 
 #[test]
 fn test_join_all_columns() {
-    setup_test();
+    let _guard = setup_test();
     
     process_query("CREATE TABLE users (id INTEGER, name TEXT)").unwrap();
     process_query("CREATE TABLE orders (id INTEGER, user_id INTEGER, product TEXT)").unwrap();
@@ -111,7 +109,7 @@ fn test_join_all_columns() {
 
 #[test]
 fn test_join_missing_table() {
-    setup_test();
+    let _guard = setup_test();
     
     process_query("CREATE TABLE users (id INTEGER, name TEXT)").unwrap();
     
@@ -122,7 +120,7 @@ fn test_join_missing_table() {
 
 #[test]
 fn test_join_invalid_column() {
-    setup_test();
+    let _guard = setup_test();
     
     process_query("CREATE TABLE users (id INTEGER, name TEXT)").unwrap();
     process_query("CREATE TABLE orders (id INTEGER, user_id INTEGER, product TEXT)").unwrap();
@@ -133,7 +131,7 @@ fn test_join_invalid_column() {
 
 #[test]
 fn test_join_multiple_conditions() {
-    setup_test();
+    let _guard = setup_test();
     
     process_query("CREATE TABLE users (id INTEGER, name TEXT)").unwrap();
     process_query("CREATE TABLE orders (id INTEGER, user_id INTEGER, product TEXT, price FLOAT)").unwrap();
@@ -152,7 +150,7 @@ fn test_join_multiple_conditions() {
 
 #[test]
 fn test_join_empty_tables() {
-    setup_test();
+    let _guard = setup_test();
     
     process_query("CREATE TABLE users (id INTEGER, name TEXT)").unwrap();
     process_query("CREATE TABLE orders (id INTEGER, user_id INTEGER, product TEXT)").unwrap();
@@ -165,7 +163,7 @@ fn test_join_empty_tables() {
 
 #[test]
 fn test_join_no_matching_rows() {
-    setup_test();
+    let _guard = setup_test();
     
     process_query("CREATE TABLE users (id INTEGER, name TEXT)").unwrap();
     process_query("CREATE TABLE orders (id INTEGER, user_id INTEGER, product TEXT)").unwrap();

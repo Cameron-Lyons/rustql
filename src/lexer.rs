@@ -41,6 +41,9 @@ pub enum Token {
     Right,
     Full,
     On,
+    In,
+    Like,
+    Between,
 
     Identifier(String),
     Number(i64),
@@ -309,6 +312,9 @@ fn match_keyword(ident: &str) -> Token {
         "RIGHT" => Token::Right,
         "FULL" => Token::Full,
         "ON" => Token::On,
+        "IN" => Token::In,
+        "LIKE" => Token::Like,
+        "BETWEEN" => Token::Between,
         _ => Token::Identifier(ident.to_string()),
     }
 }

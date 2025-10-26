@@ -1,16 +1,17 @@
 use rustql::{process_query, reset_database};
-use std::sync::Once;
+use std::sync::Mutex;
 
-static INIT: Once = Once::new();
+static TEST_MUTEX: Mutex<()> = Mutex::new(());
 
-fn setup_test() {
-    INIT.call_once(|| {});
+fn setup_test<'a>() -> std::sync::MutexGuard<'a, ()> {
+    let guard = TEST_MUTEX.lock().unwrap();
     reset_database();
+    guard
 }
 
 #[test]
 fn test_create_table() {
-    setup_test();
+    let _guard = setup_test();
     let result = process_query("CREATE TABLE users (id INTEGER, name TEXT, age INTEGER)");
     assert!(result.is_ok());
     assert_eq!(result.unwrap(), "Table 'users' created");
@@ -22,7 +23,7 @@ fn test_create_table() {
 
 #[test]
 fn test_insert_and_select() {
-    setup_test();
+    let _guard = setup_test();
     process_query("CREATE TABLE users (id INTEGER, name TEXT, age INTEGER)").unwrap();
     let result = process_query("INSERT INTO users VALUES (1, 'Alice', 25)");
     assert!(result.is_ok());
@@ -45,7 +46,7 @@ fn test_insert_and_select() {
 
 #[test]
 fn test_where_clause() {
-    setup_test();
+    let _guard = setup_test();
     process_query("CREATE TABLE users (id INTEGER, name TEXT, age INTEGER)").unwrap();
     process_query("INSERT INTO users VALUES (1, 'Alice', 25), (2, 'Bob', 30), (3, 'Charlie', 35)")
         .unwrap();
@@ -68,7 +69,7 @@ fn test_where_clause() {
 
 #[test]
 fn test_update() {
-    setup_test();
+    let _guard = setup_test();
     process_query("CREATE TABLE users (id INTEGER, name TEXT, age INTEGER)").unwrap();
     process_query("INSERT INTO users VALUES (1, 'Alice', 25), (2, 'Bob', 30)").unwrap();
     let result = process_query("UPDATE users SET age = 26 WHERE name = 'Alice'");
@@ -81,7 +82,7 @@ fn test_update() {
 
 #[test]
 fn test_delete() {
-    setup_test();
+    let _guard = setup_test();
     process_query("CREATE TABLE users (id INTEGER, name TEXT, age INTEGER)").unwrap();
     process_query(
         "INSERT INTO users VALUES (1, 'Alice', 25), (2, 'Bob', 30), (3, 'Charlie', 35)",
@@ -100,7 +101,7 @@ fn test_delete() {
 
 #[test]
 fn test_order_by() {
-    setup_test();
+    let _guard = setup_test();
     process_query("CREATE TABLE users (id INTEGER, name TEXT, age INTEGER)").unwrap();
     process_query(
         "INSERT INTO users VALUES (1, 'Alice', 30), (2, 'Bob', 25), (3, 'Charlie', 35)",
@@ -122,7 +123,7 @@ fn test_order_by() {
 
 #[test]
 fn test_limit_offset() {
-    setup_test();
+    let _guard = setup_test();
     process_query("CREATE TABLE users (id INTEGER, name TEXT, age INTEGER)").unwrap();
     process_query(
         "INSERT INTO users VALUES (1, 'Alice', 25), (2, 'Bob', 30), (3, 'Charlie', 35)",
@@ -144,7 +145,7 @@ fn test_limit_offset() {
 
 #[test]
 fn test_aggregate_functions() {
-    setup_test();
+    let _guard = setup_test();
     process_query("CREATE TABLE sales (id INTEGER, amount FLOAT, quantity INTEGER)").unwrap();
     process_query("INSERT INTO sales VALUES (1, 100.0, 5), (2, 200.0, 3), (3, 150.0, 7)").unwrap();
 
@@ -162,7 +163,7 @@ fn test_aggregate_functions() {
 
 #[test]
 fn test_group_by() {
-    setup_test();
+    let _guard = setup_test();
     process_query("CREATE TABLE orders (id INTEGER, category TEXT, amount FLOAT)").unwrap();
     process_query("INSERT INTO orders VALUES (1, 'Electronics', 100.0), (2, 'Electronics', 200.0), (3, 'Books', 50.0), (4, 'Books', 75.0)").unwrap();
 
@@ -182,7 +183,7 @@ fn test_group_by() {
 
 #[test]
 fn test_data_types() {
-    setup_test();
+    let _guard = setup_test();
     process_query("CREATE TABLE test_types (int_col INTEGER, float_col FLOAT, text_col TEXT, bool_col BOOLEAN)").unwrap();
 
     let result = process_query("INSERT INTO test_types VALUES (42, 3.14, 'hello', 1)");
@@ -197,7 +198,7 @@ fn test_data_types() {
 
 #[test]
 fn test_drop_table() {
-    setup_test();
+    let _guard = setup_test();
     process_query("CREATE TABLE temp_table (id INTEGER)").unwrap();
 
     let result = process_query("DROP TABLE temp_table");
@@ -211,7 +212,7 @@ fn test_drop_table() {
 
 #[test]
 fn test_string_operations() {
-    setup_test();
+    let _guard = setup_test();
     process_query("CREATE TABLE messages (id INTEGER, content TEXT, author TEXT)").unwrap();
     process_query("INSERT INTO messages VALUES (1, 'Hello World', 'Alice'), (2, 'Goodbye', 'Bob')")
         .unwrap();
@@ -227,7 +228,7 @@ fn test_string_operations() {
 
 #[test]
 fn test_complex_queries() {
-    setup_test();
+    let _guard = setup_test();
     process_query(
         "CREATE TABLE employees (id INTEGER, name TEXT, department TEXT, salary FLOAT)",
     )
@@ -244,7 +245,7 @@ fn test_complex_queries() {
 
 #[test]
 fn test_error_handling() {
-    setup_test();
+    let _guard = setup_test();
     let result = process_query("SELCT * FROM users");
     assert!(result.is_err());
 

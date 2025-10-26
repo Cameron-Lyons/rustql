@@ -21,6 +21,9 @@ A lightweight SQL database engine written in Rust. RustQL is an educational impl
   - Column selection (SELECT *)
   - WHERE clause with comparison operators (=, !=, <, <=, >, >=)
   - Logical operators (AND, OR, NOT)
+  - **IN operator**: `WHERE column IN (value1, value2, ...)`
+  - **LIKE operator**: `WHERE column LIKE 'pattern'` (supports % and _ wildcards)
+  - **BETWEEN operator**: `WHERE column BETWEEN value1 AND value2`
   - ORDER BY (ASC/DESC)
   - LIMIT and OFFSET
   - Aggregate functions: COUNT, SUM, AVG, MIN, MAX
@@ -109,6 +112,22 @@ SELECT name, email FROM users;
 SELECT * FROM users WHERE age > 30;
 SELECT * FROM users WHERE age > 25 AND age < 35;
 SELECT * FROM users WHERE name = 'Alice' OR name = 'Bob';
+
+-- With IN operator
+SELECT * FROM users WHERE age IN (25, 30, 35);
+
+-- With LIKE operator
+SELECT * FROM users WHERE email LIKE '%@gmail.com';
+SELECT * FROM products WHERE name LIKE 'Laptop%';
+
+-- With BETWEEN operator
+SELECT * FROM employees WHERE salary BETWEEN 50000 AND 100000;
+SELECT * FROM products WHERE price BETWEEN 10.99 AND 29.99;
+
+-- With NOT (inverts conditions)
+SELECT * FROM users WHERE NOT (age IN (25, 30));
+SELECT * FROM products WHERE NOT (name LIKE '%old%');
+SELECT * FROM employees WHERE NOT (salary BETWEEN 40000 AND 60000);
 
 -- Ordering
 SELECT * FROM users ORDER BY age ASC;

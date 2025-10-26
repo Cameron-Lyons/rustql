@@ -591,23 +591,108 @@ impl Parser {
         let mut expr = self.parse_term()?;
 
         loop {
-            let op = match self.current_token() {
-                Token::Equal => BinaryOperator::Equal,
-                Token::NotEqual => BinaryOperator::NotEqual,
-                Token::LessThan => BinaryOperator::LessThan,
-                Token::LessThanOrEqual => BinaryOperator::LessThanOrEqual,
-                Token::GreaterThan => BinaryOperator::GreaterThan,
-                Token::GreaterThanOrEqual => BinaryOperator::GreaterThanOrEqual,
+            match self.current_token() {
+                Token::Equal => {
+                    self.advance();
+                    let right = self.parse_term()?;
+                    expr = Expression::BinaryOp {
+                        left: Box::new(expr),
+                        op: BinaryOperator::Equal,
+                        right: Box::new(right),
+                    };
+                }
+                Token::NotEqual => {
+                    self.advance();
+                    let right = self.parse_term()?;
+                    expr = Expression::BinaryOp {
+                        left: Box::new(expr),
+                        op: BinaryOperator::NotEqual,
+                        right: Box::new(right),
+                    };
+                }
+                Token::LessThan => {
+                    self.advance();
+                    let right = self.parse_term()?;
+                    expr = Expression::BinaryOp {
+                        left: Box::new(expr),
+                        op: BinaryOperator::LessThan,
+                        right: Box::new(right),
+                    };
+                }
+                Token::LessThanOrEqual => {
+                    self.advance();
+                    let right = self.parse_term()?;
+                    expr = Expression::BinaryOp {
+                        left: Box::new(expr),
+                        op: BinaryOperator::LessThanOrEqual,
+                        right: Box::new(right),
+                    };
+                }
+                Token::GreaterThan => {
+                    self.advance();
+                    let right = self.parse_term()?;
+                    expr = Expression::BinaryOp {
+                        left: Box::new(expr),
+                        op: BinaryOperator::GreaterThan,
+                        right: Box::new(right),
+                    };
+                }
+                Token::GreaterThanOrEqual => {
+                    self.advance();
+                    let right = self.parse_term()?;
+                    expr = Expression::BinaryOp {
+                        left: Box::new(expr),
+                        op: BinaryOperator::GreaterThanOrEqual,
+                        right: Box::new(right),
+                    };
+                }
+                Token::Like => {
+                    self.advance();
+                    let right = self.parse_term()?;
+                    expr = Expression::BinaryOp {
+                        left: Box::new(expr),
+                        op: BinaryOperator::Like,
+                        right: Box::new(right),
+                    };
+                }
+                Token::In => {
+                    self.advance();
+                    if *self.current_token() != Token::LeftParen {
+                        return Err("Expected '(' after IN".to_string());
+                    }
+                    self.advance();
+                    
+                    let mut values = Vec::new();
+                    while *self.current_token() != Token::RightParen {
+                        values.push(self.parse_value()?);
+                        if *self.current_token() == Token::Comma {
+                            self.advance();
+                        }
+                    }
+                    self.consume(Token::RightParen)?;
+                    
+                    expr = Expression::In {
+                        left: Box::new(expr),
+                        values,
+                    };
+                }
+                Token::Between => {
+                    self.advance();
+                    let left_bound = self.parse_term()?;
+                    self.consume(Token::And)?;
+                    let right_bound = self.parse_term()?;
+                    expr = Expression::BinaryOp {
+                        left: Box::new(expr),
+                        op: BinaryOperator::Between,
+                        right: Box::new(Expression::BinaryOp {
+                            left: Box::new(left_bound),
+                            op: BinaryOperator::And,
+                            right: Box::new(right_bound),
+                        }),
+                    };
+                }
                 _ => break,
-            };
-
-            self.advance();
-            let right = self.parse_term()?;
-            expr = Expression::BinaryOp {
-                left: Box::new(expr),
-                op,
-                right: Box::new(right),
-            };
+            }
         }
 
         Ok(expr)

@@ -138,6 +138,10 @@ pub enum Expression {
         op: UnaryOperator,
         expr: Box<Expression>,
     },
+    In {
+        left: Box<Expression>,
+        values: Vec<Value>,
+    },
     Column(String),
     Value(Value),
     Function(AggregateFunction),
@@ -157,6 +161,9 @@ pub enum BinaryOperator {
     Minus,
     Multiply,
     Divide,
+    Like,
+    Between,
+    In,
 }
 
 #[derive(Debug, Clone, PartialEq)]
