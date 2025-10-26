@@ -1,5 +1,6 @@
 #[derive(Debug, Clone, PartialEq)]
 pub enum Token {
+    Dot,
     Select,
     From,
     Where,
@@ -177,6 +178,27 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, String> {
             _ if ch.is_ascii_alphabetic() || ch == '_' => {
                 let ident = read_identifier(&mut chars);
                 tokens.push(match_keyword(&ident));
+            }
+            '.' => {
+                if let Some(Token::Identifier(last_ident)) = tokens.last_mut() {
+                    chars.next();
+                    if let Some(&ch) = chars.peek() {
+                        if ch.is_ascii_alphanumeric() || ch == '_' {
+                            let rest = read_identifier(&mut chars);
+                            last_ident.push_str(".");
+                            last_ident.push_str(&rest);
+                        } else {
+                            tokens.push(Token::Dot);
+                            chars.next();
+                        }
+                    } else {
+                        tokens.push(Token::Dot);
+                        chars.next();
+                    }
+                } else {
+                    tokens.push(Token::Dot);
+                    chars.next();
+                }
             }
             _ => {
                 return Err(format!("Unexpected character: {}", ch));

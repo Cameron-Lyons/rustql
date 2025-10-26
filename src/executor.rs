@@ -89,6 +89,11 @@ fn execute_insert(stmt: InsertStatement) -> Result<String, String> {
 
 fn execute_select(stmt: SelectStatement) -> Result<String, String> {
     let db = get_database();
+    
+    if !stmt.joins.is_empty() {
+        return execute_select_with_joins(stmt);
+    }
+    
     let table = db
         .tables
         .get(&stmt.from)
@@ -640,6 +645,149 @@ fn compare_values_for_sort(left: &Value, right: &Value) -> Ordering {
         (Value::Boolean(l), Value::Boolean(r)) => l.cmp(r),
         _ => Ordering::Equal,
     }
+}
+
+fn execute_select_with_joins(stmt: SelectStatement) -> Result<String, String> {
+    let db = get_database();
+    
+    let main_table = db
+        .tables
+        .get(&stmt.from)
+        .ok_or_else(|| format!("Table '{}' does not exist", stmt.from))?;
+    
+    if stmt.joins.len() != 1 {
+        return Err("Multiple joins not yet supported".to_string());
+    }
+    
+    let join = &stmt.joins[0];
+    let join_table = db
+        .tables
+        .get(&join.table)
+        .ok_or_else(|| format!("Table '{}' does not exist", join.table))?;
+    
+    let mut all_columns = main_table.columns.clone();
+    all_columns.extend(join_table.columns.clone());
+    
+    let mut joined_rows = Vec::new();
+    
+    for main_row in &main_table.rows {
+        let mut has_match = false;
+        
+        for join_row in &join_table.rows {
+            let mut combined_row = main_row.clone();
+            combined_row.extend(join_row.clone());
+            
+            let mut pass = true;
+            if let Expression::BinaryOp { left, op, right } = &join.on {
+                if *op == BinaryOperator::Equal {
+                    match (left.as_ref(), right.as_ref()) {
+                        (Expression::Column(left_col), Expression::Column(right_col)) => {
+                            let left_col_name = if left_col.contains('.') {
+                                left_col.split('.').last().unwrap_or(left_col)
+                            } else {
+                                left_col
+                            };
+                            let right_col_name = if right_col.contains('.') {
+                                right_col.split('.').last().unwrap_or(right_col)
+                            } else {
+                                right_col
+                            };
+                            
+                            let left_idx = main_table.columns.iter().position(|c| c.name == left_col_name);
+                            let right_idx = join_table.columns.iter().position(|c| c.name == right_col_name);
+                            
+                            if let (Some(left_idx), Some(right_idx)) = (left_idx, right_idx) {
+                                let left_val = &main_row[left_idx];
+                                let right_val = &join_row[right_idx];
+                                if left_val != right_val {
+                                    pass = false;
+                                }
+                            }
+                        }
+                        _ => {
+                            return Err("Complex join conditions not yet supported".to_string());
+                        }
+                    }
+                }
+            } else {
+                return Err("Only equality joins are currently supported".to_string());
+            }
+            
+            if pass {
+                joined_rows.push(combined_row);
+                has_match = true;
+            }
+        }
+        
+        if matches!(join.join_type, JoinType::Left) && !has_match {
+            let mut combined_row = main_row.clone();
+            combined_row.extend(vec![Value::Null; join_table.columns.len()]);
+            joined_rows.push(combined_row);
+        }
+    }
+    
+    let mut filtered_rows: Vec<Vec<Value>> = Vec::new();
+    for row in &joined_rows {
+        let include_row = if let Some(ref where_expr) = stmt.where_clause {
+            evaluate_expression_multi_table(where_expr, &all_columns, row, &main_table.columns, &join_table.columns, main_table, join_table)?
+        } else {
+            true
+        };
+        if include_row {
+            filtered_rows.push(row.clone());
+        }
+    }
+    
+    let column_indices: Vec<usize> = match &stmt.columns[0] {
+        Column::All => (0..all_columns.len()).collect(),
+        Column::Named(_) => stmt
+            .columns
+            .iter()
+            .map(|col| match col {
+                Column::Named(name) => all_columns
+                    .iter()
+                    .position(|c| &c.name == name)
+                    .unwrap_or(usize::MAX),
+                _ => usize::MAX,
+            })
+            .collect(),
+        _ => return Err("Invalid column type".to_string()),
+    };
+    
+    for idx in &column_indices {
+        if *idx == usize::MAX {
+            return Err("Column not found".to_string());
+        }
+    }
+    
+    let mut result = String::new();
+    for idx in &column_indices {
+        result.push_str(&format!("{}\t", all_columns[*idx].name));
+    }
+    result.push('\n');
+    result.push_str(&"-".repeat(40));
+    result.push('\n');
+    
+    for row in &filtered_rows {
+        for idx in &column_indices {
+            result.push_str(&format!("{}\t", format_value(&row[*idx])));
+        }
+        result.push('\n');
+    }
+    
+    Ok(result)
+}
+
+fn evaluate_expression_multi_table(
+    expr: &Expression,
+    all_columns: &[ColumnDefinition],
+    row: &[Value],
+    _main_cols: &[ColumnDefinition],
+    _join_cols: &[ColumnDefinition],
+    _main_table: &Table,
+    _join_table: &Table,
+) -> Result<bool, String> {
+    evaluate_expression(expr, all_columns, row)
 }
 
 fn execute_alter_table(stmt: AlterTableStatement) -> Result<String, String> {

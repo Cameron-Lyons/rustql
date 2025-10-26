@@ -64,6 +64,47 @@ impl Parser {
             _ => return Err("Expected table name".to_string()),
         };
 
+        let mut joins = Vec::new();
+        loop {
+            let join_type = if *self.current_token() == Token::Left {
+                self.advance();
+                Some(JoinType::Left)
+            } else if *self.current_token() == Token::Right {
+                self.advance();
+                Some(JoinType::Right)
+            } else if *self.current_token() == Token::Full {
+                self.advance();
+                Some(JoinType::Full)
+            } else if *self.current_token() == Token::Inner {
+                self.advance();
+                Some(JoinType::Inner)
+            } else if *self.current_token() == Token::Join {
+                Some(JoinType::Inner) // Default to INNER JOIN if no type specified
+            } else {
+                None
+            };
+
+            if let Some(join_type) = join_type {
+                self.consume(Token::Join)?;
+                
+                let join_table = match self.advance() {
+                    Token::Identifier(name) => name,
+                    _ => return Err("Expected table name after JOIN".to_string()),
+                };
+
+                self.consume(Token::On)?;
+                let on_expr = self.parse_expression()?;
+
+                joins.push(Join {
+                    join_type,
+                    table: join_table,
+                    on: on_expr,
+                });
+            } else {
+                break;
+            }
+        }
+
         let where_clause = if *self.current_token() == Token::Where {
             self.advance();
             Some(self.parse_expression()?)
@@ -117,7 +158,7 @@ impl Parser {
         Ok(Statement::Select(SelectStatement {
             columns,
             from: table,
-            joins: Vec::new(),
+            joins,
             where_clause,
             group_by,
             having,
