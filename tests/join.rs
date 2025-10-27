@@ -177,3 +177,74 @@ fn test_join_no_matching_rows() {
     assert!(lines.len() <= 2); 
 }
 
+#[test]
+fn test_right_join() {
+    let _guard = setup_test();
+    
+    process_query("CREATE TABLE customers (id INTEGER, name TEXT)").unwrap();
+    process_query("CREATE TABLE orders (id INTEGER, customer_id INTEGER, product TEXT)").unwrap();
+    
+    process_query("INSERT INTO customers VALUES (1, 'Alice'), (2, 'Bob')").unwrap();
+    process_query("INSERT INTO orders VALUES (101, 1, 'Laptop'), (102, 2, 'Keyboard'), (103, 999, 'Mouse')").unwrap(); // customer_id 999 doesn't exist
+    
+    let result = process_query("SELECT customers.name, orders.product FROM customers RIGHT JOIN orders ON customers.id = orders.customer_id").unwrap();
+    
+    // Should include all orders
+    assert!(result.contains("Alice"));
+    assert!(result.contains("Bob"));
+    assert!(result.contains("Laptop"));
+    assert!(result.contains("Keyboard"));
+    assert!(result.contains("Mouse"));
+}
+
+#[test]
+fn test_full_join() {
+    let _guard = setup_test();
+    
+    process_query("CREATE TABLE left_table (id INTEGER, name TEXT)").unwrap();
+    process_query("CREATE TABLE right_table (id INTEGER, value TEXT)").unwrap();
+    
+    process_query("INSERT INTO left_table VALUES (1, 'A'), (2, 'B')").unwrap();
+    process_query("INSERT INTO right_table VALUES (2, 'Y'), (3, 'Z')").unwrap();
+    
+    let result = process_query("SELECT * FROM left_table FULL JOIN right_table ON left_table.id = right_table.id").unwrap();
+    
+    assert!(result.contains("1"));
+    assert!(result.contains("2"));
+    assert!(result.contains("3"));
+}
+
+#[test]
+fn test_right_join_no_matches() {
+    let _guard = setup_test();
+    
+    process_query("CREATE TABLE users (id INTEGER, name TEXT)").unwrap();
+    process_query("CREATE TABLE products (id INTEGER, name TEXT)").unwrap();
+    
+    process_query("INSERT INTO users VALUES (1, 'Alice'), (2, 'Bob')").unwrap();
+    process_query("INSERT INTO products VALUES (101, 'Laptop'), (102, 'Mouse')").unwrap(); // No matching IDs
+    
+    let result = process_query("SELECT * FROM users RIGHT JOIN products ON users.id = products.id").unwrap();
+    
+    assert!(result.contains("Laptop"));
+    assert!(result.contains("Mouse"));
+}
+
+#[test]
+fn test_full_join_multiple_unmatches() {
+    let _guard = setup_test();
+    
+    process_query("CREATE TABLE a (id INTEGER, val TEXT)").unwrap();
+    process_query("CREATE TABLE b (id INTEGER, val TEXT)").unwrap();
+    
+    process_query("INSERT INTO a VALUES (1, 'A1'), (2, 'A2')").unwrap();
+    process_query("INSERT INTO b VALUES (3, 'B1'), (4, 'B2')").unwrap(); // No matching IDs
+    
+    let result = process_query("SELECT * FROM a FULL JOIN b ON a.id = b.id").unwrap();
+    
+    assert!(result.contains("A1"));
+    assert!(result.contains("A2"));
+    assert!(result.contains("B1"));
+    assert!(result.contains("B2"));
+}
+

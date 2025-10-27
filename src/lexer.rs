@@ -44,6 +44,10 @@ pub enum Token {
     In,
     Like,
     Between,
+    Boolean,
+    Date,
+    Time,
+    DateTime,
 
     Identifier(String),
     Number(i64),
@@ -315,6 +319,10 @@ fn match_keyword(ident: &str) -> Token {
         "IN" => Token::In,
         "LIKE" => Token::Like,
         "BETWEEN" => Token::Between,
+        "BOOLEAN" => Token::Boolean,
+        "DATE" => Token::Date,
+        "TIME" => Token::Time,
+        "DATETIME" => Token::DateTime,
         _ => Token::Identifier(ident.to_string()),
     }
 }

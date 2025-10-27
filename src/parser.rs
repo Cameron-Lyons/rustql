@@ -473,11 +473,16 @@ impl Parser {
 
     fn parse_data_type(&mut self) -> Result<DataType, String> {
         match self.advance() {
+            Token::Boolean => Ok(DataType::Boolean),
+            Token::Date => Ok(DataType::Date),
+            Token::Time => Ok(DataType::Time),
+            Token::DateTime => Ok(DataType::DateTime),
             Token::Identifier(name) => match name.to_uppercase().as_str() {
                 "INT" | "INTEGER" => Ok(DataType::Integer),
                 "FLOAT" | "REAL" | "DOUBLE" => Ok(DataType::Float),
                 "TEXT" | "VARCHAR" | "STRING" => Ok(DataType::Text),
-                "BOOL" | "BOOLEAN" => Ok(DataType::Boolean),
+                "BOOL" => Ok(DataType::Boolean),
+                "DATETIME" | "TIMESTAMP" => Ok(DataType::DateTime),
                 _ => Err(format!("Unknown data type: {}", name)),
             },
             _ => Err("Expected data type".to_string()),

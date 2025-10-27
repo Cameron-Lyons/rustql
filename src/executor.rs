@@ -1,7 +1,7 @@
 use crate::ast::*;
 use crate::database::{Database, Table};
 use std::cmp::Ordering;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::{Mutex, OnceLock};
 
 static DATABASE: OnceLock<Mutex<Database>> = OnceLock::new();
@@ -560,6 +560,9 @@ fn evaluate_expression(
             let left_val = evaluate_value_expression(left, columns, row)?;
             Ok(values.contains(&left_val))
         }
+        Expression::Subquery(_subquery) => {
+            Err("Subqueries in WHERE clause not yet supported".to_string())
+        }
         Expression::UnaryOp { op, expr } => match op {
             UnaryOperator::Not => Ok(!evaluate_expression(expr, columns, row)?),
             _ => Err("Unsupported unary operation in WHERE clause".to_string()),
@@ -651,6 +654,10 @@ fn evaluate_value_expression(
 }
 
 fn compare_values(left: &Value, op: &BinaryOperator, right: &Value) -> Result<bool, String> {
+    if matches!(left, Value::Null) || matches!(right, Value::Null) {
+        return Ok(false);
+    }
+    
     let (left_num, right_num) = match (left, right) {
         (Value::Integer(l), Value::Integer(r)) => (Some(*l as f64), Some(*r as f64)),
         (Value::Float(l), Value::Float(r)) => (Some(*l), Some(*r)),
@@ -675,6 +682,33 @@ fn compare_values(left: &Value, op: &BinaryOperator, right: &Value) -> Result<bo
                 BinaryOperator::NotEqual => l != r,
                 _ => return Err("Invalid operator for strings".to_string()),
             }),
+            (Value::Date(l), Value::Date(r), op) => Ok(match op {
+                BinaryOperator::Equal => l == r,
+                BinaryOperator::NotEqual => l != r,
+                BinaryOperator::LessThan => l < r,
+                BinaryOperator::LessThanOrEqual => l <= r,
+                BinaryOperator::GreaterThan => l > r,
+                BinaryOperator::GreaterThanOrEqual => l >= r,
+                _ => return Err("Invalid operator for dates".to_string()),
+            }),
+            (Value::Time(l), Value::Time(r), op) => Ok(match op {
+                BinaryOperator::Equal => l == r,
+                BinaryOperator::NotEqual => l != r,
+                BinaryOperator::LessThan => l < r,
+                BinaryOperator::LessThanOrEqual => l <= r,
+                BinaryOperator::GreaterThan => l > r,
+                BinaryOperator::GreaterThanOrEqual => l >= r,
+                _ => return Err("Invalid operator for times".to_string()),
+            }),
+            (Value::DateTime(l), Value::DateTime(r), op) => Ok(match op {
+                BinaryOperator::Equal => l == r,
+                BinaryOperator::NotEqual => l != r,
+                BinaryOperator::LessThan => l < r,
+                BinaryOperator::LessThanOrEqual => l <= r,
+                BinaryOperator::GreaterThan => l > r,
+                BinaryOperator::GreaterThanOrEqual => l >= r,
+                _ => return Err("Invalid operator for datetimes".to_string()),
+            }),
             _ => Err("Type mismatch in comparison".to_string()),
         }
     }
@@ -687,6 +721,9 @@ pub fn format_value(value: &Value) -> String {
         Value::Float(f) => f.to_string(),
         Value::Text(s) => s.clone(),
         Value::Boolean(b) => b.to_string(),
+        Value::Date(d) => d.clone(),
+        Value::Time(t) => t.clone(),
+        Value::DateTime(dt) => dt.clone(),
     }
 }
 
@@ -727,6 +764,9 @@ fn compare_values_for_sort(left: &Value, right: &Value) -> Ordering {
         }
         (Value::Text(l), Value::Text(r)) => l.cmp(r),
         (Value::Boolean(l), Value::Boolean(r)) => l.cmp(r),
+        (Value::Date(l), Value::Date(r)) => l.cmp(r),
+        (Value::Time(l), Value::Time(r)) => l.cmp(r),
+        (Value::DateTime(l), Value::DateTime(r)) => l.cmp(r),
         _ => Ordering::Equal,
     }
 }
@@ -751,27 +791,24 @@ fn execute_select_with_joins(stmt: SelectStatement, db: &Database) -> Result<Str
     all_columns.extend(join_table.columns.clone());
     
     let mut joined_rows = Vec::new();
+    let mut matched_rows = HashSet::new();
+    let main_table_name = stmt.from.clone();
+    let join_table_name = join.table.clone();
     
-    for main_row in &main_table.rows {
-        let mut has_match = false;
-        
-        for join_row in &join_table.rows {
-            let mut combined_row = main_row.clone();
-            combined_row.extend(join_row.clone());
-            
-            let mut pass = false;
-            if let Expression::BinaryOp { left, op, right } = &join.on {
-                if *op == BinaryOperator::Equal {
-                    match (left.as_ref(), right.as_ref()) {
-                        (Expression::Column(left_col), Expression::Column(right_col)) => {
-                            let left_col_idx: Option<(bool, usize)> = if left_col.contains('.') {
-                                let parts: Vec<&str> = left_col.split('.').collect();
+    let check_join_match = |main_row: &Vec<Value>, join_row: &Vec<Value>| -> bool {
+        if let Expression::BinaryOp { left, op, right } = &join.on {
+            if *op == BinaryOperator::Equal {
+                match (left.as_ref(), right.as_ref()) {
+                    (Expression::Column(left_col), Expression::Column(right_col)) => {
+                        let get_col_idx = |col_name: &str| -> Option<(bool, usize)> {
+                            if col_name.contains('.') {
+                                let parts: Vec<&str> = col_name.split('.').collect();
                                 if parts.len() == 2 {
                                     let table_name = parts[0];
                                     let col_name = parts[1];
-                                    if table_name == stmt.from {
+                                    if table_name == main_table_name {
                                         main_table.columns.iter().position(|c| c.name == col_name).map(|idx| (true, idx))
-                                    } else if table_name == join.table {
+                                    } else if table_name == join_table_name {
                                         join_table.columns.iter().position(|c| c.name == col_name).map(|idx| (false, idx))
                                     } else {
                                         None
@@ -781,70 +818,87 @@ fn execute_select_with_joins(stmt: SelectStatement, db: &Database) -> Result<Str
                                 }
                             } else {
                                 None
-                            };
-                            
-                            let right_col_idx: Option<(bool, usize)> = if right_col.contains('.') {
-                                let parts: Vec<&str> = right_col.split('.').collect();
-                                if parts.len() == 2 {
-                                    let table_name = parts[0];
-                                    let col_name = parts[1];
-                                    if table_name == stmt.from {
-                                        main_table.columns.iter().position(|c| c.name == col_name).map(|idx| (true, idx))
-                                    } else if table_name == join.table {
-                                        join_table.columns.iter().position(|c| c.name == col_name).map(|idx| (false, idx))
-                                    } else {
-                                        None
-                                    }
-                                } else {
-                                    None
-                                }
-                            } else {
-                                None
-                            };
-                            
-                            let left_val = if let Some((in_main, idx)) = left_col_idx {
-                                if in_main {
-                                    Some(&combined_row[idx])
-                                } else {
-                                    Some(&combined_row[main_table.columns.len() + idx])
-                                }
-                            } else {
-                                None
-                            };
-                            
-                            let right_val = if let Some((in_main, idx)) = right_col_idx {
-                                if in_main {
-                                    Some(&combined_row[idx])
-                                } else {
-                                    Some(&combined_row[main_table.columns.len() + idx])
-                                }
-                            } else {
-                                None
-                            };
-                            
-                            if let (Some(lval), Some(rval)) = (left_val, right_val) {
-                                if lval == rval {
-                                    pass = true;
-                                }
                             }
+                        };
+                        
+                        let left_col_idx = get_col_idx(left_col);
+                        let right_col_idx = get_col_idx(right_col);
+                        
+                        let left_val = if let Some((in_main, idx)) = left_col_idx {
+                            if in_main {
+                                Some(&main_row[idx])
+                            } else {
+                                Some(&join_row[idx])
+                            }
+                        } else {
+                            None
+                        };
+                        
+                        let right_val = if let Some((in_main, idx)) = right_col_idx {
+                            if in_main {
+                                Some(&main_row[idx])
+                            } else {
+                                Some(&join_row[idx])
+                            }
+                        } else {
+                            None
+                        };
+                        
+                        if let (Some(lval), Some(rval)) = (left_val, right_val) {
+                            return lval == rval;
                         }
-                        _ => {
-                            return Err("Complex join conditions not yet supported".to_string());
-                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        false
+    };
+    
+    if matches!(join.join_type, JoinType::Inner | JoinType::Left | JoinType::Full) {
+        for (main_idx, main_row) in main_table.rows.iter().enumerate() {
+            let mut has_match = false;
+            
+            for (join_idx, join_row) in join_table.rows.iter().enumerate() {
+                if check_join_match(main_row, join_row) {
+                    let mut combined_row = main_row.clone();
+                    combined_row.extend(join_row.clone());
+                    joined_rows.push(combined_row);
+                    has_match = true;
+                    
+                    matched_rows.insert((main_idx, join_idx));
+                }
+            }
+            
+            if matches!(join.join_type, JoinType::Left | JoinType::Full) && !has_match {
+                let mut combined_row = main_row.clone();
+                combined_row.extend(vec![Value::Null; join_table.columns.len()]);
+                joined_rows.push(combined_row);
+            }
+        }
+    }
+    
+    if matches!(join.join_type, JoinType::Right | JoinType::Full) {
+        for (join_idx, join_row) in join_table.rows.iter().enumerate() {
+            let mut has_match = false;
+            
+            for (main_idx, main_row) in main_table.rows.iter().enumerate() {
+                if check_join_match(main_row, join_row) {
+                    has_match = true;
+                    
+                    if !matches!(join.join_type, JoinType::Full) || !matched_rows.contains(&(main_idx, join_idx)) {
+                        let mut combined_row = main_row.clone();
+                        combined_row.extend(join_row.clone());
+                        joined_rows.push(combined_row);
                     }
                 }
             }
             
-            if pass {
+            if !has_match {
+                let mut combined_row = vec![Value::Null; main_table.columns.len()];
+                combined_row.extend(join_row.clone());
                 joined_rows.push(combined_row);
-                has_match = true;
             }
-        }
-        
-        if matches!(join.join_type, JoinType::Left) && !has_match {
-            let mut combined_row = main_row.clone();
-            combined_row.extend(vec![Value::Null; join_table.columns.len()]);
-            joined_rows.push(combined_row);
         }
     }
     
@@ -937,6 +991,9 @@ fn execute_alter_table(stmt: AlterTableStatement) -> Result<String, String> {
                 DataType::Float => Value::Float(0.0),
                 DataType::Text => Value::Text(String::new()),
                 DataType::Boolean => Value::Boolean(false),
+                DataType::Date => Value::Date("1970-01-01".to_string()),
+                DataType::Time => Value::Time("00:00:00".to_string()),
+                DataType::DateTime => Value::DateTime("1970-01-01 00:00:00".to_string()),
             };
             for row in &mut table.rows {
                 row.push(default_value.clone());

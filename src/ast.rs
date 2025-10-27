@@ -107,6 +107,9 @@ pub enum DataType {
     Float,
     Text,
     Boolean,
+    Date,
+    Time,
+    DateTime,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -142,6 +145,7 @@ pub enum Expression {
         left: Box<Expression>,
         values: Vec<Value>,
     },
+    Subquery(Box<SelectStatement>),
     Column(String),
     Value(Value),
     Function(AggregateFunction),
@@ -181,6 +185,9 @@ pub enum Value {
     Text(String),
     #[allow(dead_code)]
     Boolean(bool),
+    Date(String),  // ISO format: YYYY-MM-DD
+    Time(String),  // ISO format: HH:MM:SS
+    DateTime(String),  // ISO format: YYYY-MM-DD HH:MM:SS
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -236,6 +243,9 @@ impl Ord for Value {
             }
             (Value::Text(a), Value::Text(b)) => a.cmp(b),
             (Value::Boolean(a), Value::Boolean(b)) => a.cmp(b),
+            (Value::Date(a), Value::Date(b)) => a.cmp(b),
+            (Value::Time(a), Value::Time(b)) => a.cmp(b),
+            (Value::DateTime(a), Value::DateTime(b)) => a.cmp(b),
             _ => Ordering::Equal,
         }
     }

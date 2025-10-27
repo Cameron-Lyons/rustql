@@ -28,13 +28,16 @@ A lightweight SQL database engine written in Rust. RustQL is an educational impl
   - LIMIT and OFFSET
   - Aggregate functions: COUNT, SUM, AVG, MIN, MAX
   - GROUP BY with HAVING clause
-  - **JOIN operations** (INNER, LEFT, RIGHT, FULL)
+  - **JOIN operations** (INNER, LEFT, RIGHT, FULL) - All join types now supported!
 
 - **Data Types**
   - INTEGER
   - FLOAT
   - TEXT
   - BOOLEAN
+  - DATE
+  - TIME
+  - DATETIME
 
 - **Storage**
   - Persistent JSON-based storage
@@ -242,8 +245,7 @@ cargo test select
 
 ## Limitations
 
-- Currently supports only simple equality joins
-- No support for subqueries
+- Subqueries not yet implemented (planned for future version)
 - No indexes for performance optimization
 - No foreign key constraints
 - Limited to single-file JSON storage
@@ -254,16 +256,13 @@ cargo test select
 
 Possible improvements for the project:
 
-- [ ] Full JOIN support with complex conditions
-- [ ] Subquery support
+- [ ] Subquery support (WHERE EXISTS, scalar subqueries, correlated subqueries)
 - [ ] Index implementation for better performance
 - [ ] Foreign key constraints
 - [ ] Transaction support with rollback
 - [ ] B-tree or LSM-tree storage engine
 - [ ] Concurrency control
-- [ ] LIKE, IN, BETWEEN operators
-- [ ] Date/time types
-- [ ] NULL handling improvements
+- [ ] Better NULL handling with IS NULL / IS NOT NULL
 
 ## Contributing
 
