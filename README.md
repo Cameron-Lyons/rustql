@@ -29,6 +29,7 @@ A lightweight SQL database engine written in Rust. RustQL is an educational impl
   - Aggregate functions: COUNT, SUM, AVG, MIN, MAX
   - GROUP BY with HAVING clause
   - **JOIN operations** (INNER, LEFT, RIGHT, FULL) - All join types now supported!
+  - Basic subqueries in WHERE: `IN (SELECT single_column FROM table [WHERE ...])`
 
 - **Data Types**
   - INTEGER
@@ -245,7 +246,7 @@ cargo test select
 
 ## Limitations
 
-- Subqueries not yet implemented (planned for future version)
+- Subqueries: only basic `IN (SELECT ...)` with a single projected column is supported
 - No indexes for performance optimization
 - No foreign key constraints
 - Limited to single-file JSON storage

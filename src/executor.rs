@@ -94,7 +94,8 @@ fn execute_select(stmt: SelectStatement) -> Result<String, String> {
         return execute_select_with_joins(stmt, &db);
     }
     
-    let table = db
+    let db_ref: &Database = &db;
+    let table = db_ref
         .tables
         .get(&stmt.from)
         .ok_or_else(|| format!("Table '{}' does not exist", stmt.from))?;
@@ -102,7 +103,7 @@ fn execute_select(stmt: SelectStatement) -> Result<String, String> {
     let mut filtered_rows: Vec<&Vec<Value>> = Vec::new();
     for row in &table.rows {
         let include_row = if let Some(ref where_expr) = stmt.where_clause {
-            evaluate_expression(where_expr, &table.columns, row)?
+            evaluate_expression(Some(db_ref), where_expr, &table.columns, row)?
         } else {
             true
         };
@@ -478,7 +479,7 @@ fn execute_update(stmt: UpdateStatement) -> Result<String, String> {
     let mut updated_count = 0;
     for row in &mut table.rows {
         let should_update = if let Some(ref where_expr) = stmt.where_clause {
-            evaluate_expression(where_expr, &table.columns, row)?
+            evaluate_expression(None, where_expr, &table.columns, row)?
         } else {
             true
         };
@@ -511,7 +512,7 @@ fn execute_delete(stmt: DeleteStatement) -> Result<String, String> {
     if let Some(ref where_expr) = stmt.where_clause {
         table
             .rows
-            .retain(|row| !evaluate_expression(where_expr, &table.columns, row).unwrap_or(false));
+            .retain(|row| !evaluate_expression(None, where_expr, &table.columns, row).unwrap_or(false));
     } else {
         table.rows.clear();
     }
@@ -521,16 +522,17 @@ fn execute_delete(stmt: DeleteStatement) -> Result<String, String> {
 }
 
 fn evaluate_expression(
+    db: Option<&Database>,
     expr: &Expression,
     columns: &[ColumnDefinition],
     row: &[Value],
 ) -> Result<bool, String> {
     match expr {
         Expression::BinaryOp { left, op, right } => match op {
-            BinaryOperator::And => Ok(evaluate_expression(left, columns, row)?
-                && evaluate_expression(right, columns, row)?),
-            BinaryOperator::Or => Ok(evaluate_expression(left, columns, row)?
-                || evaluate_expression(right, columns, row)?),
+            BinaryOperator::And => Ok(evaluate_expression(db, left, columns, row)?
+                && evaluate_expression(db, right, columns, row)?),
+            BinaryOperator::Or => Ok(evaluate_expression(db, left, columns, row)?
+                || evaluate_expression(db, right, columns, row)?),
             BinaryOperator::Like => {
                 let left_val = evaluate_value_expression(left, columns, row)?;
                 let right_val = evaluate_value_expression(right, columns, row)?;
@@ -550,6 +552,20 @@ fn evaluate_expression(
                     _ => Err("BETWEEN requires two values".to_string()),
                 }
             }
+            BinaryOperator::In => {
+                let left_val = evaluate_value_expression(left, columns, row)?;
+                match &**right {
+                    Expression::Subquery(subquery_stmt) => {
+                        let db_ref = db.ok_or_else(|| "Subquery not allowed in this context".to_string())?;
+                        let sub_vals = eval_subquery_values(db_ref, subquery_stmt)?;
+                        Ok(sub_vals.contains(&left_val))
+                    }
+                    _ => {
+                        let right_val = evaluate_value_expression(right, columns, row)?;
+                        compare_values(&left_val, op, &right_val)
+                    }
+                }
+            }
             _ => {
                 let left_val = evaluate_value_expression(left, columns, row)?;
                 let right_val = evaluate_value_expression(right, columns, row)?;
@@ -560,11 +576,8 @@ fn evaluate_expression(
             let left_val = evaluate_value_expression(left, columns, row)?;
             Ok(values.contains(&left_val))
         }
-        Expression::Subquery(_subquery) => {
-            Err("Subqueries in WHERE clause not yet supported".to_string())
-        }
         Expression::UnaryOp { op, expr } => match op {
-            UnaryOperator::Not => Ok(!evaluate_expression(expr, columns, row)?),
+            UnaryOperator::Not => Ok(!evaluate_expression(db, expr, columns, row)?),
             _ => Err("Unsupported unary operation in WHERE clause".to_string()),
         },
         _ => Err("Invalid expression in WHERE clause".to_string()),
@@ -725,6 +738,45 @@ pub fn format_value(value: &Value) -> String {
         Value::Time(t) => t.clone(),
         Value::DateTime(dt) => dt.clone(),
     }
+}
+
+fn eval_subquery_values(db: &Database, subquery: &SelectStatement) -> Result<Vec<Value>, String> {
+    // Evaluate a simple subquery of form SELECT single_column FROM table [WHERE ...]
+    // Only supports single-column projection for IN (...)
+    if subquery.columns.len() != 1 {
+        return Err("Subquery in IN must select exactly one column".to_string());
+    }
+    let table = db
+        .tables
+        .get(&subquery.from)
+        .ok_or_else(|| format!("Table '{}' does not exist", subquery.from))?;
+    let mut values = Vec::new();
+    for row in &table.rows {
+        let include_row = if let Some(ref where_expr) = subquery.where_clause {
+            evaluate_expression(Some(db), where_expr, &table.columns, row)?
+        } else {
+            true
+        };
+        if !include_row {
+            continue;
+        }
+
+        match &subquery.columns[0] {
+            Column::All => return Err("Subquery in IN cannot use *".to_string()),
+            Column::Named(name) => {
+                let idx = table
+                    .columns
+                    .iter()
+                    .position(|c| &c.name == name)
+                    .ok_or_else(|| format!("Column '{}' not found", name))?;
+                values.push(row[idx].clone());
+            }
+            Column::Function(_) => {
+                return Err("Aggregates in subquery IN not supported yet".to_string());
+            }
+        }
+    }
+    Ok(values)
 }
 
 fn compare_values_for_sort(left: &Value, right: &Value) -> Ordering {
@@ -903,9 +955,10 @@ fn execute_select_with_joins(stmt: SelectStatement, db: &Database) -> Result<Str
     }
     
     let mut filtered_rows: Vec<Vec<Value>> = Vec::new();
+    let db_ref: &Database = db;
     for row in &joined_rows {
         let include_row = if let Some(ref where_expr) = stmt.where_clause {
-            evaluate_expression_multi_table(where_expr, &all_columns, row, &main_table.columns, &join_table.columns, main_table, join_table)?
+            evaluate_expression_multi_table(db_ref, where_expr, &all_columns, row, &main_table.columns, &join_table.columns, main_table, join_table)?
         } else {
             true
         };
@@ -962,6 +1015,7 @@ fn execute_select_with_joins(stmt: SelectStatement, db: &Database) -> Result<Str
 }
 
 fn evaluate_expression_multi_table(
+    db: &Database,
     expr: &Expression,
     all_columns: &[ColumnDefinition],
     row: &[Value],
@@ -970,7 +1024,7 @@ fn evaluate_expression_multi_table(
     _main_table: &Table,
     _join_table: &Table,
 ) -> Result<bool, String> {
-    evaluate_expression(expr, all_columns, row)
+    evaluate_expression(Some(db), expr, all_columns, row)
 }
 
 fn execute_alter_table(stmt: AlterTableStatement) -> Result<String, String> {

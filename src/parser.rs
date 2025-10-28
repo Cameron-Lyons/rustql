@@ -667,19 +667,33 @@ impl Parser {
                     }
                     self.advance();
                     
-                    let mut values = Vec::new();
-                    while *self.current_token() != Token::RightParen {
-                        values.push(self.parse_value()?);
-                        if *self.current_token() == Token::Comma {
-                            self.advance();
+                    if *self.current_token() == Token::Select {
+                        let subquery_stmt = self.parse_select()?;
+                        if let Statement::Select(subquery_stmt) = subquery_stmt {
+                            self.consume(Token::RightParen)?;
+                            expr = Expression::BinaryOp {
+                                left: Box::new(expr),
+                                op: BinaryOperator::In,
+                                right: Box::new(Expression::Subquery(Box::new(subquery_stmt))),
+                            };
+                        } else {
+                            return Err("Expected SELECT statement in subquery".to_string());
                         }
+                    } else {
+                        let mut values = Vec::new();
+                        while *self.current_token() != Token::RightParen {
+                            values.push(self.parse_value()?);
+                            if *self.current_token() == Token::Comma {
+                                self.advance();
+                            }
+                        }
+                        self.consume(Token::RightParen)?;
+                        
+                        expr = Expression::In {
+                            left: Box::new(expr),
+                            values,
+                        };
                     }
-                    self.consume(Token::RightParen)?;
-                    
-                    expr = Expression::In {
-                        left: Box::new(expr),
-                        values,
-                    };
                 }
                 Token::Between => {
                     self.advance();

@@ -258,3 +258,16 @@ fn test_error_handling() {
     assert!(result.is_err());
     assert!(result.unwrap_err().contains("Column count mismatch"));
 }
+
+#[test]
+fn test_subquery_in_where() {
+    let _guard = setup_test();
+    process_query("CREATE TABLE orders (id INTEGER, amount FLOAT)").unwrap();
+    process_query("CREATE TABLE customers (id INTEGER, name TEXT)").unwrap();
+    
+    process_query("INSERT INTO orders VALUES (1, 100.0), (2, 200.0), (3, 150.0)").unwrap();
+    process_query("INSERT INTO customers VALUES (1, 'Alice'), (2, 'Bob')").unwrap();
+    
+    let result = process_query("SELECT * FROM orders WHERE id IN (SELECT id FROM customers)");
+    println!("Subquery result: {:?}", result);
+}
