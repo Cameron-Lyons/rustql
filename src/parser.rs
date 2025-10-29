@@ -343,6 +343,7 @@ impl Parser {
 
     fn parse_value(&mut self) -> Result<Value, String> {
         match self.advance() {
+            Token::Null => Ok(Value::Null),
             Token::Number(n) => Ok(Value::Integer(n)),
             Token::Float(f) => Ok(Value::Float(f)),
             Token::StringLiteral(s) => Ok(Value::Text(s)),
@@ -708,6 +709,20 @@ impl Parser {
                             op: BinaryOperator::And,
                             right: Box::new(right_bound),
                         }),
+                    };
+                }
+                Token::Is => {
+                    self.advance();
+                    let not = if *self.current_token() == Token::Not {
+                        self.advance();
+                        true
+                    } else {
+                        false
+                    };
+                    self.consume(Token::Null)?;
+                    expr = Expression::IsNull {
+                        expr: Box::new(expr),
+                        not,
                     };
                 }
                 _ => break,

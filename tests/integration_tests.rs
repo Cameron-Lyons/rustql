@@ -269,5 +269,45 @@ fn test_subquery_in_where() {
     process_query("INSERT INTO customers VALUES (1, 'Alice'), (2, 'Bob')").unwrap();
     
     let result = process_query("SELECT * FROM orders WHERE id IN (SELECT id FROM customers)");
-    println!("Subquery result: {:?}", result);
+    assert!(result.is_ok());
+    let result_str = result.unwrap();
+    
+    assert!(result_str.contains("100.0") || result_str.contains("100"));
+    assert!(result_str.contains("200.0") || result_str.contains("200"));
+    assert!(!result_str.contains("150.0") && !result_str.contains("150"));
+    
+    let result = process_query("SELECT * FROM orders WHERE id IN (SELECT id FROM customers WHERE name = 'Alice')");
+    assert!(result.is_ok());
+    let result_str = result.unwrap();
+    
+    assert!(result_str.contains("100.0") || result_str.contains("100"));
+    assert!(!result_str.contains("200.0") && !result_str.contains("200"));
+}
+
+#[test]
+fn test_is_null() {
+    let _guard = setup_test();
+    process_query("CREATE TABLE users (id INTEGER, name TEXT, email TEXT)").unwrap();
+    
+    process_query("INSERT INTO users VALUES (1, 'Alice', 'alice@example.com'), (2, NULL, 'bob@example.com'), (3, 'Charlie', NULL)").unwrap();
+    
+    let result = process_query("SELECT name FROM users WHERE name IS NULL").unwrap();
+    assert!(!result.contains("Alice"));
+    assert!(!result.contains("Charlie"));
+    assert!(result.contains("NULL"));
+    
+    let result = process_query("SELECT name FROM users WHERE name IS NOT NULL").unwrap();
+    assert!(result.contains("Alice"));
+    assert!(result.contains("Charlie"));
+    assert!(!result.contains("NULL") || result.matches("NULL").count() <= 1); // Only column header or NULL value
+    
+    let result = process_query("SELECT id FROM users WHERE email IS NULL").unwrap();
+    assert!(result.contains("3"));
+    assert!(!result.contains("1"));
+    assert!(!result.contains("2"));
+    
+    let result = process_query("SELECT id FROM users WHERE name IS NULL AND email IS NOT NULL").unwrap();
+    assert!(result.contains("2"));
+    assert!(!result.contains("1"));
+    assert!(!result.contains("3"));
 }

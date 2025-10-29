@@ -145,6 +145,10 @@ pub enum Expression {
         left: Box<Expression>,
         values: Vec<Value>,
     },
+    IsNull {
+        expr: Box<Expression>,
+        not: bool,
+    },
     Subquery(Box<SelectStatement>),
     Column(String),
     Value(Value),

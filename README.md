@@ -24,6 +24,7 @@ A lightweight SQL database engine written in Rust. RustQL is an educational impl
   - **IN operator**: `WHERE column IN (value1, value2, ...)`
   - **LIKE operator**: `WHERE column LIKE 'pattern'` (supports % and _ wildcards)
   - **BETWEEN operator**: `WHERE column BETWEEN value1 AND value2`
+  - **IS NULL / IS NOT NULL**: `WHERE column IS NULL` or `WHERE column IS NOT NULL`
   - ORDER BY (ASC/DESC)
   - LIMIT and OFFSET
   - Aggregate functions: COUNT, SUM, AVG, MIN, MAX
@@ -132,6 +133,11 @@ SELECT * FROM products WHERE price BETWEEN 10.99 AND 29.99;
 SELECT * FROM users WHERE NOT (age IN (25, 30));
 SELECT * FROM products WHERE NOT (name LIKE '%old%');
 SELECT * FROM employees WHERE NOT (salary BETWEEN 40000 AND 60000);
+
+-- With IS NULL / IS NOT NULL
+SELECT * FROM users WHERE email IS NULL;
+SELECT * FROM products WHERE description IS NOT NULL;
+SELECT * FROM employees WHERE name IS NULL AND salary IS NOT NULL;
 
 -- Ordering
 SELECT * FROM users ORDER BY age ASC;
@@ -263,7 +269,6 @@ Possible improvements for the project:
 - [ ] Transaction support with rollback
 - [ ] B-tree or LSM-tree storage engine
 - [ ] Concurrency control
-- [ ] Better NULL handling with IS NULL / IS NOT NULL
 
 ## Contributing
 

@@ -438,6 +438,11 @@ fn evaluate_having(
                 compare_values(&left_val, op, &right_val)
             }
         },
+        Expression::IsNull { expr, not } => {
+            let value = evaluate_having_value(expr, _columns, table, rows)?;
+            let is_null = matches!(value, Value::Null);
+            Ok(if *not { !is_null } else { is_null })
+        }
         Expression::UnaryOp { op, expr } => match op {
             UnaryOperator::Not => Ok(!evaluate_having(expr, _columns, table, rows)?),
             _ => Err("Unsupported unary operation in HAVING clause".to_string()),
@@ -575,6 +580,11 @@ fn evaluate_expression(
         Expression::In { left, values } => {
             let left_val = evaluate_value_expression(left, columns, row)?;
             Ok(values.contains(&left_val))
+        }
+        Expression::IsNull { expr, not } => {
+            let value = evaluate_value_expression(expr, columns, row)?;
+            let is_null = matches!(value, Value::Null);
+            Ok(if *not { !is_null } else { is_null })
         }
         Expression::UnaryOp { op, expr } => match op {
             UnaryOperator::Not => Ok(!evaluate_expression(db, expr, columns, row)?),
