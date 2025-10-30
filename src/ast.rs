@@ -13,6 +13,7 @@ pub enum Statement {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SelectStatement {
+    pub distinct: bool,
     pub columns: Vec<Column>,
     pub from: String,
     pub joins: Vec<Join>,
@@ -150,6 +151,7 @@ pub enum Expression {
         not: bool,
     },
     Subquery(Box<SelectStatement>),
+    Exists(Box<SelectStatement>),
     Column(String),
     Value(Value),
     Function(AggregateFunction),

@@ -175,11 +175,29 @@ fn execute_select(stmt: SelectStatement) -> Result<String, String> {
     result.push_str(&"-".repeat(40));
     result.push('\n');
 
-    for row in filtered_rows.iter().skip(offset).take(limit) {
-        for idx in &column_indices {
-            result.push_str(&format!("{}\t", format_value(&row[*idx])));
+    use std::collections::BTreeSet;
+    let mut seen: BTreeSet<Vec<Value>> = BTreeSet::new();
+    let mut emitted = 0usize;
+    let mut skipped = 0usize;
+    for row in filtered_rows.iter() {
+        let projected: Vec<Value> = column_indices.iter().map(|&i| row[i].clone()).collect();
+        if stmt.distinct {
+            if !seen.insert(projected.clone()) {
+                continue;
+            }
+        }
+        if skipped < offset {
+            skipped += 1;
+            continue;
+        }
+        if emitted >= limit {
+            break;
+        }
+        for val in &projected {
+            result.push_str(&format!("{}\t", format_value(val)));
         }
         result.push('\n');
+        emitted += 1;
     }
 
     Ok(result)
@@ -581,6 +599,10 @@ fn evaluate_expression(
             let left_val = evaluate_value_expression(left, columns, row)?;
             Ok(values.contains(&left_val))
         }
+        Expression::Exists(subquery_stmt) => {
+            let db_ref = db.ok_or_else(|| "EXISTS subquery not allowed in this context".to_string())?;
+            eval_subquery_exists(db_ref, subquery_stmt)
+        }
         Expression::IsNull { expr, not } => {
             let value = evaluate_value_expression(expr, columns, row)?;
             let is_null = matches!(value, Value::Null);
@@ -787,6 +809,28 @@ fn eval_subquery_values(db: &Database, subquery: &SelectStatement) -> Result<Vec
         }
     }
     Ok(values)
+}
+
+fn eval_subquery_exists(db: &Database, subquery: &SelectStatement) -> Result<bool, String> {
+    // Simple EXISTS: true if any row from subquery's FROM table matches its WHERE
+    if !subquery.joins.is_empty() {
+        return Err("JOINs in EXISTS subquery not yet supported".to_string());
+    }
+    let table = db
+        .tables
+        .get(&subquery.from)
+        .ok_or_else(|| format!("Table '{}' does not exist", subquery.from))?;
+    for row in &table.rows {
+        let include_row = if let Some(ref where_expr) = subquery.where_clause {
+            evaluate_expression(Some(db), where_expr, &table.columns, row)?
+        } else {
+            true
+        };
+        if include_row {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn compare_values_for_sort(left: &Value, right: &Value) -> Ordering {
@@ -1014,9 +1058,17 @@ fn execute_select_with_joins(stmt: SelectStatement, db: &Database) -> Result<Str
     result.push_str(&"-".repeat(40));
     result.push('\n');
     
+    use std::collections::BTreeSet;
+    let mut seen: BTreeSet<Vec<Value>> = BTreeSet::new();
     for row in &filtered_rows {
-        for idx in &column_indices {
-            result.push_str(&format!("{}\t", format_value(&row[*idx])));
+        let projected: Vec<Value> = column_indices.iter().map(|&i| row[i].clone()).collect();
+        if stmt.distinct {
+            if !seen.insert(projected.clone()) {
+                continue;
+            }
+        }
+        for val in &projected {
+            result.push_str(&format!("{}\t", format_value(val)));
         }
         result.push('\n');
     }

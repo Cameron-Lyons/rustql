@@ -2,6 +2,8 @@
 pub enum Token {
     Dot,
     Select,
+    Exists,
+    Distinct,
     From,
     Where,
     Insert,
@@ -279,6 +281,8 @@ fn read_string(
 fn match_keyword(ident: &str) -> Token {
     match ident.to_uppercase().as_str() {
         "SELECT" => Token::Select,
+        "EXISTS" => Token::Exists,
+        "DISTINCT" => Token::Distinct,
         "FROM" => Token::From,
         "WHERE" => Token::Where,
         "INSERT" => Token::Insert,

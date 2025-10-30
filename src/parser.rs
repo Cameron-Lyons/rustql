@@ -55,6 +55,13 @@ impl Parser {
     fn parse_select(&mut self) -> Result<Statement, String> {
         self.consume(Token::Select)?;
 
+        let distinct = if *self.current_token() == Token::Distinct {
+            self.advance();
+            true
+        } else {
+            false
+        };
+
         let columns = self.parse_columns()?;
 
         self.consume(Token::From)?;
@@ -156,6 +163,7 @@ impl Parser {
         };
 
         Ok(Statement::Select(SelectStatement {
+            distinct,
             columns,
             from: table,
             joins,
@@ -798,6 +806,18 @@ impl Parser {
 
     fn parse_primary(&mut self) -> Result<Expression, String> {
         match self.current_token().clone() {
+            Token::Exists => {
+                self.advance();
+                self.consume(Token::LeftParen)?;
+                let sub = self.parse_select()?;
+                let sub = if let Statement::Select(s) = sub {
+                    s
+                } else {
+                    return Err("Expected SELECT inside EXISTS".to_string());
+                };
+                self.consume(Token::RightParen)?;
+                Ok(Expression::Exists(Box::new(sub)))
+            }
             Token::Count | Token::Sum | Token::Avg | Token::Min | Token::Max => {
                 let agg = self.parse_aggregate_function()?;
                 if let Column::Function(func) = agg {

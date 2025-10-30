@@ -33,6 +33,7 @@ fn test_select_all() {
     .unwrap();
 
     let select = Statement::Select(SelectStatement {
+        distinct: false,
         from: "users".into(),
         columns: vec![Column::All],
         joins: vec![],
