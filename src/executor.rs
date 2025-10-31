@@ -913,8 +913,8 @@ fn execute_select_with_joins(stmt: SelectStatement, db: &Database) -> Result<Str
     
     let check_join_match = |main_row: &Vec<Value>, join_row: &Vec<Value>| -> bool {
         if let Expression::BinaryOp { left, op, right } = &join.on
-            && *op == BinaryOperator::Equal {
-                if let (Expression::Column(left_col), Expression::Column(right_col)) = (left.as_ref(), right.as_ref()) {
+            && *op == BinaryOperator::Equal
+                && let (Expression::Column(left_col), Expression::Column(right_col)) = (left.as_ref(), right.as_ref()) {
                     let get_col_idx = |col_name: &str| -> Option<(bool, usize)> {
                         if col_name.contains('.') {
                             let parts: Vec<&str> = col_name.split('.').collect();
@@ -963,7 +963,6 @@ fn execute_select_with_joins(stmt: SelectStatement, db: &Database) -> Result<Str
                         return lval == rval;
                     }
                 }
-            }
         false
     };
     
