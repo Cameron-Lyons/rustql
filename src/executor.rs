@@ -112,7 +112,7 @@ fn execute_select(stmt: SelectStatement) -> Result<String, String> {
         }
     }
 
-    if let Some(_) = stmt.group_by {
+    if stmt.group_by.is_some() {
         return execute_select_with_grouping(stmt, table, filtered_rows);
     }
 
@@ -181,11 +181,10 @@ fn execute_select(stmt: SelectStatement) -> Result<String, String> {
     let mut skipped = 0usize;
     for row in filtered_rows.iter() {
         let projected: Vec<Value> = column_indices.iter().map(|&i| row[i].clone()).collect();
-        if stmt.distinct {
-            if !seen.insert(projected.clone()) {
+        if stmt.distinct
+            && !seen.insert(projected.clone()) {
                 continue;
             }
-        }
         if skipped < offset {
             skipped += 1;
             continue;
@@ -270,7 +269,7 @@ fn execute_select_with_grouping(
             .iter()
             .map(|&idx| row[idx].clone())
             .collect();
-        groups.entry(key).or_insert_with(Vec::new).push(row);
+        groups.entry(key).or_default().push(row);
     }
 
     let mut result = String::new();
@@ -295,7 +294,7 @@ fn execute_select_with_grouping(
 
     for (_group_key, group_rows) in groups {
         if let Some(ref having_expr) = stmt.having {
-            let should_include = evaluate_having(&having_expr, &stmt.columns, table, &group_rows)?;
+            let should_include = evaluate_having(having_expr, &stmt.columns, table, &group_rows)?;
             if !should_include {
                 continue;
             }
@@ -683,7 +682,7 @@ fn evaluate_value_expression(
                 return Ok(Value::Integer(1));
             }
             let col_name = if name.contains('.') {
-                name.split('.').last().unwrap_or(name)
+                name.split('.').next_back().unwrap_or(name)
             } else {
                 name
             };
@@ -913,62 +912,58 @@ fn execute_select_with_joins(stmt: SelectStatement, db: &Database) -> Result<Str
     let join_table_name = join.table.clone();
     
     let check_join_match = |main_row: &Vec<Value>, join_row: &Vec<Value>| -> bool {
-        if let Expression::BinaryOp { left, op, right } = &join.on {
-            if *op == BinaryOperator::Equal {
-                match (left.as_ref(), right.as_ref()) {
-                    (Expression::Column(left_col), Expression::Column(right_col)) => {
-                        let get_col_idx = |col_name: &str| -> Option<(bool, usize)> {
-                            if col_name.contains('.') {
-                                let parts: Vec<&str> = col_name.split('.').collect();
-                                if parts.len() == 2 {
-                                    let table_name = parts[0];
-                                    let col_name = parts[1];
-                                    if table_name == main_table_name {
-                                        main_table.columns.iter().position(|c| c.name == col_name).map(|idx| (true, idx))
-                                    } else if table_name == join_table_name {
-                                        join_table.columns.iter().position(|c| c.name == col_name).map(|idx| (false, idx))
-                                    } else {
-                                        None
-                                    }
+        if let Expression::BinaryOp { left, op, right } = &join.on
+            && *op == BinaryOperator::Equal {
+                if let (Expression::Column(left_col), Expression::Column(right_col)) = (left.as_ref(), right.as_ref()) {
+                    let get_col_idx = |col_name: &str| -> Option<(bool, usize)> {
+                        if col_name.contains('.') {
+                            let parts: Vec<&str> = col_name.split('.').collect();
+                            if parts.len() == 2 {
+                                let table_name = parts[0];
+                                let col_name = parts[1];
+                                if table_name == main_table_name {
+                                    main_table.columns.iter().position(|c| c.name == col_name).map(|idx| (true, idx))
+                                } else if table_name == join_table_name {
+                                    join_table.columns.iter().position(|c| c.name == col_name).map(|idx| (false, idx))
                                 } else {
                                     None
                                 }
                             } else {
                                 None
                             }
-                        };
-                        
-                        let left_col_idx = get_col_idx(left_col);
-                        let right_col_idx = get_col_idx(right_col);
-                        
-                        let left_val = if let Some((in_main, idx)) = left_col_idx {
-                            if in_main {
-                                Some(&main_row[idx])
-                            } else {
-                                Some(&join_row[idx])
-                            }
                         } else {
                             None
-                        };
-                        
-                        let right_val = if let Some((in_main, idx)) = right_col_idx {
-                            if in_main {
-                                Some(&main_row[idx])
-                            } else {
-                                Some(&join_row[idx])
-                            }
-                        } else {
-                            None
-                        };
-                        
-                        if let (Some(lval), Some(rval)) = (left_val, right_val) {
-                            return lval == rval;
                         }
+                    };
+                    
+                    let left_col_idx = get_col_idx(left_col);
+                    let right_col_idx = get_col_idx(right_col);
+                    
+                    let left_val = if let Some((in_main, idx)) = left_col_idx {
+                        if in_main {
+                            Some(&main_row[idx])
+                        } else {
+                            Some(&join_row[idx])
+                        }
+                    } else {
+                        None
+                    };
+                    
+                    let right_val = if let Some((in_main, idx)) = right_col_idx {
+                        if in_main {
+                            Some(&main_row[idx])
+                        } else {
+                            Some(&join_row[idx])
+                        }
+                    } else {
+                        None
+                    };
+                    
+                    if let (Some(lval), Some(rval)) = (left_val, right_val) {
+                        return lval == rval;
                     }
-                    _ => {}
                 }
             }
-        }
         false
     };
     
@@ -1040,13 +1035,13 @@ fn execute_select_with_joins(stmt: SelectStatement, db: &Database) -> Result<Str
             .map(|col| match col {
                 Column::Named(name) => {
                     let col_name = if name.contains('.') {
-                        name.split('.').last().unwrap_or(name)
+                        name.split('.').next_back().unwrap_or(name)
                     } else {
                         name
                     };
                     all_columns
                         .iter()
-                        .position(|c| &c.name == col_name)
+                        .position(|c| c.name == col_name)
                         .unwrap_or(usize::MAX)
                 }
                 _ => usize::MAX,
@@ -1073,11 +1068,10 @@ fn execute_select_with_joins(stmt: SelectStatement, db: &Database) -> Result<Str
     let mut seen: BTreeSet<Vec<Value>> = BTreeSet::new();
     for row in &filtered_rows {
         let projected: Vec<Value> = column_indices.iter().map(|&i| row[i].clone()).collect();
-        if stmt.distinct {
-            if !seen.insert(projected.clone()) {
+        if stmt.distinct
+            && !seen.insert(projected.clone()) {
                 continue;
             }
-        }
         for val in &projected {
             result.push_str(&format!("{}\t", format_value(val)));
         }

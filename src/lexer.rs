@@ -196,7 +196,7 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, String> {
                     if let Some(&ch) = chars.peek() {
                         if ch.is_ascii_alphanumeric() || ch == '_' {
                             let rest = read_identifier(&mut chars);
-                            last_ident.push_str(".");
+                            last_ident.push('.');
                             last_ident.push_str(&rest);
                         } else {
                             tokens.push(Token::Dot);
@@ -275,7 +275,7 @@ fn read_string(
         }
     }
 
-    Err(format!("Unterminated string literal"))
+    Err("Unterminated string literal".to_string())
 }
 
 fn match_keyword(ident: &str) -> Token {
