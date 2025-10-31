@@ -817,8 +817,9 @@ fn eval_subquery_exists_with_outer(
     outer_row: &[Value],
 ) -> Result<bool, String> {
     if !subquery.joins.is_empty() {
-        return Err("JOINs in EXISTS subquery not yet supported".to_string());
+        return eval_subquery_exists_with_joins(db, subquery, outer_columns, outer_row);
     }
+    
     let table = db
         .tables
         .get(&subquery.from)
@@ -840,6 +841,281 @@ fn eval_subquery_exists_with_outer(
             return Ok(true);
         }
     }
+    Ok(false)
+}
+
+fn eval_subquery_exists_with_joins(
+    db: &Database,
+    subquery: &SelectStatement,
+    outer_columns: &[ColumnDefinition],
+    outer_row: &[Value],
+) -> Result<bool, String> {
+    if subquery.joins.len() != 1 {
+        return Err("Multiple joins in EXISTS subquery not yet supported".to_string());
+    }
+    
+    let main_table = db
+        .tables
+        .get(&subquery.from)
+        .ok_or_else(|| format!("Table '{}' does not exist", subquery.from))?;
+    
+    let join = &subquery.joins[0];
+    let join_table = db
+        .tables
+        .get(&join.table)
+        .ok_or_else(|| format!("Table '{}' does not exist", join.table))?;
+    
+    let mut all_subquery_columns = main_table.columns.clone();
+    all_subquery_columns.extend(join_table.columns.clone());
+    
+    let main_table_name = subquery.from.clone();
+    let join_table_name = join.table.clone();
+    
+    let check_join_match = |main_row: &Vec<Value>, join_row: &Vec<Value>| -> bool {
+        if let Expression::BinaryOp { left, op, right } = &join.on
+            && *op == BinaryOperator::Equal
+                && let (Expression::Column(left_col), Expression::Column(right_col)) = (left.as_ref(), right.as_ref()) {
+                    let get_col_idx = |col_name: &str| -> Option<(bool, usize)> {
+                        if col_name.contains('.') {
+                            let parts: Vec<&str> = col_name.split('.').collect();
+                            if parts.len() == 2 {
+                                let table_name = parts[0];
+                                let col_name = parts[1];
+                                if table_name == main_table_name {
+                                    main_table.columns.iter().position(|c| c.name == col_name).map(|idx| (true, idx))
+                                } else if table_name == join_table_name {
+                                    join_table.columns.iter().position(|c| c.name == col_name).map(|idx| (false, idx))
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    };
+                    
+                    let left_col_idx = get_col_idx(left_col);
+                    let right_col_idx = get_col_idx(right_col);
+                    
+                    let left_val = if let Some((in_main, idx)) = left_col_idx {
+                        if in_main {
+                            Some(&main_row[idx])
+                        } else {
+                            Some(&join_row[idx])
+                        }
+                    } else {
+                        None
+                    };
+                    
+                    let right_val = if let Some((in_main, idx)) = right_col_idx {
+                        if in_main {
+                            Some(&main_row[idx])
+                        } else {
+                            Some(&join_row[idx])
+                        }
+                    } else {
+                        None
+                    };
+                    
+                    if let (Some(lval), Some(rval)) = (left_val, right_val) {
+                        return lval == rval;
+                    }
+                }
+        false
+    };
+    
+    match join.join_type {
+        JoinType::Inner => {
+            for main_row in &main_table.rows {
+                for join_row in &join_table.rows {
+                    if check_join_match(main_row, join_row) {
+                        let mut combined_subquery_row = main_row.clone();
+                        combined_subquery_row.extend(join_row.clone());
+                        
+                        let mut combined_columns: Vec<ColumnDefinition> = outer_columns.to_vec();
+                        combined_columns.extend(all_subquery_columns.clone());
+                        let mut combined_row: Vec<Value> = outer_row.to_vec();
+                        combined_row.extend(combined_subquery_row);
+                        
+                        let include_row = if let Some(ref where_expr) = subquery.where_clause {
+                            evaluate_expression(Some(db), where_expr, &combined_columns, &combined_row)?
+                        } else {
+                            return Ok(true);
+                        };
+                        if include_row {
+                            return Ok(true);
+                        }
+                    }
+                }
+            }
+        }
+        JoinType::Left => {
+            for main_row in &main_table.rows {
+                let mut has_match = false;
+                for join_row in &join_table.rows {
+                    if check_join_match(main_row, join_row) {
+                        has_match = true;
+                        let mut combined_subquery_row = main_row.clone();
+                        combined_subquery_row.extend(join_row.clone());
+                        
+                        let mut combined_columns: Vec<ColumnDefinition> = outer_columns.to_vec();
+                        combined_columns.extend(all_subquery_columns.clone());
+                        let mut combined_row: Vec<Value> = outer_row.to_vec();
+                        combined_row.extend(combined_subquery_row);
+                        
+                        let include_row = if let Some(ref where_expr) = subquery.where_clause {
+                            evaluate_expression(Some(db), where_expr, &combined_columns, &combined_row)?
+                        } else {
+                            return Ok(true);
+                        };
+                        if include_row {
+                            return Ok(true);
+                        }
+                    }
+                }
+                if !has_match {
+                    let mut combined_subquery_row = main_row.clone();
+                    combined_subquery_row.extend(vec![Value::Null; join_table.columns.len()]);
+                    
+                    let mut combined_columns: Vec<ColumnDefinition> = outer_columns.to_vec();
+                    combined_columns.extend(all_subquery_columns.clone());
+                    let mut combined_row: Vec<Value> = outer_row.to_vec();
+                    combined_row.extend(combined_subquery_row);
+                    
+                    let include_row = if let Some(ref where_expr) = subquery.where_clause {
+                        evaluate_expression(Some(db), where_expr, &combined_columns, &combined_row)?
+                    } else {
+                        return Ok(true);
+                    };
+                    if include_row {
+                        return Ok(true);
+                    }
+                }
+            }
+        }
+        JoinType::Right => {
+            for join_row in &join_table.rows {
+                let mut has_match = false;
+                for main_row in &main_table.rows {
+                    if check_join_match(main_row, join_row) {
+                        has_match = true;
+                        let mut combined_subquery_row = main_row.clone();
+                        combined_subquery_row.extend(join_row.clone());
+                        
+                        let mut combined_columns: Vec<ColumnDefinition> = outer_columns.to_vec();
+                        combined_columns.extend(all_subquery_columns.clone());
+                        let mut combined_row: Vec<Value> = outer_row.to_vec();
+                        combined_row.extend(combined_subquery_row);
+                        
+                        let include_row = if let Some(ref where_expr) = subquery.where_clause {
+                            evaluate_expression(Some(db), where_expr, &combined_columns, &combined_row)?
+                        } else {
+                            return Ok(true);
+                        };
+                        if include_row {
+                            return Ok(true);
+                        }
+                    }
+                }
+                if !has_match {
+                    let mut combined_subquery_row = vec![Value::Null; main_table.columns.len()];
+                    combined_subquery_row.extend(join_row.clone());
+                    
+                    let mut combined_columns: Vec<ColumnDefinition> = outer_columns.to_vec();
+                    combined_columns.extend(all_subquery_columns.clone());
+                    let mut combined_row: Vec<Value> = outer_row.to_vec();
+                    combined_row.extend(combined_subquery_row);
+                    
+                    let include_row = if let Some(ref where_expr) = subquery.where_clause {
+                        evaluate_expression(Some(db), where_expr, &combined_columns, &combined_row)?
+                    } else {
+                        return Ok(true);
+                    };
+                    if include_row {
+                        return Ok(true);
+                    }
+                }
+            }
+        }
+        JoinType::Full => {
+            let mut matched_pairs = HashSet::new();
+            
+            for (main_idx, main_row) in main_table.rows.iter().enumerate() {
+                let mut has_match = false;
+                for (join_idx, join_row) in join_table.rows.iter().enumerate() {
+                    if check_join_match(main_row, join_row) {
+                        has_match = true;
+                        matched_pairs.insert((main_idx, join_idx));
+                        let mut combined_subquery_row = main_row.clone();
+                        combined_subquery_row.extend(join_row.clone());
+                        
+                        let mut combined_columns: Vec<ColumnDefinition> = outer_columns.to_vec();
+                        combined_columns.extend(all_subquery_columns.clone());
+                        let mut combined_row: Vec<Value> = outer_row.to_vec();
+                        combined_row.extend(combined_subquery_row);
+                        
+                        let include_row = if let Some(ref where_expr) = subquery.where_clause {
+                            evaluate_expression(Some(db), where_expr, &combined_columns, &combined_row)?
+                        } else {
+                            return Ok(true);
+                        };
+                        if include_row {
+                            return Ok(true);
+                        }
+                    }
+                }
+                if !has_match {
+                    let mut combined_subquery_row = main_row.clone();
+                    combined_subquery_row.extend(vec![Value::Null; join_table.columns.len()]);
+                    
+                    let mut combined_columns: Vec<ColumnDefinition> = outer_columns.to_vec();
+                    combined_columns.extend(all_subquery_columns.clone());
+                    let mut combined_row: Vec<Value> = outer_row.to_vec();
+                    combined_row.extend(combined_subquery_row);
+                    
+                    let include_row = if let Some(ref where_expr) = subquery.where_clause {
+                        evaluate_expression(Some(db), where_expr, &combined_columns, &combined_row)?
+                    } else {
+                        return Ok(true);
+                    };
+                    if include_row {
+                        return Ok(true);
+                    }
+                }
+            }
+            
+            for (join_idx, join_row) in join_table.rows.iter().enumerate() {
+                let mut has_match = false;
+                for (main_idx, main_row) in main_table.rows.iter().enumerate() {
+                    if check_join_match(main_row, join_row) && matched_pairs.contains(&(main_idx, join_idx)) {
+                        has_match = true;
+                        break;
+                    }
+                }
+                if !has_match {
+                    let mut combined_subquery_row = vec![Value::Null; main_table.columns.len()];
+                    combined_subquery_row.extend(join_row.clone());
+                    
+                    let mut combined_columns: Vec<ColumnDefinition> = outer_columns.to_vec();
+                    combined_columns.extend(all_subquery_columns.clone());
+                    let mut combined_row: Vec<Value> = outer_row.to_vec();
+                    combined_row.extend(combined_subquery_row);
+                    
+                    let include_row = if let Some(ref where_expr) = subquery.where_clause {
+                        evaluate_expression(Some(db), where_expr, &combined_columns, &combined_row)?
+                    } else {
+                        return Ok(true);
+                    };
+                    if include_row {
+                        return Ok(true);
+                    }
+                }
+            }
+        }
+    }
+    
     Ok(false)
 }
 
