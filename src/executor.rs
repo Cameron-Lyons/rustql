@@ -601,7 +601,7 @@ fn evaluate_expression(
         }
         Expression::Exists(subquery_stmt) => {
             let db_ref = db.ok_or_else(|| "EXISTS subquery not allowed in this context".to_string())?;
-            eval_subquery_exists(db_ref, subquery_stmt)
+            eval_subquery_exists_with_outer(db_ref, subquery_stmt, columns, row)
         }
         Expression::IsNull { expr, not } => {
             let value = evaluate_value_expression(expr, columns, row)?;
@@ -811,8 +811,12 @@ fn eval_subquery_values(db: &Database, subquery: &SelectStatement) -> Result<Vec
     Ok(values)
 }
 
-fn eval_subquery_exists(db: &Database, subquery: &SelectStatement) -> Result<bool, String> {
-    // Simple EXISTS: true if any row from subquery's FROM table matches its WHERE
+fn eval_subquery_exists_with_outer(
+    db: &Database,
+    subquery: &SelectStatement,
+    outer_columns: &[ColumnDefinition],
+    outer_row: &[Value],
+) -> Result<bool, String> {
     if !subquery.joins.is_empty() {
         return Err("JOINs in EXISTS subquery not yet supported".to_string());
     }
@@ -820,9 +824,16 @@ fn eval_subquery_exists(db: &Database, subquery: &SelectStatement) -> Result<boo
         .tables
         .get(&subquery.from)
         .ok_or_else(|| format!("Table '{}' does not exist", subquery.from))?;
-    for row in &table.rows {
+
+    let mut combined_columns: Vec<ColumnDefinition> = outer_columns.to_vec();
+    combined_columns.extend(table.columns.clone());
+
+    for inner_row in &table.rows {
+        let mut combined_row: Vec<Value> = outer_row.to_vec();
+        combined_row.extend(inner_row.clone());
+
         let include_row = if let Some(ref where_expr) = subquery.where_clause {
-            evaluate_expression(Some(db), where_expr, &table.columns, row)?
+            evaluate_expression(Some(db), where_expr, &combined_columns, &combined_row)?
         } else {
             true
         };
