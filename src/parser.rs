@@ -188,6 +188,21 @@ impl Parser {
                     Token::Count | Token::Sum | Token::Avg | Token::Min | Token::Max => {
                         self.parse_aggregate_function()?
                     }
+                    Token::LeftParen => {
+                        let check_idx = self.current + 1;
+                        if check_idx < self.tokens.len() && matches!(&self.tokens[check_idx], Token::Select) {
+                            self.advance();
+                            let subquery_stmt = self.parse_select()?;
+                            if let Statement::Select(subquery_stmt) = subquery_stmt {
+                                self.consume(Token::RightParen)?;
+                                Column::Subquery(Box::new(subquery_stmt))
+                            } else {
+                                return Err("Expected SELECT statement in scalar subquery".to_string());
+                            }
+                        } else {
+                            return Err("Unexpected '(' in column list".to_string());
+                        }
+                    }
                     Token::Identifier(name) => {
                         let name = name.clone();
                         self.advance();

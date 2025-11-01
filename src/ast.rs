@@ -45,6 +45,7 @@ pub enum Column {
     All,
     Named(String),
     Function(AggregateFunction),
+    Subquery(Box<SelectStatement>),
 }
 
 #[derive(Debug, Clone, PartialEq)]

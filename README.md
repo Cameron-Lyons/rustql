@@ -30,7 +30,11 @@ A lightweight SQL database engine written in Rust. RustQL is an educational impl
   - Aggregate functions: COUNT, SUM, AVG, MIN, MAX
   - GROUP BY with HAVING clause
   - **JOIN operations** (INNER, LEFT, RIGHT, FULL) - All join types now supported!
-  - Basic subqueries in WHERE: `IN (SELECT single_column FROM table [WHERE ...])`
+  - **Subqueries**: 
+    - `IN (SELECT single_column FROM table [WHERE ...])` - Subquery in WHERE clause
+    - `WHERE EXISTS (SELECT ...)` - EXISTS subquery (supports correlated subqueries)
+    - `WHERE NOT EXISTS (SELECT ...)` - NOT EXISTS subquery
+    - `SELECT ..., (SELECT ...) FROM ...` - Scalar subqueries in SELECT clause (correlated subqueries supported)
 
 - **Data Types**
   - INTEGER
@@ -190,6 +194,34 @@ JOIN orders ON users.id = orders.user_id
 WHERE orders.amount > 100;
 ```
 
+### Subqueries
+
+```sql
+-- EXISTS subquery
+SELECT * FROM users 
+WHERE EXISTS (SELECT * FROM orders WHERE orders.user_id = users.id);
+
+-- NOT EXISTS subquery
+SELECT * FROM users 
+WHERE NOT EXISTS (SELECT * FROM orders WHERE orders.user_id = users.id);
+
+-- Correlated EXISTS subquery
+SELECT * FROM users 
+WHERE EXISTS (
+    SELECT * FROM orders 
+    WHERE orders.user_id = users.id 
+    AND orders.amount > 100
+);
+
+-- IN with subquery
+SELECT * FROM users 
+WHERE id IN (SELECT user_id FROM orders WHERE amount > 100);
+
+-- Scalar subquery in SELECT clause
+SELECT name, (SELECT amount FROM orders WHERE orders.user_id = users.id) AS order_amount
+FROM users;
+```
+
 ### Updating Data
 
 ```sql
@@ -252,7 +284,9 @@ cargo test select
 
 ## Limitations
 
-- Subqueries: only basic `IN (SELECT ...)` with a single projected column is supported
+- Scalar subqueries with joins are not yet supported
+- Aggregates in scalar subqueries are not yet supported
+- EXISTS subqueries with multiple joins are limited to single joins
 - No indexes for performance optimization
 - No foreign key constraints
 - Limited to single-file JSON storage
@@ -263,7 +297,9 @@ cargo test select
 
 Possible improvements for the project:
 
-- [ ] Subquery support (WHERE EXISTS, scalar subqueries, correlated subqueries)
+- [ ] Aggregates in scalar subqueries (e.g., `SELECT name, (SELECT COUNT(*) FROM orders WHERE orders.user_id = users.id) FROM users`)
+- [ ] Scalar subqueries with joins
+- [ ] Support for multiple joins in EXISTS subqueries
 - [ ] Index implementation for better performance
 - [ ] Foreign key constraints
 - [ ] Transaction support with rollback

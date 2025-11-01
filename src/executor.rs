@@ -125,28 +125,18 @@ fn execute_select(stmt: SelectStatement) -> Result<String, String> {
         return execute_select_with_aggregates(stmt, table, filtered_rows);
     }
 
-    let column_indices: Vec<usize> = match &stmt.columns[0] {
-        Column::All => (0..table.columns.len()).collect(),
-        Column::Named(_) => stmt
-            .columns
-            .iter()
-            .map(|col| match col {
-                Column::Named(name) => table
-                    .columns
-                    .iter()
-                    .position(|c| &c.name == name)
-                    .unwrap_or(usize::MAX),
-                _ => usize::MAX,
-            })
-            .collect(),
-        _ => return Err("Invalid column type".to_string()),
+    let column_specs: Vec<(String, Column)> = if matches!(stmt.columns[0], Column::All) {
+        table.columns.iter().map(|c| (c.name.clone(), Column::Named(c.name.clone()))).collect()
+    } else {
+        stmt.columns.iter().map(|col| {
+            match col {
+                Column::Named(name) => (name.clone(), Column::Named(name.clone())),
+                Column::Subquery(_) => ("<subquery>".to_string(), col.clone()),
+                Column::Function(_) => ("<aggregate>".to_string(), col.clone()),
+                Column::All => unreachable!(),
+            }
+        }).collect()
     };
-
-    for idx in &column_indices {
-        if *idx == usize::MAX {
-            return Err("Column not found".to_string());
-        }
-    }
 
     if let Some(ref order_by) = stmt.order_by {
         filtered_rows.sort_by(|a, b| {
@@ -168,8 +158,8 @@ fn execute_select(stmt: SelectStatement) -> Result<String, String> {
     let limit = stmt.limit.unwrap_or(filtered_rows.len());
 
     let mut result = String::new();
-    for idx in &column_indices {
-        result.push_str(&format!("{}\t", table.columns[*idx].name));
+    for (name, _) in &column_specs {
+        result.push_str(&format!("{}\t", name));
     }
     result.push('\n');
     result.push_str(&"-".repeat(40));
@@ -180,7 +170,29 @@ fn execute_select(stmt: SelectStatement) -> Result<String, String> {
     let mut emitted = 0usize;
     let mut skipped = 0usize;
     for row in filtered_rows.iter() {
-        let projected: Vec<Value> = column_indices.iter().map(|&i| row[i].clone()).collect();
+        let mut projected: Vec<Value> = Vec::new();
+        for (_, col) in &column_specs {
+            let val = match col {
+                Column::All => {
+                    unreachable!("Column::All should not appear in column_specs")
+                }
+                Column::Named(name) => {
+                    let idx = table
+                        .columns
+                        .iter()
+                        .position(|c| &c.name == name)
+                        .ok_or_else(|| format!("Column '{}' not found", name))?;
+                    row[idx].clone()
+                }
+                Column::Subquery(subquery) => {
+                    eval_scalar_subquery_with_outer(db_ref, subquery, &table.columns, row)?
+                }
+                Column::Function(_) => {
+                    return Err("Aggregate functions must be used with GROUP BY or without other columns".to_string());
+                }
+            };
+            projected.push(val);
+        }
         if stmt.distinct
             && !seen.insert(projected.clone()) {
                 continue;
@@ -805,6 +817,9 @@ fn eval_subquery_values(db: &Database, subquery: &SelectStatement) -> Result<Vec
             Column::Function(_) => {
                 return Err("Aggregates in subquery IN not supported yet".to_string());
             }
+            Column::Subquery(_) => {
+                return Err("Nested subqueries in IN not supported yet".to_string());
+            }
         }
     }
     Ok(values)
@@ -1117,6 +1132,67 @@ fn eval_subquery_exists_with_joins(
     }
     
     Ok(false)
+}
+
+fn eval_scalar_subquery_with_outer(
+    db: &Database,
+    subquery: &SelectStatement,
+    outer_columns: &[ColumnDefinition],
+    outer_row: &[Value],
+) -> Result<Value, String> {
+    if subquery.columns.len() != 1 {
+        return Err("Scalar subquery must select exactly one column".to_string());
+    }
+
+    if !subquery.joins.is_empty() {
+        return Err("Scalar subqueries with joins not yet supported".to_string());
+    }
+
+    let table = db
+        .tables
+        .get(&subquery.from)
+        .ok_or_else(|| format!("Table '{}' does not exist", subquery.from))?;
+
+    let mut combined_columns: Vec<ColumnDefinition> = outer_columns.to_vec();
+    combined_columns.extend(table.columns.clone());
+
+    let mut results = Vec::new();
+    for inner_row in &table.rows {
+        let mut combined_row: Vec<Value> = outer_row.to_vec();
+        combined_row.extend(inner_row.clone());
+
+        let include_row = if let Some(ref where_expr) = subquery.where_clause {
+            evaluate_expression(Some(db), where_expr, &combined_columns, &combined_row)?
+        } else {
+            true
+        };
+        if include_row {
+            let val = match &subquery.columns[0] {
+                Column::All => return Err("Scalar subquery cannot use *".to_string()),
+                Column::Named(name) => {
+                    let col_idx = table
+                        .columns
+                        .iter()
+                        .position(|c| &c.name == name)
+                        .ok_or_else(|| format!("Column '{}' not found", name))?;
+                    inner_row[col_idx].clone()
+                }
+                Column::Function(_agg) => {
+                    return Err("Aggregates in scalar subqueries not yet supported".to_string());
+                }
+                Column::Subquery(_) => {
+                    return Err("Nested scalar subqueries not yet supported".to_string());
+                }
+            };
+            results.push(val);
+        }
+    }
+
+    match results.len() {
+        0 => Ok(Value::Null),
+        1 => Ok(results[0].clone()),
+        _ => Err("Scalar subquery returned more than one row".to_string()),
+    }
 }
 
 fn compare_values_for_sort(left: &Value, right: &Value) -> Ordering {
