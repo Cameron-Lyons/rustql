@@ -1156,42 +1156,89 @@ fn eval_scalar_subquery_with_outer(
     let mut combined_columns: Vec<ColumnDefinition> = outer_columns.to_vec();
     combined_columns.extend(table.columns.clone());
 
-    let mut results = Vec::new();
-    for inner_row in &table.rows {
-        let mut combined_row: Vec<Value> = outer_row.to_vec();
-        combined_row.extend(inner_row.clone());
+    if let Column::Function(agg) = &subquery.columns[0] {
+        let mut filtered_rows: Vec<&Vec<Value>> = Vec::new();
+        for inner_row in &table.rows {
+            let mut combined_row: Vec<Value> = outer_row.to_vec();
+            combined_row.extend(inner_row.clone());
 
-        let include_row = if let Some(ref where_expr) = subquery.where_clause {
-            evaluate_expression(Some(db), where_expr, &combined_columns, &combined_row)?
-        } else {
-            true
-        };
-        if include_row {
-            let val = match &subquery.columns[0] {
-                Column::All => return Err("Scalar subquery cannot use *".to_string()),
-                Column::Named(name) => {
-                    let col_idx = table
-                        .columns
-                        .iter()
-                        .position(|c| &c.name == name)
-                        .ok_or_else(|| format!("Column '{}' not found", name))?;
-                    inner_row[col_idx].clone()
-                }
-                Column::Function(_agg) => {
-                    return Err("Aggregates in scalar subqueries not yet supported".to_string());
-                }
-                Column::Subquery(_) => {
-                    return Err("Nested scalar subqueries not yet supported".to_string());
-                }
+            let include_row = if let Some(ref where_expr) = subquery.where_clause {
+                evaluate_expression(Some(db), where_expr, &combined_columns, &combined_row)?
+            } else {
+                true
             };
-            results.push(val);
+            if include_row {
+                filtered_rows.push(inner_row);
+            }
         }
+        return compute_aggregate(&agg.function, &agg.expr, table, &filtered_rows);
     }
 
-    match results.len() {
-        0 => Ok(Value::Null),
-        1 => Ok(results[0].clone()),
-        _ => Err("Scalar subquery returned more than one row".to_string()),
+    if let Column::Subquery(nested_subquery) = &subquery.columns[0] {
+        let mut results = Vec::new();
+        for inner_row in &table.rows {
+            let mut combined_row: Vec<Value> = outer_row.to_vec();
+            combined_row.extend(inner_row.clone());
+
+            let include_row = if let Some(ref where_expr) = subquery.where_clause {
+                evaluate_expression(Some(db), where_expr, &combined_columns, &combined_row)?
+            } else {
+                true
+            };
+            if include_row {
+                let nested_result = eval_scalar_subquery_with_outer(
+                    db,
+                    nested_subquery,
+                    &combined_columns,
+                    &combined_row,
+                )?;
+                results.push(nested_result);
+            }
+        }
+
+        match results.len() {
+            0 => Ok(Value::Null),
+            1 => Ok(results[0].clone()),
+            _ => Err("Scalar subquery returned more than one row".to_string()),
+        }
+    } else {
+        let mut results = Vec::new();
+        for inner_row in &table.rows {
+            let mut combined_row: Vec<Value> = outer_row.to_vec();
+            combined_row.extend(inner_row.clone());
+
+            let include_row = if let Some(ref where_expr) = subquery.where_clause {
+                evaluate_expression(Some(db), where_expr, &combined_columns, &combined_row)?
+            } else {
+                true
+            };
+            if include_row {
+                let val = match &subquery.columns[0] {
+                    Column::All => return Err("Scalar subquery cannot use *".to_string()),
+                    Column::Named(name) => {
+                        let col_idx = table
+                            .columns
+                            .iter()
+                            .position(|c| &c.name == name)
+                            .ok_or_else(|| format!("Column '{}' not found", name))?;
+                        inner_row[col_idx].clone()
+                    }
+                    Column::Function(_) => {
+                        unreachable!()
+                    }
+                    Column::Subquery(_) => {
+                        unreachable!()
+                    }
+                };
+                results.push(val);
+            }
+        }
+
+        match results.len() {
+            0 => Ok(Value::Null),
+            1 => Ok(results[0].clone()),
+            _ => Err("Scalar subquery returned more than one row".to_string()),
+        }
     }
 }
 
