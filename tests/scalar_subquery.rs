@@ -1,9 +1,18 @@
 use rustql::ast::*;
 use rustql::executor::{execute, reset_database_state};
+use std::sync::Mutex;
+
+static TEST_MUTEX: Mutex<()> = Mutex::new(());
+
+fn setup_test() -> std::sync::MutexGuard<'static, ()> {
+    let guard = TEST_MUTEX.lock().unwrap();
+    reset_database_state();
+    guard
+}
 
 #[test]
 fn test_scalar_subquery_basic() {
-    reset_database_state();
+    let _guard = setup_test();
     execute(Statement::CreateTable(CreateTableStatement {
         name: "users_scalar1".to_string(),
         columns: vec![
@@ -77,7 +86,7 @@ fn test_scalar_subquery_basic() {
 
 #[test]
 fn test_scalar_subquery_null() {
-    reset_database_state();
+    let _guard = setup_test();
     execute(Statement::CreateTable(CreateTableStatement {
         name: "users_scalar2".to_string(),
         columns: vec![
@@ -141,7 +150,7 @@ fn test_scalar_subquery_null() {
 
 #[test]
 fn test_scalar_subquery_aggregate() {
-    reset_database_state();
+    let _guard = setup_test();
     execute(Statement::CreateTable(CreateTableStatement {
         name: "users_agg".to_string(),
         columns: vec![
@@ -222,7 +231,7 @@ fn test_scalar_subquery_aggregate() {
 
 #[test]
 fn test_scalar_subquery_aggregate_sum() {
-    reset_database_state();
+    let _guard = setup_test();
     execute(Statement::CreateTable(CreateTableStatement {
         name: "users_sum".to_string(),
         columns: vec![
@@ -300,7 +309,7 @@ fn test_scalar_subquery_aggregate_sum() {
 
 #[test]
 fn test_scalar_subquery_nested() {
-    reset_database_state();
+    let _guard = setup_test();
     execute(Statement::CreateTable(CreateTableStatement {
         name: "users_nested".to_string(),
         columns: vec![

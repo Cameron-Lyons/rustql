@@ -1,107 +1,19 @@
 {
   "tables": {
-    "orders_scalar2": {
+    "users": {
       "columns": [
         {
-          "name": "user_id",
+          "name": "id",
           "data_type": "Integer",
           "nullable": false
         },
         {
-          "name": "amount",
-          "data_type": "Float",
+          "name": "name",
+          "data_type": "Text",
           "nullable": false
         }
       ],
       "rows": []
-    },
-    "orders_scalar1": {
-      "columns": [
-        {
-          "name": "user_id",
-          "data_type": "Integer",
-          "nullable": false
-        },
-        {
-          "name": "amount",
-          "data_type": "Float",
-          "nullable": false
-        }
-      ],
-      "rows": [
-        [
-          {
-            "Integer": 1
-          },
-          {
-            "Float": 150.0
-          }
-        ],
-        [
-          {
-            "Integer": 2
-          },
-          {
-            "Float": 50.0
-          }
-        ]
-      ]
-    },
-    "users_scalar2": {
-      "columns": [
-        {
-          "name": "id",
-          "data_type": "Integer",
-          "nullable": false
-        },
-        {
-          "name": "name",
-          "data_type": "Text",
-          "nullable": false
-        }
-      ],
-      "rows": [
-        [
-          {
-            "Integer": 1
-          },
-          {
-            "Text": "Alice"
-          }
-        ]
-      ]
-    },
-    "users_scalar1": {
-      "columns": [
-        {
-          "name": "id",
-          "data_type": "Integer",
-          "nullable": false
-        },
-        {
-          "name": "name",
-          "data_type": "Text",
-          "nullable": false
-        }
-      ],
-      "rows": [
-        [
-          {
-            "Integer": 1
-          },
-          {
-            "Text": "Alice"
-          }
-        ],
-        [
-          {
-            "Integer": 2
-          },
-          {
-            "Text": "Bob"
-          }
-        ]
-      ]
     }
   }
 }

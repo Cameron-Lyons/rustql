@@ -672,7 +672,7 @@ fn is_between(val: &Value, lower: &Value, upper: &Value) -> bool {
     match (val, lower, upper) {
         (Value::Integer(v), Value::Integer(l), Value::Integer(u)) => *v >= *l && *v <= *u,
         (Value::Float(v), Value::Float(l), Value::Float(u)) => *v >= *l && *v <= *u,
-        (Value::Integer(v), Value::Integer(l), Value::Float(u)) => *v as f64 >= *l as f64 && *v as f64 <= *u,
+        (Value::Integer(v), Value::Integer(l), Value::Float(u)) => *v as f64 >= *l as f64 && *v as f64 <= *u as f64,
         (Value::Integer(v), Value::Float(l), Value::Integer(u)) => *v as f64 >= *l && *v as f64 <= *u as f64,
         (Value::Float(v), Value::Integer(l), Value::Integer(u)) => *v >= *l as f64 && *v <= *u as f64,
         (Value::Float(v), Value::Integer(l), Value::Float(u)) => *v >= *l as f64 && *v <= *u,
@@ -1156,6 +1156,33 @@ fn eval_scalar_subquery_with_outer(
     let mut combined_columns: Vec<ColumnDefinition> = outer_columns.to_vec();
     combined_columns.extend(table.columns.clone());
 
+    // Helper: apply ORDER BY, OFFSET, LIMIT to a mutable list of candidate combined rows
+    let apply_order_and_slice = |rows: &mut Vec<Vec<Value>>| -> Result<(), String> {
+        if let Some(order_by) = &subquery.order_by {
+            rows.sort_by(|a, b| {
+                for ob in order_by {
+                    let va = evaluate_value_expression(&ob.expr, &combined_columns, a).unwrap_or(Value::Null);
+                    let vb = evaluate_value_expression(&ob.expr, &combined_columns, b).unwrap_or(Value::Null);
+                    let ord = compare_values_for_sort(&va, &vb);
+                    if ord != std::cmp::Ordering::Equal {
+                        return if ob.asc { ord } else { ord.reverse() };
+                    }
+                }
+                std::cmp::Ordering::Equal
+            });
+        }
+        let start = subquery.offset.unwrap_or(0);
+        let end = if let Some(limit) = subquery.limit { start.saturating_add(limit) } else { rows.len() };
+        let end = end.min(rows.len());
+        if start >= rows.len() {
+            rows.clear();
+        } else {
+            rows.drain(0..start);
+            rows.truncate(end - start);
+        }
+        Ok(())
+    };
+
     if let Column::Function(agg) = &subquery.columns[0] {
         let mut filtered_rows: Vec<&Vec<Value>> = Vec::new();
         for inner_row in &table.rows {
@@ -1175,7 +1202,8 @@ fn eval_scalar_subquery_with_outer(
     }
 
     if let Column::Subquery(nested_subquery) = &subquery.columns[0] {
-        let mut results = Vec::new();
+        // Build candidate combined rows first
+        let mut candidate_rows: Vec<Vec<Value>> = Vec::new();
         for inner_row in &table.rows {
             let mut combined_row: Vec<Value> = outer_row.to_vec();
             combined_row.extend(inner_row.clone());
@@ -1186,23 +1214,33 @@ fn eval_scalar_subquery_with_outer(
                 true
             };
             if include_row {
-                let nested_result = eval_scalar_subquery_with_outer(
-                    db,
-                    nested_subquery,
-                    &combined_columns,
-                    &combined_row,
-                )?;
-                results.push(nested_result);
+                candidate_rows.push(combined_row);
             }
         }
 
-        match results.len() {
+        // Apply ORDER BY / OFFSET / LIMIT on combined rows
+        apply_order_and_slice(&mut candidate_rows)?;
+
+        let mut results = Vec::new();
+        for combined_row in candidate_rows {
+            let nested_result = eval_scalar_subquery_with_outer(
+                db,
+                nested_subquery,
+                &combined_columns,
+                &combined_row,
+            )?;
+            results.push(nested_result);
+        }
+
+        return match results.len() {
             0 => Ok(Value::Null),
             1 => Ok(results[0].clone()),
             _ => Err("Scalar subquery returned more than one row".to_string()),
-        }
+        };
     } else {
-        let mut results = Vec::new();
+        // Simple non-aggregate scalar subquery selecting a single column
+        // Build candidate combined rows to support ORDER BY / LIMIT
+        let mut candidate_rows: Vec<Vec<Value>> = Vec::new();
         for inner_row in &table.rows {
             let mut combined_row: Vec<Value> = outer_row.to_vec();
             combined_row.extend(inner_row.clone());
@@ -1213,32 +1251,39 @@ fn eval_scalar_subquery_with_outer(
                 true
             };
             if include_row {
-                let val = match &subquery.columns[0] {
-                    Column::All => return Err("Scalar subquery cannot use *".to_string()),
-                    Column::Named(name) => {
-                        let col_idx = table
-                            .columns
-                            .iter()
-                            .position(|c| &c.name == name)
-                            .ok_or_else(|| format!("Column '{}' not found", name))?;
-                        inner_row[col_idx].clone()
-                    }
-                    Column::Function(_) => {
-                        unreachable!()
-                    }
-                    Column::Subquery(_) => {
-                        unreachable!()
-                    }
-                };
-                results.push(val);
+                candidate_rows.push(combined_row);
             }
         }
 
-        match results.len() {
+        // Apply ORDER BY / OFFSET / LIMIT on combined rows
+        apply_order_and_slice(&mut candidate_rows)?;
+
+        let mut results = Vec::new();
+        for combined_row in &candidate_rows {
+            let val = match &subquery.columns[0] {
+                Column::All => return Err("Scalar subquery cannot use *".to_string()),
+                Column::Named(name) => {
+                    let col_idx = combined_columns
+                        .iter()
+                        .position(|c| c.name == (if name.contains('.') { name.split('.').next_back().unwrap_or(name) } else { name }))
+                        .ok_or_else(|| format!("Column '{}' not found", name))?;
+                    combined_row[col_idx].clone()
+                }
+                Column::Function(_) => {
+                    unreachable!()
+                }
+                Column::Subquery(_) => {
+                    unreachable!()
+                }
+            };
+            results.push(val);
+        }
+
+        return match results.len() {
             0 => Ok(Value::Null),
             1 => Ok(results[0].clone()),
             _ => Err("Scalar subquery returned more than one row".to_string()),
-        }
+        };
     }
 }
 
