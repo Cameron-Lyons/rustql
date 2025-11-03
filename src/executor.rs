@@ -1145,7 +1145,176 @@ fn eval_scalar_subquery_with_outer(
     }
 
     if !subquery.joins.is_empty() {
-        return Err("Scalar subqueries with joins not yet supported".to_string());
+        if subquery.joins.len() != 1 {
+            return Err("Multiple joins in scalar subquery not yet supported".to_string());
+        }
+
+        let main_table = db
+            .tables
+            .get(&subquery.from)
+            .ok_or_else(|| format!("Table '{}' does not exist", subquery.from))?;
+
+        let join = &subquery.joins[0];
+        let join_table = db
+            .tables
+            .get(&join.table)
+            .ok_or_else(|| format!("Table '{}' does not exist", join.table))?;
+
+        let mut all_subquery_columns = main_table.columns.clone();
+        all_subquery_columns.extend(join_table.columns.clone());
+
+        let main_table_name = subquery.from.clone();
+        let join_table_name = join.table.clone();
+
+        let check_join_match = |main_row: &Vec<Value>, join_row: &Vec<Value>| -> bool {
+            if let Expression::BinaryOp { left, op, right } = &join.on
+                && *op == BinaryOperator::Equal
+                    && let (Expression::Column(left_col), Expression::Column(right_col)) = (left.as_ref(), right.as_ref()) {
+                        let get_col_idx = |col_name: &str| -> Option<(bool, usize)> {
+                            if col_name.contains('.') {
+                                let parts: Vec<&str> = col_name.split('.').collect();
+                                if parts.len() == 2 {
+                                    let table_name = parts[0];
+                                    let col_name = parts[1];
+                                    if table_name == main_table_name {
+                                        main_table.columns.iter().position(|c| c.name == col_name).map(|idx| (true, idx))
+                                    } else if table_name == join_table_name {
+                                        join_table.columns.iter().position(|c| c.name == col_name).map(|idx| (false, idx))
+                                    } else {
+                                        None
+                                    }
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            }
+                        };
+                        
+                        let left_col_idx = get_col_idx(left_col);
+                        let right_col_idx = get_col_idx(right_col);
+                        
+                        let left_val = if let Some((in_main, idx)) = left_col_idx {
+                            if in_main { Some(&main_row[idx]) } else { Some(&join_row[idx]) }
+                        } else { None };
+                        
+                        let right_val = if let Some((in_main, idx)) = right_col_idx {
+                            if in_main { Some(&main_row[idx]) } else { Some(&join_row[idx]) }
+                        } else { None };
+                        
+                        if let (Some(lv), Some(rv)) = (left_val, right_val) {
+                            return lv == rv;
+                        }
+                    }
+            false
+        };
+
+        let mut joined_rows: Vec<Vec<Value>> = Vec::new();
+        let mut matched_pairs = HashSet::new();
+        match join.join_type {
+            JoinType::Inner | JoinType::Left | JoinType::Full => {
+                for (mi, main_row) in main_table.rows.iter().enumerate() {
+                    let mut has_match = false;
+                    for (ji, join_row) in join_table.rows.iter().enumerate() {
+                        if check_join_match(main_row, join_row) {
+                            let mut combined = main_row.clone();
+                            combined.extend(join_row.clone());
+                            joined_rows.push(combined);
+                            has_match = true;
+                            matched_pairs.insert((mi, ji));
+                        }
+                    }
+                    if matches!(join.join_type, JoinType::Left | JoinType::Full) && !has_match {
+                        let mut combined = main_row.clone();
+                        combined.extend(vec![Value::Null; join_table.columns.len()]);
+                        joined_rows.push(combined);
+                    }
+                }
+            }
+            _ => {}
+        }
+        if matches!(join.join_type, JoinType::Right | JoinType::Full) {
+            for (ji, join_row) in join_table.rows.iter().enumerate() {
+                let mut has_match = false;
+                for (mi, main_row) in main_table.rows.iter().enumerate() {
+                    if check_join_match(main_row, join_row) {
+                        has_match = true;
+                        if !matches!(join.join_type, JoinType::Full) || !matched_pairs.contains(&(mi, ji)) {
+                            let mut combined = main_row.clone();
+                            combined.extend(join_row.clone());
+                            joined_rows.push(combined);
+                        }
+                    }
+                }
+                if !has_match {
+                    let mut combined = vec![Value::Null; main_table.columns.len()];
+                    combined.extend(join_row.clone());
+                    joined_rows.push(combined);
+                }
+            }
+        }
+
+        let mut combined_columns: Vec<ColumnDefinition> = outer_columns.to_vec();
+        combined_columns.extend(all_subquery_columns.clone());
+        let mut candidate_rows: Vec<Vec<Value>> = Vec::new();
+        for sub_row in joined_rows {
+            let mut combined_row: Vec<Value> = outer_row.to_vec();
+            combined_row.extend(sub_row);
+            let include_row = if let Some(ref where_expr) = subquery.where_clause {
+                evaluate_expression(Some(db), where_expr, &combined_columns, &combined_row)?
+            } else { true };
+            if include_row {
+                candidate_rows.push(combined_row);
+            }
+        }
+
+        let apply_order_and_slice = |rows: &mut Vec<Vec<Value>>| -> Result<(), String> {
+            if let Some(order_by) = &subquery.order_by {
+                rows.sort_by(|a, b| {
+                    for ob in order_by {
+                        let va = evaluate_value_expression(&ob.expr, &combined_columns, a).unwrap_or(Value::Null);
+                        let vb = evaluate_value_expression(&ob.expr, &combined_columns, b).unwrap_or(Value::Null);
+                        let ord = compare_values_for_sort(&va, &vb);
+                        if ord != std::cmp::Ordering::Equal {
+                            return if ob.asc { ord } else { ord.reverse() };
+                        }
+                    }
+                    std::cmp::Ordering::Equal
+                });
+            }
+            let start = subquery.offset.unwrap_or(0);
+            let end = if let Some(limit) = subquery.limit { start.saturating_add(limit) } else { rows.len() };
+            let end = end.min(rows.len());
+            if start >= rows.len() { rows.clear(); } else { rows.drain(0..start); rows.truncate(end - start); }
+            Ok(())
+        };
+        apply_order_and_slice(&mut candidate_rows)?;
+
+        return match &subquery.columns[0] {
+            Column::Named(name) => {
+                let col_idx = combined_columns
+                    .iter()
+                    .position(|c| c.name == (if name.contains('.') { name.split('.').next_back().unwrap_or(name) } else { name }))
+                    .ok_or_else(|| format!("Column '{}' not found", name))?;
+                if candidate_rows.is_empty() { Ok(Value::Null) }
+                else if candidate_rows.len() == 1 { Ok(candidate_rows[0][col_idx].clone()) }
+                else { Err("Scalar subquery returned more than one row".to_string()) }
+            }
+            Column::Subquery(nested) => {
+                let mut results = Vec::new();
+                for combined_row in candidate_rows {
+                    let v = eval_scalar_subquery_with_outer(db, nested, &combined_columns, &combined_row)?;
+                    results.push(v);
+                }
+                if results.is_empty() { Ok(Value::Null) }
+                else if results.len() == 1 { Ok(results[0].clone()) }
+                else { Err("Scalar subquery returned more than one row".to_string()) }
+            }
+            Column::Function(_) => {
+                Err("Scalar subqueries with joins and aggregates not yet supported".to_string())
+            }
+            Column::All => Err("Scalar subquery cannot use *".to_string()),
+        };
     }
 
     let table = db

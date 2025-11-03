@@ -413,3 +413,84 @@ fn test_scalar_subquery_nested() {
     assert!(output.contains("50")); // The nested subquery returns 50.0
 }
 
+#[test]
+fn test_scalar_subquery_with_join() {
+    let _guard = setup_test();
+
+    execute(Statement::CreateTable(CreateTableStatement {
+        name: "users_join".to_string(),
+        columns: vec![
+            ColumnDefinition { name: "id".into(), data_type: DataType::Integer, nullable: false },
+            ColumnDefinition { name: "name".into(), data_type: DataType::Text, nullable: false },
+        ],
+    })).unwrap();
+
+    execute(Statement::Insert(InsertStatement {
+        table: "users_join".to_string(),
+        columns: Some(vec!["id".into(), "name".into()]),
+        values: vec![
+            vec![Value::Integer(1), Value::Text("Alice".into())],
+            vec![Value::Integer(2), Value::Text("Bob".into())],
+        ],
+    })).unwrap();
+
+    execute(Statement::CreateTable(CreateTableStatement {
+        name: "orders_join".to_string(),
+        columns: vec![
+            ColumnDefinition { name: "id".into(), data_type: DataType::Integer, nullable: false },
+            ColumnDefinition { name: "user_id".into(), data_type: DataType::Integer, nullable: false },
+            ColumnDefinition { name: "amount".into(), data_type: DataType::Float, nullable: false },
+        ],
+    })).unwrap();
+
+    execute(Statement::Insert(InsertStatement {
+        table: "orders_join".to_string(),
+        columns: Some(vec!["id".into(), "user_id".into(), "amount".into()]),
+        values: vec![
+            vec![Value::Integer(10), Value::Integer(1), Value::Float(150.0)],
+            vec![Value::Integer(11), Value::Integer(2), Value::Float(50.0)],
+        ],
+    })).unwrap();
+
+    let stmt = Statement::Select(SelectStatement {
+        distinct: false,
+        from: "users_join".into(),
+        columns: vec![
+            Column::Named("name".into()),
+            Column::Subquery(Box::new(SelectStatement {
+                distinct: false,
+                columns: vec![Column::Named("amount".into())],
+                from: "orders_join".into(),
+                joins: vec![Join { join_type: JoinType::Inner, table: "users_join".into(), on: Expression::BinaryOp {
+                    left: Box::new(Expression::Column("orders_join.user_id".into())),
+                    op: BinaryOperator::Equal,
+                    right: Box::new(Expression::Column("users_join.id".into())),
+                }}],
+                where_clause: Some(Expression::BinaryOp {
+                    left: Box::new(Expression::Column("orders_join.user_id".into())),
+                    op: BinaryOperator::Equal,
+                    right: Box::new(Expression::Column("users_join.id".into())),
+                }),
+                group_by: None,
+                having: None,
+                order_by: None,
+                limit: None,
+                offset: None,
+            })),
+        ],
+        joins: vec![],
+        where_clause: None,
+        group_by: None,
+        having: None,
+        order_by: None,
+        limit: None,
+        offset: None,
+    });
+
+    let output = execute(stmt).unwrap();
+    assert!(output.contains("Alice"));
+    assert!(output.contains("150"));
+    assert!(output.contains("Bob"));
+    assert!(output.contains("50"));
+}
+
