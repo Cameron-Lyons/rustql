@@ -359,8 +359,6 @@ fn test_scalar_subquery_nested() {
         ],
     })).unwrap();
 
-    // Test nested scalar subquery
-    // Inner query selects price from items_nested where order_id matches user_id from middle query
     let stmt = Statement::Select(SelectStatement {
         distinct: false,
         from: "users_nested".into(),
@@ -494,3 +492,110 @@ fn test_scalar_subquery_with_join() {
     assert!(output.contains("50"));
 }
 
+#[test]
+fn test_scalar_subquery_with_join_and_aggregate() {
+    let _guard = setup_test();
+
+    execute(Statement::CreateTable(CreateTableStatement {
+        name: "users_join_agg".to_string(),
+        columns: vec![
+            ColumnDefinition { name: "id".into(), data_type: DataType::Integer, nullable: false },
+            ColumnDefinition { name: "name".into(), data_type: DataType::Text, nullable: false },
+        ],
+    })).unwrap();
+
+    execute(Statement::Insert(InsertStatement {
+        table: "users_join_agg".to_string(),
+        columns: Some(vec!["id".into(), "name".into()]),
+        values: vec![
+            vec![Value::Integer(1), Value::Text("Alice".into())],
+            vec![Value::Integer(2), Value::Text("Bob".into())],
+        ],
+    })).unwrap();
+
+    execute(Statement::CreateTable(CreateTableStatement {
+        name: "orders_join_agg".to_string(),
+        columns: vec![
+            ColumnDefinition { name: "id".into(), data_type: DataType::Integer, nullable: false },
+            ColumnDefinition { name: "user_id".into(), data_type: DataType::Integer, nullable: false },
+            ColumnDefinition { name: "amount".into(), data_type: DataType::Float, nullable: false },
+        ],
+    })).unwrap();
+
+    execute(Statement::Insert(InsertStatement {
+        table: "orders_join_agg".to_string(),
+        columns: Some(vec!["id".into(), "user_id".into(), "amount".into()]),
+        values: vec![
+            vec![Value::Integer(10), Value::Integer(1), Value::Float(100.0)],
+            vec![Value::Integer(11), Value::Integer(1), Value::Float(50.0)],
+            vec![Value::Integer(12), Value::Integer(2), Value::Float(200.0)],
+        ],
+    })).unwrap();
+
+    execute(Statement::CreateTable(CreateTableStatement {
+        name: "products_join_agg".to_string(),
+        columns: vec![
+            ColumnDefinition { name: "order_id".into(), data_type: DataType::Integer, nullable: false },
+            ColumnDefinition { name: "price".into(), data_type: DataType::Float, nullable: false },
+        ],
+    })).unwrap();
+
+    execute(Statement::Insert(InsertStatement {
+        table: "products_join_agg".to_string(),
+        columns: Some(vec!["order_id".into(), "price".into()]),
+        values: vec![
+            vec![Value::Integer(10), Value::Float(10.0)],
+            vec![Value::Integer(11), Value::Float(20.0)],
+            vec![Value::Integer(12), Value::Float(30.0)],
+        ],
+    })).unwrap();
+
+    let stmt = Statement::Select(SelectStatement {
+        distinct: false,
+        from: "users_join_agg".into(),
+        columns: vec![
+            Column::Named("name".into()),
+            Column::Subquery(Box::new(SelectStatement {
+                distinct: false,
+                columns: vec![Column::Function(AggregateFunction {
+                    function: AggregateFunctionType::Sum,
+                    expr: Box::new(Expression::Column("products_join_agg.price".into())),
+                    alias: None,
+                })],
+                from: "orders_join_agg".into(),
+                joins: vec![Join { 
+                    join_type: JoinType::Inner, 
+                    table: "products_join_agg".into(), 
+                    on: Expression::BinaryOp {
+                        left: Box::new(Expression::Column("orders_join_agg.id".into())),
+                        op: BinaryOperator::Equal,
+                        right: Box::new(Expression::Column("products_join_agg.order_id".into())),
+                    }
+                }],
+                where_clause: Some(Expression::BinaryOp {
+                    left: Box::new(Expression::Column("orders_join_agg.user_id".into())),
+                    op: BinaryOperator::Equal,
+                    right: Box::new(Expression::Column("users_join_agg.id".into())),
+                }),
+                group_by: None,
+                having: None,
+                order_by: None,
+                limit: None,
+                offset: None,
+            })),
+        ],
+        joins: vec![],
+        where_clause: None,
+        group_by: None,
+        having: None,
+        order_by: None,
+        limit: None,
+        offset: None,
+    });
+
+    let output = execute(stmt).unwrap();
+    assert!(output.contains("Alice"));
+    assert!(output.contains("30")); // 10 + 20 = 30 (sum of products for Alice's orders)
+    assert!(output.contains("Bob"));
+    assert!(output.contains("30")); // 30 (sum of products for Bob's orders)
+}

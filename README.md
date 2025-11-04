@@ -284,9 +284,8 @@ cargo test select
 
 ## Limitations
 
-- Scalar subqueries with joins are not yet supported
-- Aggregates in scalar subqueries are not yet supported
-- EXISTS subqueries with multiple joins are limited to single joins
+- Aggregates in subquery IN not yet supported
+- Nested subqueries in IN not yet supported
 - No indexes for performance optimization
 - No foreign key constraints
 - Limited to single-file JSON storage
@@ -297,9 +296,8 @@ cargo test select
 
 Possible improvements for the project:
 
-- [ ] Aggregates in scalar subqueries (e.g., `SELECT name, (SELECT COUNT(*) FROM orders WHERE orders.user_id = users.id) FROM users`)
-- [ ] Scalar subqueries with joins
-- [ ] Support for multiple joins in EXISTS subqueries
+- [ ] Aggregates in subquery IN
+- [ ] Nested subqueries in IN
 - [ ] Index implementation for better performance
 - [ ] Foreign key constraints
 - [ ] Transaction support with rollback
