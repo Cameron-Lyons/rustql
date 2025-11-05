@@ -791,36 +791,98 @@ fn eval_subquery_values(db: &Database, subquery: &SelectStatement) -> Result<Vec
         .tables
         .get(&subquery.from)
         .ok_or_else(|| format!("Table '{}' does not exist", subquery.from))?;
-    let mut values = Vec::new();
+    let mut filtered_rows: Vec<&Vec<Value>> = Vec::new();
     for row in &table.rows {
         let include_row = if let Some(ref where_expr) = subquery.where_clause {
             evaluate_expression(Some(db), where_expr, &table.columns, row)?
         } else {
             true
         };
-        if !include_row {
-            continue;
+        if include_row {
+            filtered_rows.push(row);
         }
+    }
 
-        match &subquery.columns[0] {
-            Column::All => return Err("Subquery in IN cannot use *".to_string()),
-            Column::Named(name) => {
+    match &subquery.columns[0] {
+        Column::All => Err("Subquery in IN cannot use *".to_string()),
+        Column::Named(name) => {
+            if let Some(group_by_cols) = &subquery.group_by {
+                let group_by_indices: Vec<usize> = group_by_cols
+                    .iter()
+                    .map(|g| table
+                        .columns
+                        .iter()
+                        .position(|c| &c.name == g)
+                        .ok_or_else(|| format!("Column '{}' not found in GROUP BY", g)))
+                    .collect::<Result<_, _>>()?;
+
+                let mut groups: std::collections::BTreeMap<Vec<Value>, Vec<&Vec<Value>>> = std::collections::BTreeMap::new();
+                for row in &filtered_rows {
+                    let key: Vec<Value> = group_by_indices.iter().map(|&idx| row[idx].clone()).collect();
+                    groups.entry(key).or_default().push(*row);
+                }
+
+                let named_idx = table
+                    .columns
+                    .iter()
+                    .position(|c| &c.name == name)
+                    .ok_or_else(|| format!("Column '{}' not found", name))?;
+                if !group_by_indices.contains(&named_idx) {
+                    return Err(format!("Column '{}' must appear in GROUP BY clause", name));
+                }
+                let mut values = Vec::with_capacity(groups.len());
+                for (_k, rows) in groups {
+                    values.push(rows[0][named_idx].clone());
+                }
+                Ok(values)
+            } else {
                 let idx = table
                     .columns
                     .iter()
                     .position(|c| &c.name == name)
                     .ok_or_else(|| format!("Column '{}' not found", name))?;
-                values.push(row[idx].clone());
-            }
-            Column::Function(_) => {
-                return Err("Aggregates in subquery IN not supported yet".to_string());
-            }
-            Column::Subquery(_) => {
-                return Err("Nested subqueries in IN not supported yet".to_string());
+                let mut values = Vec::with_capacity(filtered_rows.len());
+                for row in filtered_rows {
+                    values.push(row[idx].clone());
+                }
+                Ok(values)
             }
         }
+        Column::Function(agg) => {
+            if let Some(group_by_cols) = &subquery.group_by {
+                let group_by_indices: Vec<usize> = group_by_cols
+                    .iter()
+                    .map(|g| table
+                        .columns
+                        .iter()
+                        .position(|c| &c.name == g)
+                        .ok_or_else(|| format!("Column '{}' not found in GROUP BY", g)))
+                    .collect::<Result<_, _>>()?;
+                let mut groups: std::collections::BTreeMap<Vec<Value>, Vec<&Vec<Value>>> = std::collections::BTreeMap::new();
+                for row in &filtered_rows {
+                    let key: Vec<Value> = group_by_indices.iter().map(|&idx| row[idx].clone()).collect();
+                    groups.entry(key).or_default().push(*row);
+                }
+                let mut values = Vec::with_capacity(groups.len());
+                for (_k, rows) in groups {
+                    if let Some(ref having_expr) = subquery.having {
+                        if !evaluate_having(having_expr, &subquery.columns, table, &rows)? {
+                            continue;
+                        }
+                    }
+                    let v = compute_aggregate(&agg.function, &agg.expr, table, &rows)?;
+                    values.push(v);
+                }
+                Ok(values)
+            } else {
+                let value = compute_aggregate(&agg.function, &agg.expr, table, &filtered_rows)?;
+                Ok(vec![value])
+            }
+        }
+        Column::Subquery(_) => {
+            Err("Nested subqueries in IN not supported yet".to_string())
+        }
     }
-    Ok(values)
 }
 
 fn eval_subquery_exists_with_outer(

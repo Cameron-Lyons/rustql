@@ -311,3 +311,29 @@ fn test_is_null() {
     assert!(!result.contains("1"));
     assert!(!result.contains("3"));
 }
+
+#[test]
+fn test_in_subquery_with_aggregate() {
+	let _guard = setup_test();
+	process_query("CREATE TABLE orders (id INTEGER, user_id INTEGER, amount FLOAT)").unwrap();
+	process_query("INSERT INTO orders VALUES (1, 1, 100.0), (2, 1, 50.0), (3, 2, 200.0)").unwrap();
+
+	let result = process_query("SELECT amount FROM orders WHERE amount IN (SELECT MAX(amount) FROM orders)").unwrap();
+	assert!(result.contains("200") || result.contains("200.0"));
+	assert!(!result.contains("100.0") && !result.contains("50.0") && !result.contains("100\t"));
+}
+
+#[test]
+fn test_in_subquery_with_group_by_and_aggregate() {
+	let _guard = setup_test();
+	process_query("CREATE TABLE orders2 (id INTEGER, user_id INTEGER, amount FLOAT)").unwrap();
+	process_query("INSERT INTO orders2 VALUES (1, 1, 100.0), (2, 1, 50.0), (3, 2, 200.0), (4, 2, 120.0)").unwrap();
+
+	let result = process_query(
+		"SELECT id, amount FROM orders2 WHERE amount IN (SELECT MAX(amount) FROM orders2 GROUP BY user_id) ORDER BY id"
+	).unwrap();
+	assert!(result.contains("id\tamount"));
+	assert!(result.contains("100") || result.contains("100.0"));
+	assert!(result.contains("200") || result.contains("200.0"));
+	assert!(!result.contains("50.0") && !result.contains("120.0"));
+}
