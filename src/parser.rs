@@ -93,7 +93,7 @@ impl Parser {
 
             if let Some(join_type) = join_type {
                 self.consume(Token::Join)?;
-                
+
                 let join_table = match self.advance() {
                     Token::Identifier(name) => name,
                     _ => return Err("Expected table name after JOIN".to_string()),
@@ -190,14 +190,18 @@ impl Parser {
                     }
                     Token::LeftParen => {
                         let check_idx = self.current + 1;
-                        if check_idx < self.tokens.len() && matches!(&self.tokens[check_idx], Token::Select) {
+                        if check_idx < self.tokens.len()
+                            && matches!(&self.tokens[check_idx], Token::Select)
+                        {
                             self.advance();
                             let subquery_stmt = self.parse_select()?;
                             if let Statement::Select(subquery_stmt) = subquery_stmt {
                                 self.consume(Token::RightParen)?;
                                 Column::Subquery(Box::new(subquery_stmt))
                             } else {
-                                return Err("Expected SELECT statement in scalar subquery".to_string());
+                                return Err(
+                                    "Expected SELECT statement in scalar subquery".to_string()
+                                );
                             }
                         } else {
                             return Err("Unexpected '(' in column list".to_string());
@@ -690,7 +694,7 @@ impl Parser {
                         return Err("Expected '(' after IN".to_string());
                     }
                     self.advance();
-                    
+
                     if *self.current_token() == Token::Select {
                         let subquery_stmt = self.parse_select()?;
                         if let Statement::Select(subquery_stmt) = subquery_stmt {
@@ -712,7 +716,7 @@ impl Parser {
                             }
                         }
                         self.consume(Token::RightParen)?;
-                        
+
                         expr = Expression::In {
                             left: Box::new(expr),
                             values,

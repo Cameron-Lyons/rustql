@@ -6,10 +6,19 @@ fn test_where_exists_true() {
     execute(Statement::CreateTable(CreateTableStatement {
         name: "users_ex1".to_string(),
         columns: vec![
-            ColumnDefinition { name: "id".into(), data_type: DataType::Integer, nullable: false },
-            ColumnDefinition { name: "name".into(), data_type: DataType::Text, nullable: false },
+            ColumnDefinition {
+                name: "id".into(),
+                data_type: DataType::Integer,
+                nullable: false,
+            },
+            ColumnDefinition {
+                name: "name".into(),
+                data_type: DataType::Text,
+                nullable: false,
+            },
         ],
-    })).unwrap();
+    }))
+    .unwrap();
 
     execute(Statement::Insert(InsertStatement {
         table: "users_ex1".to_string(),
@@ -18,15 +27,25 @@ fn test_where_exists_true() {
             vec![Value::Integer(1), Value::Text("Alice".into())],
             vec![Value::Integer(2), Value::Text("Bob".into())],
         ],
-    })).unwrap();
+    }))
+    .unwrap();
 
     execute(Statement::CreateTable(CreateTableStatement {
         name: "orders_ex1".to_string(),
         columns: vec![
-            ColumnDefinition { name: "id".into(), data_type: DataType::Integer, nullable: false },
-            ColumnDefinition { name: "amount".into(), data_type: DataType::Float, nullable: false },
+            ColumnDefinition {
+                name: "id".into(),
+                data_type: DataType::Integer,
+                nullable: false,
+            },
+            ColumnDefinition {
+                name: "amount".into(),
+                data_type: DataType::Float,
+                nullable: false,
+            },
         ],
-    })).unwrap();
+    }))
+    .unwrap();
 
     execute(Statement::Insert(InsertStatement {
         table: "orders_ex1".to_string(),
@@ -35,7 +54,8 @@ fn test_where_exists_true() {
             vec![Value::Integer(1), Value::Float(150.0)],
             vec![Value::Integer(2), Value::Float(50.0)],
         ],
-    })).unwrap();
+    }))
+    .unwrap();
 
     let sub = SelectStatement {
         distinct: false,
@@ -77,10 +97,19 @@ fn test_where_exists_false_filters_all() {
     execute(Statement::CreateTable(CreateTableStatement {
         name: "users_ex2".to_string(),
         columns: vec![
-            ColumnDefinition { name: "id".into(), data_type: DataType::Integer, nullable: false },
-            ColumnDefinition { name: "name".into(), data_type: DataType::Text, nullable: false },
+            ColumnDefinition {
+                name: "id".into(),
+                data_type: DataType::Integer,
+                nullable: false,
+            },
+            ColumnDefinition {
+                name: "name".into(),
+                data_type: DataType::Text,
+                nullable: false,
+            },
         ],
-    })).unwrap();
+    }))
+    .unwrap();
 
     execute(Statement::Insert(InsertStatement {
         table: "users_ex2".to_string(),
@@ -89,15 +118,25 @@ fn test_where_exists_false_filters_all() {
             vec![Value::Integer(1), Value::Text("Alice".into())],
             vec![Value::Integer(2), Value::Text("Bob".into())],
         ],
-    })).unwrap();
+    }))
+    .unwrap();
 
     execute(Statement::CreateTable(CreateTableStatement {
         name: "orders_ex2".to_string(),
         columns: vec![
-            ColumnDefinition { name: "id".into(), data_type: DataType::Integer, nullable: false },
-            ColumnDefinition { name: "amount".into(), data_type: DataType::Float, nullable: false },
+            ColumnDefinition {
+                name: "id".into(),
+                data_type: DataType::Integer,
+                nullable: false,
+            },
+            ColumnDefinition {
+                name: "amount".into(),
+                data_type: DataType::Float,
+                nullable: false,
+            },
         ],
-    })).unwrap();
+    }))
+    .unwrap();
 
     execute(Statement::Insert(InsertStatement {
         table: "orders_ex2".to_string(),
@@ -106,7 +145,8 @@ fn test_where_exists_false_filters_all() {
             vec![Value::Integer(1), Value::Float(150.0)],
             vec![Value::Integer(2), Value::Float(50.0)],
         ],
-    })).unwrap();
+    }))
+    .unwrap();
 
     let sub = SelectStatement {
         distinct: false,
@@ -143,16 +183,24 @@ fn test_where_exists_false_filters_all() {
     assert!(!output.contains("Bob"));
 }
 
-
 #[test]
 fn test_where_not_exists_true_filters_all() {
     execute(Statement::CreateTable(CreateTableStatement {
         name: "t_users_ne1".to_string(),
         columns: vec![
-            ColumnDefinition { name: "id".into(), data_type: DataType::Integer, nullable: false },
-            ColumnDefinition { name: "name".into(), data_type: DataType::Text, nullable: false },
+            ColumnDefinition {
+                name: "id".into(),
+                data_type: DataType::Integer,
+                nullable: false,
+            },
+            ColumnDefinition {
+                name: "name".into(),
+                data_type: DataType::Text,
+                nullable: false,
+            },
         ],
-    })).unwrap();
+    }))
+    .unwrap();
 
     execute(Statement::Insert(InsertStatement {
         table: "t_users_ne1".to_string(),
@@ -161,15 +209,25 @@ fn test_where_not_exists_true_filters_all() {
             vec![Value::Integer(1), Value::Text("Alice".into())],
             vec![Value::Integer(2), Value::Text("Bob".into())],
         ],
-    })).unwrap();
+    }))
+    .unwrap();
 
     execute(Statement::CreateTable(CreateTableStatement {
         name: "t_orders_ne1".to_string(),
         columns: vec![
-            ColumnDefinition { name: "id".into(), data_type: DataType::Integer, nullable: false },
-            ColumnDefinition { name: "amount".into(), data_type: DataType::Float, nullable: false },
+            ColumnDefinition {
+                name: "id".into(),
+                data_type: DataType::Integer,
+                nullable: false,
+            },
+            ColumnDefinition {
+                name: "amount".into(),
+                data_type: DataType::Float,
+                nullable: false,
+            },
         ],
-    })).unwrap();
+    }))
+    .unwrap();
 
     execute(Statement::Insert(InsertStatement {
         table: "t_orders_ne1".to_string(),
@@ -178,7 +236,8 @@ fn test_where_not_exists_true_filters_all() {
             vec![Value::Integer(1), Value::Float(150.0)],
             vec![Value::Integer(2), Value::Float(50.0)],
         ],
-    })).unwrap();
+    }))
+    .unwrap();
 
     let sub = SelectStatement {
         distinct: false,
@@ -223,10 +282,19 @@ fn test_where_exists_correlated_true() {
     execute(Statement::CreateTable(CreateTableStatement {
         name: "users_corr1".to_string(),
         columns: vec![
-            ColumnDefinition { name: "id".into(), data_type: DataType::Integer, nullable: false },
-            ColumnDefinition { name: "name".into(), data_type: DataType::Text, nullable: false },
+            ColumnDefinition {
+                name: "id".into(),
+                data_type: DataType::Integer,
+                nullable: false,
+            },
+            ColumnDefinition {
+                name: "name".into(),
+                data_type: DataType::Text,
+                nullable: false,
+            },
         ],
-    })).unwrap();
+    }))
+    .unwrap();
 
     execute(Statement::Insert(InsertStatement {
         table: "users_corr1".to_string(),
@@ -235,15 +303,25 @@ fn test_where_exists_correlated_true() {
             vec![Value::Integer(1), Value::Text("Alice".into())],
             vec![Value::Integer(2), Value::Text("Bob".into())],
         ],
-    })).unwrap();
+    }))
+    .unwrap();
 
     execute(Statement::CreateTable(CreateTableStatement {
         name: "orders_corr1".to_string(),
         columns: vec![
-            ColumnDefinition { name: "user_id".into(), data_type: DataType::Integer, nullable: false },
-            ColumnDefinition { name: "amount".into(), data_type: DataType::Float, nullable: false },
+            ColumnDefinition {
+                name: "user_id".into(),
+                data_type: DataType::Integer,
+                nullable: false,
+            },
+            ColumnDefinition {
+                name: "amount".into(),
+                data_type: DataType::Float,
+                nullable: false,
+            },
         ],
-    })).unwrap();
+    }))
+    .unwrap();
 
     execute(Statement::Insert(InsertStatement {
         table: "orders_corr1".to_string(),
@@ -252,7 +330,8 @@ fn test_where_exists_correlated_true() {
             vec![Value::Integer(1), Value::Float(150.0)],
             vec![Value::Integer(2), Value::Float(50.0)],
         ],
-    })).unwrap();
+    }))
+    .unwrap();
 
     let sub = SelectStatement {
         distinct: false,
@@ -302,10 +381,19 @@ fn test_where_not_exists_false() {
     execute(Statement::CreateTable(CreateTableStatement {
         name: "t_users_ne2".to_string(),
         columns: vec![
-            ColumnDefinition { name: "id".into(), data_type: DataType::Integer, nullable: false },
-            ColumnDefinition { name: "name".into(), data_type: DataType::Text, nullable: false },
+            ColumnDefinition {
+                name: "id".into(),
+                data_type: DataType::Integer,
+                nullable: false,
+            },
+            ColumnDefinition {
+                name: "name".into(),
+                data_type: DataType::Text,
+                nullable: false,
+            },
         ],
-    })).unwrap();
+    }))
+    .unwrap();
 
     execute(Statement::Insert(InsertStatement {
         table: "t_users_ne2".to_string(),
@@ -314,15 +402,25 @@ fn test_where_not_exists_false() {
             vec![Value::Integer(1), Value::Text("Alice".into())],
             vec![Value::Integer(2), Value::Text("Bob".into())],
         ],
-    })).unwrap();
+    }))
+    .unwrap();
 
     execute(Statement::CreateTable(CreateTableStatement {
         name: "t_orders_ne2".to_string(),
         columns: vec![
-            ColumnDefinition { name: "id".into(), data_type: DataType::Integer, nullable: false },
-            ColumnDefinition { name: "amount".into(), data_type: DataType::Float, nullable: false },
+            ColumnDefinition {
+                name: "id".into(),
+                data_type: DataType::Integer,
+                nullable: false,
+            },
+            ColumnDefinition {
+                name: "amount".into(),
+                data_type: DataType::Float,
+                nullable: false,
+            },
         ],
-    })).unwrap();
+    }))
+    .unwrap();
 
     execute(Statement::Insert(InsertStatement {
         table: "t_orders_ne2".to_string(),
@@ -331,7 +429,8 @@ fn test_where_not_exists_false() {
             vec![Value::Integer(1), Value::Float(150.0)],
             vec![Value::Integer(2), Value::Float(50.0)],
         ],
-    })).unwrap();
+    }))
+    .unwrap();
 
     let sub = SelectStatement {
         distinct: false,
@@ -376,10 +475,19 @@ fn test_where_exists_correlated_false() {
     execute(Statement::CreateTable(CreateTableStatement {
         name: "users_corr2".to_string(),
         columns: vec![
-            ColumnDefinition { name: "id".into(), data_type: DataType::Integer, nullable: false },
-            ColumnDefinition { name: "name".into(), data_type: DataType::Text, nullable: false },
+            ColumnDefinition {
+                name: "id".into(),
+                data_type: DataType::Integer,
+                nullable: false,
+            },
+            ColumnDefinition {
+                name: "name".into(),
+                data_type: DataType::Text,
+                nullable: false,
+            },
         ],
-    })).unwrap();
+    }))
+    .unwrap();
 
     execute(Statement::Insert(InsertStatement {
         table: "users_corr2".to_string(),
@@ -388,15 +496,25 @@ fn test_where_exists_correlated_false() {
             vec![Value::Integer(1), Value::Text("Alice".into())],
             vec![Value::Integer(2), Value::Text("Bob".into())],
         ],
-    })).unwrap();
+    }))
+    .unwrap();
 
     execute(Statement::CreateTable(CreateTableStatement {
         name: "orders_corr2".to_string(),
         columns: vec![
-            ColumnDefinition { name: "user_id".into(), data_type: DataType::Integer, nullable: false },
-            ColumnDefinition { name: "amount".into(), data_type: DataType::Float, nullable: false },
+            ColumnDefinition {
+                name: "user_id".into(),
+                data_type: DataType::Integer,
+                nullable: false,
+            },
+            ColumnDefinition {
+                name: "amount".into(),
+                data_type: DataType::Float,
+                nullable: false,
+            },
         ],
-    })).unwrap();
+    }))
+    .unwrap();
 
     execute(Statement::Insert(InsertStatement {
         table: "orders_corr2".to_string(),
@@ -405,7 +523,8 @@ fn test_where_exists_correlated_false() {
             vec![Value::Integer(1), Value::Float(50.0)],
             vec![Value::Integer(2), Value::Float(30.0)],
         ],
-    })).unwrap();
+    }))
+    .unwrap();
 
     let sub = SelectStatement {
         distinct: false,
@@ -455,10 +574,19 @@ fn test_where_exists_with_join() {
     execute(Statement::CreateTable(CreateTableStatement {
         name: "users_join1".to_string(),
         columns: vec![
-            ColumnDefinition { name: "id".into(), data_type: DataType::Integer, nullable: false },
-            ColumnDefinition { name: "name".into(), data_type: DataType::Text, nullable: false },
+            ColumnDefinition {
+                name: "id".into(),
+                data_type: DataType::Integer,
+                nullable: false,
+            },
+            ColumnDefinition {
+                name: "name".into(),
+                data_type: DataType::Text,
+                nullable: false,
+            },
         ],
-    })).unwrap();
+    }))
+    .unwrap();
 
     execute(Statement::Insert(InsertStatement {
         table: "users_join1".to_string(),
@@ -467,15 +595,25 @@ fn test_where_exists_with_join() {
             vec![Value::Integer(1), Value::Text("Alice".into())],
             vec![Value::Integer(2), Value::Text("Bob".into())],
         ],
-    })).unwrap();
+    }))
+    .unwrap();
 
     execute(Statement::CreateTable(CreateTableStatement {
         name: "orders_join1".to_string(),
         columns: vec![
-            ColumnDefinition { name: "id".into(), data_type: DataType::Integer, nullable: false },
-            ColumnDefinition { name: "user_id".into(), data_type: DataType::Integer, nullable: false },
+            ColumnDefinition {
+                name: "id".into(),
+                data_type: DataType::Integer,
+                nullable: false,
+            },
+            ColumnDefinition {
+                name: "user_id".into(),
+                data_type: DataType::Integer,
+                nullable: false,
+            },
         ],
-    })).unwrap();
+    }))
+    .unwrap();
 
     execute(Statement::Insert(InsertStatement {
         table: "orders_join1".to_string(),
@@ -484,23 +622,32 @@ fn test_where_exists_with_join() {
             vec![Value::Integer(1), Value::Integer(1)],
             vec![Value::Integer(2), Value::Integer(1)],
         ],
-    })).unwrap();
+    }))
+    .unwrap();
 
     execute(Statement::CreateTable(CreateTableStatement {
         name: "payments_join1".to_string(),
         columns: vec![
-            ColumnDefinition { name: "id".into(), data_type: DataType::Integer, nullable: false },
-            ColumnDefinition { name: "order_id".into(), data_type: DataType::Integer, nullable: false },
+            ColumnDefinition {
+                name: "id".into(),
+                data_type: DataType::Integer,
+                nullable: false,
+            },
+            ColumnDefinition {
+                name: "order_id".into(),
+                data_type: DataType::Integer,
+                nullable: false,
+            },
         ],
-    })).unwrap();
+    }))
+    .unwrap();
 
     execute(Statement::Insert(InsertStatement {
         table: "payments_join1".to_string(),
         columns: Some(vec!["id".into(), "order_id".into()]),
-        values: vec![
-            vec![Value::Integer(1), Value::Integer(1)],
-        ],
-    })).unwrap();
+        values: vec![vec![Value::Integer(1), Value::Integer(1)]],
+    }))
+    .unwrap();
 
     let sub = SelectStatement {
         distinct: false,

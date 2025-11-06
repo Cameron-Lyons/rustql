@@ -84,10 +84,8 @@ fn test_update() {
 fn test_delete() {
     let _guard = setup_test();
     process_query("CREATE TABLE users (id INTEGER, name TEXT, age INTEGER)").unwrap();
-    process_query(
-        "INSERT INTO users VALUES (1, 'Alice', 25), (2, 'Bob', 30), (3, 'Charlie', 35)",
-    )
-    .unwrap();
+    process_query("INSERT INTO users VALUES (1, 'Alice', 25), (2, 'Bob', 30), (3, 'Charlie', 35)")
+        .unwrap();
 
     let result = process_query("DELETE FROM users WHERE name = 'Bob'");
     assert!(result.is_ok());
@@ -103,21 +101,28 @@ fn test_delete() {
 fn test_order_by() {
     let _guard = setup_test();
     process_query("CREATE TABLE users (id INTEGER, name TEXT, age INTEGER)").unwrap();
-    process_query(
-        "INSERT INTO users VALUES (1, 'Alice', 30), (2, 'Bob', 25), (3, 'Charlie', 35)",
-    )
-    .unwrap();
+    process_query("INSERT INTO users VALUES (1, 'Alice', 30), (2, 'Bob', 25), (3, 'Charlie', 35)")
+        .unwrap();
 
     let result = process_query("SELECT name FROM users ORDER BY age ASC").unwrap();
     let lines: Vec<&str> = result.lines().collect();
     let bob_pos = lines.iter().position(|&line| line.contains("Bob")).unwrap();
-    let alice_pos = lines.iter().position(|&line| line.contains("Alice")).unwrap();
+    let alice_pos = lines
+        .iter()
+        .position(|&line| line.contains("Alice"))
+        .unwrap();
     assert!(bob_pos < alice_pos);
 
     let result = process_query("SELECT name FROM users ORDER BY age DESC").unwrap();
     let lines: Vec<&str> = result.lines().collect();
-    let charlie_pos = lines.iter().position(|&line| line.contains("Charlie")).unwrap();
-    let alice_pos = lines.iter().position(|&line| line.contains("Alice")).unwrap();
+    let charlie_pos = lines
+        .iter()
+        .position(|&line| line.contains("Charlie"))
+        .unwrap();
+    let alice_pos = lines
+        .iter()
+        .position(|&line| line.contains("Alice"))
+        .unwrap();
     assert!(charlie_pos < alice_pos);
 }
 
@@ -125,10 +130,8 @@ fn test_order_by() {
 fn test_limit_offset() {
     let _guard = setup_test();
     process_query("CREATE TABLE users (id INTEGER, name TEXT, age INTEGER)").unwrap();
-    process_query(
-        "INSERT INTO users VALUES (1, 'Alice', 25), (2, 'Bob', 30), (3, 'Charlie', 35)",
-    )
-    .unwrap();
+    process_query("INSERT INTO users VALUES (1, 'Alice', 25), (2, 'Bob', 30), (3, 'Charlie', 35)")
+        .unwrap();
 
     let result = process_query("SELECT name FROM users LIMIT 2").unwrap();
     let name_count = result.matches("Alice").count()
@@ -172,11 +175,13 @@ fn test_group_by() {
     assert!(result.contains("2"));
     assert!(result.contains("Books"));
 
-    let result = process_query("SELECT category, SUM(amount) FROM orders GROUP BY category").unwrap();
+    let result =
+        process_query("SELECT category, SUM(amount) FROM orders GROUP BY category").unwrap();
     assert!(result.contains("300"));
     assert!(result.contains("125"));
 
-    let result = process_query("SELECT category, AVG(amount) FROM orders GROUP BY category").unwrap();
+    let result =
+        process_query("SELECT category, AVG(amount) FROM orders GROUP BY category").unwrap();
     assert!(result.contains("150"));
     assert!(result.contains("62.5"));
 }
@@ -229,14 +234,12 @@ fn test_string_operations() {
 #[test]
 fn test_complex_queries() {
     let _guard = setup_test();
-    process_query(
-        "CREATE TABLE employees (id INTEGER, name TEXT, department TEXT, salary FLOAT)",
-    )
-    .unwrap();
+    process_query("CREATE TABLE employees (id INTEGER, name TEXT, department TEXT, salary FLOAT)")
+        .unwrap();
     process_query("INSERT INTO employees VALUES (1, 'Alice', 'Engineering', 80000.0), (2, 'Bob', 'Engineering', 75000.0), (3, 'Charlie', 'Sales', 60000.0), (4, 'David', 'Sales', 65000.0)").unwrap();
 
-    let result = process_query("SELECT department, AVG(salary) FROM employees GROUP BY department")
-        .unwrap();
+    let result =
+        process_query("SELECT department, AVG(salary) FROM employees GROUP BY department").unwrap();
     assert!(result.contains("Engineering"));
     assert!(result.contains("77500"));
     assert!(result.contains("Sales"));
@@ -264,22 +267,24 @@ fn test_subquery_in_where() {
     let _guard = setup_test();
     process_query("CREATE TABLE orders (id INTEGER, amount FLOAT)").unwrap();
     process_query("CREATE TABLE customers (id INTEGER, name TEXT)").unwrap();
-    
+
     process_query("INSERT INTO orders VALUES (1, 100.0), (2, 200.0), (3, 150.0)").unwrap();
     process_query("INSERT INTO customers VALUES (1, 'Alice'), (2, 'Bob')").unwrap();
-    
+
     let result = process_query("SELECT * FROM orders WHERE id IN (SELECT id FROM customers)");
     assert!(result.is_ok());
     let result_str = result.unwrap();
-    
+
     assert!(result_str.contains("100.0") || result_str.contains("100"));
     assert!(result_str.contains("200.0") || result_str.contains("200"));
     assert!(!result_str.contains("150.0") && !result_str.contains("150"));
-    
-    let result = process_query("SELECT * FROM orders WHERE id IN (SELECT id FROM customers WHERE name = 'Alice')");
+
+    let result = process_query(
+        "SELECT * FROM orders WHERE id IN (SELECT id FROM customers WHERE name = 'Alice')",
+    );
     assert!(result.is_ok());
     let result_str = result.unwrap();
-    
+
     assert!(result_str.contains("100.0") || result_str.contains("100"));
     assert!(!result_str.contains("200.0") && !result_str.contains("200"));
 }
@@ -288,25 +293,26 @@ fn test_subquery_in_where() {
 fn test_is_null() {
     let _guard = setup_test();
     process_query("CREATE TABLE users (id INTEGER, name TEXT, email TEXT)").unwrap();
-    
+
     process_query("INSERT INTO users VALUES (1, 'Alice', 'alice@example.com'), (2, NULL, 'bob@example.com'), (3, 'Charlie', NULL)").unwrap();
-    
+
     let result = process_query("SELECT name FROM users WHERE name IS NULL").unwrap();
     assert!(!result.contains("Alice"));
     assert!(!result.contains("Charlie"));
     assert!(result.contains("NULL"));
-    
+
     let result = process_query("SELECT name FROM users WHERE name IS NOT NULL").unwrap();
     assert!(result.contains("Alice"));
     assert!(result.contains("Charlie"));
     assert!(!result.contains("NULL") || result.matches("NULL").count() <= 1); // Only column header or NULL value
-    
+
     let result = process_query("SELECT id FROM users WHERE email IS NULL").unwrap();
     assert!(result.contains("3"));
     assert!(!result.contains("1"));
     assert!(!result.contains("2"));
-    
-    let result = process_query("SELECT id FROM users WHERE name IS NULL AND email IS NOT NULL").unwrap();
+
+    let result =
+        process_query("SELECT id FROM users WHERE name IS NULL AND email IS NOT NULL").unwrap();
     assert!(result.contains("2"));
     assert!(!result.contains("1"));
     assert!(!result.contains("3"));
@@ -314,47 +320,52 @@ fn test_is_null() {
 
 #[test]
 fn test_in_subquery_with_aggregate() {
-	let _guard = setup_test();
-	process_query("CREATE TABLE orders (id INTEGER, user_id INTEGER, amount FLOAT)").unwrap();
-	process_query("INSERT INTO orders VALUES (1, 1, 100.0), (2, 1, 50.0), (3, 2, 200.0)").unwrap();
+    let _guard = setup_test();
+    process_query("CREATE TABLE orders (id INTEGER, user_id INTEGER, amount FLOAT)").unwrap();
+    process_query("INSERT INTO orders VALUES (1, 1, 100.0), (2, 1, 50.0), (3, 2, 200.0)").unwrap();
 
-	let result = process_query("SELECT amount FROM orders WHERE amount IN (SELECT MAX(amount) FROM orders)").unwrap();
-	assert!(result.contains("200") || result.contains("200.0"));
-	assert!(!result.contains("100.0") && !result.contains("50.0") && !result.contains("100\t"));
+    let result =
+        process_query("SELECT amount FROM orders WHERE amount IN (SELECT MAX(amount) FROM orders)")
+            .unwrap();
+    assert!(result.contains("200") || result.contains("200.0"));
+    assert!(!result.contains("100.0") && !result.contains("50.0") && !result.contains("100\t"));
 }
 
 #[test]
 fn test_in_subquery_with_group_by_and_aggregate() {
-	let _guard = setup_test();
-	process_query("CREATE TABLE orders2 (id INTEGER, user_id INTEGER, amount FLOAT)").unwrap();
-	process_query("INSERT INTO orders2 VALUES (1, 1, 100.0), (2, 1, 50.0), (3, 2, 200.0), (4, 2, 120.0)").unwrap();
+    let _guard = setup_test();
+    process_query("CREATE TABLE orders2 (id INTEGER, user_id INTEGER, amount FLOAT)").unwrap();
+    process_query(
+        "INSERT INTO orders2 VALUES (1, 1, 100.0), (2, 1, 50.0), (3, 2, 200.0), (4, 2, 120.0)",
+    )
+    .unwrap();
 
-	let result = process_query(
+    let result = process_query(
 		"SELECT id, amount FROM orders2 WHERE amount IN (SELECT MAX(amount) FROM orders2 GROUP BY user_id) ORDER BY id"
 	).unwrap();
-	assert!(result.contains("id\tamount"));
-	assert!(result.contains("100") || result.contains("100.0"));
-	assert!(result.contains("200") || result.contains("200.0"));
-	assert!(!result.contains("50.0") && !result.contains("120.0"));
+    assert!(result.contains("id\tamount"));
+    assert!(result.contains("100") || result.contains("100.0"));
+    assert!(result.contains("200") || result.contains("200.0"));
+    assert!(!result.contains("50.0") && !result.contains("120.0"));
 }
 
 #[test]
 fn test_in_subquery_with_nested_scalar_subquery() {
-	let _guard = setup_test();
-	process_query("CREATE TABLE numbers (value INTEGER)").unwrap();
-	process_query("INSERT INTO numbers VALUES (1), (2), (3)").unwrap();
+    let _guard = setup_test();
+    process_query("CREATE TABLE numbers (value INTEGER)").unwrap();
+    process_query("INSERT INTO numbers VALUES (1), (2), (3)").unwrap();
 
-	process_query("CREATE TABLE wrapper (inner_id INTEGER)").unwrap();
-	process_query("INSERT INTO wrapper VALUES (1), (2)").unwrap();
+    process_query("CREATE TABLE wrapper (inner_id INTEGER)").unwrap();
+    process_query("INSERT INTO wrapper VALUES (1), (2)").unwrap();
 
-	process_query("CREATE TABLE inner_values (id INTEGER, wrapped INTEGER)").unwrap();
-	process_query("INSERT INTO inner_values VALUES (1, 2), (2, 3)").unwrap();
+    process_query("CREATE TABLE inner_values (id INTEGER, wrapped INTEGER)").unwrap();
+    process_query("INSERT INTO inner_values VALUES (1, 2), (2, 3)").unwrap();
 
-	let result = process_query(
+    let result = process_query(
 		"SELECT value FROM numbers WHERE value IN (SELECT (SELECT wrapped FROM inner_values WHERE inner_values.id = wrapper.inner_id) FROM wrapper) ORDER BY value"
 	).unwrap();
-	assert!(result.contains("value"));
-	assert!(result.contains("2"));
-	assert!(result.contains("3"));
-	assert!(!result.contains("\n1\t"));
+    assert!(result.contains("value"));
+    assert!(result.contains("2"));
+    assert!(result.contains("3"));
+    assert!(!result.contains("\n1\t"));
 }

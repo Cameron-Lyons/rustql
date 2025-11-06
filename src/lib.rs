@@ -15,9 +15,9 @@ pub fn process_query(query: &str) -> Result<String, String> {
 
 pub fn reset_database() {
     let db_file = "rustql_data.json";
-    
+
     executor::reset_database_state();
-    
+
     if Path::new(db_file).exists() {
         fs::remove_file(db_file).ok();
     }

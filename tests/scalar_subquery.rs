@@ -16,10 +16,19 @@ fn test_scalar_subquery_basic() {
     execute(Statement::CreateTable(CreateTableStatement {
         name: "users_scalar1".to_string(),
         columns: vec![
-            ColumnDefinition { name: "id".into(), data_type: DataType::Integer, nullable: false },
-            ColumnDefinition { name: "name".into(), data_type: DataType::Text, nullable: false },
+            ColumnDefinition {
+                name: "id".into(),
+                data_type: DataType::Integer,
+                nullable: false,
+            },
+            ColumnDefinition {
+                name: "name".into(),
+                data_type: DataType::Text,
+                nullable: false,
+            },
         ],
-    })).unwrap();
+    }))
+    .unwrap();
 
     execute(Statement::Insert(InsertStatement {
         table: "users_scalar1".to_string(),
@@ -28,15 +37,25 @@ fn test_scalar_subquery_basic() {
             vec![Value::Integer(1), Value::Text("Alice".into())],
             vec![Value::Integer(2), Value::Text("Bob".into())],
         ],
-    })).unwrap();
+    }))
+    .unwrap();
 
     execute(Statement::CreateTable(CreateTableStatement {
         name: "orders_scalar1".to_string(),
         columns: vec![
-            ColumnDefinition { name: "user_id".into(), data_type: DataType::Integer, nullable: false },
-            ColumnDefinition { name: "amount".into(), data_type: DataType::Float, nullable: false },
+            ColumnDefinition {
+                name: "user_id".into(),
+                data_type: DataType::Integer,
+                nullable: false,
+            },
+            ColumnDefinition {
+                name: "amount".into(),
+                data_type: DataType::Float,
+                nullable: false,
+            },
         ],
-    })).unwrap();
+    }))
+    .unwrap();
 
     execute(Statement::Insert(InsertStatement {
         table: "orders_scalar1".to_string(),
@@ -45,7 +64,8 @@ fn test_scalar_subquery_basic() {
             vec![Value::Integer(1), Value::Float(150.0)],
             vec![Value::Integer(2), Value::Float(50.0)],
         ],
-    })).unwrap();
+    }))
+    .unwrap();
 
     let stmt = Statement::Select(SelectStatement {
         distinct: false,
@@ -90,26 +110,43 @@ fn test_scalar_subquery_null() {
     execute(Statement::CreateTable(CreateTableStatement {
         name: "users_scalar2".to_string(),
         columns: vec![
-            ColumnDefinition { name: "id".into(), data_type: DataType::Integer, nullable: false },
-            ColumnDefinition { name: "name".into(), data_type: DataType::Text, nullable: false },
+            ColumnDefinition {
+                name: "id".into(),
+                data_type: DataType::Integer,
+                nullable: false,
+            },
+            ColumnDefinition {
+                name: "name".into(),
+                data_type: DataType::Text,
+                nullable: false,
+            },
         ],
-    })).unwrap();
+    }))
+    .unwrap();
 
     execute(Statement::Insert(InsertStatement {
         table: "users_scalar2".to_string(),
         columns: Some(vec!["id".into(), "name".into()]),
-        values: vec![
-            vec![Value::Integer(1), Value::Text("Alice".into())],
-        ],
-    })).unwrap();
+        values: vec![vec![Value::Integer(1), Value::Text("Alice".into())]],
+    }))
+    .unwrap();
 
     execute(Statement::CreateTable(CreateTableStatement {
         name: "orders_scalar2".to_string(),
         columns: vec![
-            ColumnDefinition { name: "user_id".into(), data_type: DataType::Integer, nullable: false },
-            ColumnDefinition { name: "amount".into(), data_type: DataType::Float, nullable: false },
+            ColumnDefinition {
+                name: "user_id".into(),
+                data_type: DataType::Integer,
+                nullable: false,
+            },
+            ColumnDefinition {
+                name: "amount".into(),
+                data_type: DataType::Float,
+                nullable: false,
+            },
         ],
-    })).unwrap();
+    }))
+    .unwrap();
 
     let stmt = Statement::Select(SelectStatement {
         distinct: false,
@@ -154,10 +191,19 @@ fn test_scalar_subquery_aggregate() {
     execute(Statement::CreateTable(CreateTableStatement {
         name: "users_agg".to_string(),
         columns: vec![
-            ColumnDefinition { name: "id".into(), data_type: DataType::Integer, nullable: false },
-            ColumnDefinition { name: "name".into(), data_type: DataType::Text, nullable: false },
+            ColumnDefinition {
+                name: "id".into(),
+                data_type: DataType::Integer,
+                nullable: false,
+            },
+            ColumnDefinition {
+                name: "name".into(),
+                data_type: DataType::Text,
+                nullable: false,
+            },
         ],
-    })).unwrap();
+    }))
+    .unwrap();
 
     execute(Statement::Insert(InsertStatement {
         table: "users_agg".to_string(),
@@ -166,15 +212,25 @@ fn test_scalar_subquery_aggregate() {
             vec![Value::Integer(1), Value::Text("Alice".into())],
             vec![Value::Integer(2), Value::Text("Bob".into())],
         ],
-    })).unwrap();
+    }))
+    .unwrap();
 
     execute(Statement::CreateTable(CreateTableStatement {
         name: "orders_agg".to_string(),
         columns: vec![
-            ColumnDefinition { name: "user_id".into(), data_type: DataType::Integer, nullable: false },
-            ColumnDefinition { name: "amount".into(), data_type: DataType::Float, nullable: false },
+            ColumnDefinition {
+                name: "user_id".into(),
+                data_type: DataType::Integer,
+                nullable: false,
+            },
+            ColumnDefinition {
+                name: "amount".into(),
+                data_type: DataType::Float,
+                nullable: false,
+            },
         ],
-    })).unwrap();
+    }))
+    .unwrap();
 
     execute(Statement::Insert(InsertStatement {
         table: "orders_agg".to_string(),
@@ -184,7 +240,8 @@ fn test_scalar_subquery_aggregate() {
             vec![Value::Integer(1), Value::Float(50.0)],
             vec![Value::Integer(2), Value::Float(200.0)],
         ],
-    })).unwrap();
+    }))
+    .unwrap();
 
     // Test COUNT aggregate in scalar subquery
     let stmt = Statement::Select(SelectStatement {
@@ -235,26 +292,43 @@ fn test_scalar_subquery_aggregate_sum() {
     execute(Statement::CreateTable(CreateTableStatement {
         name: "users_sum".to_string(),
         columns: vec![
-            ColumnDefinition { name: "id".into(), data_type: DataType::Integer, nullable: false },
-            ColumnDefinition { name: "name".into(), data_type: DataType::Text, nullable: false },
+            ColumnDefinition {
+                name: "id".into(),
+                data_type: DataType::Integer,
+                nullable: false,
+            },
+            ColumnDefinition {
+                name: "name".into(),
+                data_type: DataType::Text,
+                nullable: false,
+            },
         ],
-    })).unwrap();
+    }))
+    .unwrap();
 
     execute(Statement::Insert(InsertStatement {
         table: "users_sum".to_string(),
         columns: Some(vec!["id".into(), "name".into()]),
-        values: vec![
-            vec![Value::Integer(1), Value::Text("Alice".into())],
-        ],
-    })).unwrap();
+        values: vec![vec![Value::Integer(1), Value::Text("Alice".into())]],
+    }))
+    .unwrap();
 
     execute(Statement::CreateTable(CreateTableStatement {
         name: "orders_sum".to_string(),
         columns: vec![
-            ColumnDefinition { name: "user_id".into(), data_type: DataType::Integer, nullable: false },
-            ColumnDefinition { name: "amount".into(), data_type: DataType::Float, nullable: false },
+            ColumnDefinition {
+                name: "user_id".into(),
+                data_type: DataType::Integer,
+                nullable: false,
+            },
+            ColumnDefinition {
+                name: "amount".into(),
+                data_type: DataType::Float,
+                nullable: false,
+            },
         ],
-    })).unwrap();
+    }))
+    .unwrap();
 
     execute(Statement::Insert(InsertStatement {
         table: "orders_sum".to_string(),
@@ -264,7 +338,8 @@ fn test_scalar_subquery_aggregate_sum() {
             vec![Value::Integer(1), Value::Float(50.0)],
             vec![Value::Integer(1), Value::Float(25.0)],
         ],
-    })).unwrap();
+    }))
+    .unwrap();
 
     // Test SUM aggregate in scalar subquery
     let stmt = Statement::Select(SelectStatement {
@@ -313,51 +388,83 @@ fn test_scalar_subquery_nested() {
     execute(Statement::CreateTable(CreateTableStatement {
         name: "users_nested".to_string(),
         columns: vec![
-            ColumnDefinition { name: "id".into(), data_type: DataType::Integer, nullable: false },
-            ColumnDefinition { name: "name".into(), data_type: DataType::Text, nullable: false },
+            ColumnDefinition {
+                name: "id".into(),
+                data_type: DataType::Integer,
+                nullable: false,
+            },
+            ColumnDefinition {
+                name: "name".into(),
+                data_type: DataType::Text,
+                nullable: false,
+            },
         ],
-    })).unwrap();
+    }))
+    .unwrap();
 
     execute(Statement::Insert(InsertStatement {
         table: "users_nested".to_string(),
         columns: Some(vec!["id".into(), "name".into()]),
-        values: vec![
-            vec![Value::Integer(1), Value::Text("Alice".into())],
-        ],
-    })).unwrap();
+        values: vec![vec![Value::Integer(1), Value::Text("Alice".into())]],
+    }))
+    .unwrap();
 
     execute(Statement::CreateTable(CreateTableStatement {
         name: "orders_nested".to_string(),
         columns: vec![
-            ColumnDefinition { name: "user_id".into(), data_type: DataType::Integer, nullable: false },
-            ColumnDefinition { name: "amount".into(), data_type: DataType::Float, nullable: false },
+            ColumnDefinition {
+                name: "user_id".into(),
+                data_type: DataType::Integer,
+                nullable: false,
+            },
+            ColumnDefinition {
+                name: "amount".into(),
+                data_type: DataType::Float,
+                nullable: false,
+            },
         ],
-    })).unwrap();
+    }))
+    .unwrap();
 
     execute(Statement::Insert(InsertStatement {
         table: "orders_nested".to_string(),
         columns: Some(vec!["user_id".into(), "amount".into()]),
-        values: vec![
-            vec![Value::Integer(1), Value::Float(150.0)],
-        ],
-    })).unwrap();
+        values: vec![vec![Value::Integer(1), Value::Float(150.0)]],
+    }))
+    .unwrap();
 
     execute(Statement::CreateTable(CreateTableStatement {
         name: "items_nested".to_string(),
         columns: vec![
-            ColumnDefinition { name: "id".into(), data_type: DataType::Integer, nullable: false },
-            ColumnDefinition { name: "order_id".into(), data_type: DataType::Integer, nullable: false },
-            ColumnDefinition { name: "price".into(), data_type: DataType::Float, nullable: false },
+            ColumnDefinition {
+                name: "id".into(),
+                data_type: DataType::Integer,
+                nullable: false,
+            },
+            ColumnDefinition {
+                name: "order_id".into(),
+                data_type: DataType::Integer,
+                nullable: false,
+            },
+            ColumnDefinition {
+                name: "price".into(),
+                data_type: DataType::Float,
+                nullable: false,
+            },
         ],
-    })).unwrap();
+    }))
+    .unwrap();
 
     execute(Statement::Insert(InsertStatement {
         table: "items_nested".to_string(),
         columns: Some(vec!["id".into(), "order_id".into(), "price".into()]),
-        values: vec![
-            vec![Value::Integer(1), Value::Integer(1), Value::Float(50.0)],
-        ],
-    })).unwrap();
+        values: vec![vec![
+            Value::Integer(1),
+            Value::Integer(1),
+            Value::Float(50.0),
+        ]],
+    }))
+    .unwrap();
 
     let stmt = Statement::Select(SelectStatement {
         distinct: false,
@@ -418,10 +525,19 @@ fn test_scalar_subquery_with_join() {
     execute(Statement::CreateTable(CreateTableStatement {
         name: "users_join".to_string(),
         columns: vec![
-            ColumnDefinition { name: "id".into(), data_type: DataType::Integer, nullable: false },
-            ColumnDefinition { name: "name".into(), data_type: DataType::Text, nullable: false },
+            ColumnDefinition {
+                name: "id".into(),
+                data_type: DataType::Integer,
+                nullable: false,
+            },
+            ColumnDefinition {
+                name: "name".into(),
+                data_type: DataType::Text,
+                nullable: false,
+            },
         ],
-    })).unwrap();
+    }))
+    .unwrap();
 
     execute(Statement::Insert(InsertStatement {
         table: "users_join".to_string(),
@@ -430,16 +546,30 @@ fn test_scalar_subquery_with_join() {
             vec![Value::Integer(1), Value::Text("Alice".into())],
             vec![Value::Integer(2), Value::Text("Bob".into())],
         ],
-    })).unwrap();
+    }))
+    .unwrap();
 
     execute(Statement::CreateTable(CreateTableStatement {
         name: "orders_join".to_string(),
         columns: vec![
-            ColumnDefinition { name: "id".into(), data_type: DataType::Integer, nullable: false },
-            ColumnDefinition { name: "user_id".into(), data_type: DataType::Integer, nullable: false },
-            ColumnDefinition { name: "amount".into(), data_type: DataType::Float, nullable: false },
+            ColumnDefinition {
+                name: "id".into(),
+                data_type: DataType::Integer,
+                nullable: false,
+            },
+            ColumnDefinition {
+                name: "user_id".into(),
+                data_type: DataType::Integer,
+                nullable: false,
+            },
+            ColumnDefinition {
+                name: "amount".into(),
+                data_type: DataType::Float,
+                nullable: false,
+            },
         ],
-    })).unwrap();
+    }))
+    .unwrap();
 
     execute(Statement::Insert(InsertStatement {
         table: "orders_join".to_string(),
@@ -448,7 +578,8 @@ fn test_scalar_subquery_with_join() {
             vec![Value::Integer(10), Value::Integer(1), Value::Float(150.0)],
             vec![Value::Integer(11), Value::Integer(2), Value::Float(50.0)],
         ],
-    })).unwrap();
+    }))
+    .unwrap();
 
     let stmt = Statement::Select(SelectStatement {
         distinct: false,
@@ -459,11 +590,15 @@ fn test_scalar_subquery_with_join() {
                 distinct: false,
                 columns: vec![Column::Named("amount".into())],
                 from: "orders_join".into(),
-                joins: vec![Join { join_type: JoinType::Inner, table: "users_join".into(), on: Expression::BinaryOp {
-                    left: Box::new(Expression::Column("orders_join.user_id".into())),
-                    op: BinaryOperator::Equal,
-                    right: Box::new(Expression::Column("users_join.id".into())),
-                }}],
+                joins: vec![Join {
+                    join_type: JoinType::Inner,
+                    table: "users_join".into(),
+                    on: Expression::BinaryOp {
+                        left: Box::new(Expression::Column("orders_join.user_id".into())),
+                        op: BinaryOperator::Equal,
+                        right: Box::new(Expression::Column("users_join.id".into())),
+                    },
+                }],
                 where_clause: Some(Expression::BinaryOp {
                     left: Box::new(Expression::Column("orders_join.user_id".into())),
                     op: BinaryOperator::Equal,
@@ -499,10 +634,19 @@ fn test_scalar_subquery_with_join_and_aggregate() {
     execute(Statement::CreateTable(CreateTableStatement {
         name: "users_join_agg".to_string(),
         columns: vec![
-            ColumnDefinition { name: "id".into(), data_type: DataType::Integer, nullable: false },
-            ColumnDefinition { name: "name".into(), data_type: DataType::Text, nullable: false },
+            ColumnDefinition {
+                name: "id".into(),
+                data_type: DataType::Integer,
+                nullable: false,
+            },
+            ColumnDefinition {
+                name: "name".into(),
+                data_type: DataType::Text,
+                nullable: false,
+            },
         ],
-    })).unwrap();
+    }))
+    .unwrap();
 
     execute(Statement::Insert(InsertStatement {
         table: "users_join_agg".to_string(),
@@ -511,16 +655,30 @@ fn test_scalar_subquery_with_join_and_aggregate() {
             vec![Value::Integer(1), Value::Text("Alice".into())],
             vec![Value::Integer(2), Value::Text("Bob".into())],
         ],
-    })).unwrap();
+    }))
+    .unwrap();
 
     execute(Statement::CreateTable(CreateTableStatement {
         name: "orders_join_agg".to_string(),
         columns: vec![
-            ColumnDefinition { name: "id".into(), data_type: DataType::Integer, nullable: false },
-            ColumnDefinition { name: "user_id".into(), data_type: DataType::Integer, nullable: false },
-            ColumnDefinition { name: "amount".into(), data_type: DataType::Float, nullable: false },
+            ColumnDefinition {
+                name: "id".into(),
+                data_type: DataType::Integer,
+                nullable: false,
+            },
+            ColumnDefinition {
+                name: "user_id".into(),
+                data_type: DataType::Integer,
+                nullable: false,
+            },
+            ColumnDefinition {
+                name: "amount".into(),
+                data_type: DataType::Float,
+                nullable: false,
+            },
         ],
-    })).unwrap();
+    }))
+    .unwrap();
 
     execute(Statement::Insert(InsertStatement {
         table: "orders_join_agg".to_string(),
@@ -530,15 +688,25 @@ fn test_scalar_subquery_with_join_and_aggregate() {
             vec![Value::Integer(11), Value::Integer(1), Value::Float(50.0)],
             vec![Value::Integer(12), Value::Integer(2), Value::Float(200.0)],
         ],
-    })).unwrap();
+    }))
+    .unwrap();
 
     execute(Statement::CreateTable(CreateTableStatement {
         name: "products_join_agg".to_string(),
         columns: vec![
-            ColumnDefinition { name: "order_id".into(), data_type: DataType::Integer, nullable: false },
-            ColumnDefinition { name: "price".into(), data_type: DataType::Float, nullable: false },
+            ColumnDefinition {
+                name: "order_id".into(),
+                data_type: DataType::Integer,
+                nullable: false,
+            },
+            ColumnDefinition {
+                name: "price".into(),
+                data_type: DataType::Float,
+                nullable: false,
+            },
         ],
-    })).unwrap();
+    }))
+    .unwrap();
 
     execute(Statement::Insert(InsertStatement {
         table: "products_join_agg".to_string(),
@@ -548,7 +716,8 @@ fn test_scalar_subquery_with_join_and_aggregate() {
             vec![Value::Integer(11), Value::Float(20.0)],
             vec![Value::Integer(12), Value::Float(30.0)],
         ],
-    })).unwrap();
+    }))
+    .unwrap();
 
     let stmt = Statement::Select(SelectStatement {
         distinct: false,
@@ -563,14 +732,14 @@ fn test_scalar_subquery_with_join_and_aggregate() {
                     alias: None,
                 })],
                 from: "orders_join_agg".into(),
-                joins: vec![Join { 
-                    join_type: JoinType::Inner, 
-                    table: "products_join_agg".into(), 
+                joins: vec![Join {
+                    join_type: JoinType::Inner,
+                    table: "products_join_agg".into(),
                     on: Expression::BinaryOp {
                         left: Box::new(Expression::Column("orders_join_agg.id".into())),
                         op: BinaryOperator::Equal,
                         right: Box::new(Expression::Column("products_join_agg.order_id".into())),
-                    }
+                    },
                 }],
                 where_clause: Some(Expression::BinaryOp {
                     left: Box::new(Expression::Column("orders_join_agg.user_id".into())),

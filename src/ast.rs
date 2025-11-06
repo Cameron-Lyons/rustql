@@ -192,9 +192,9 @@ pub enum Value {
     Text(String),
     #[allow(dead_code)]
     Boolean(bool),
-    Date(String),  // ISO format: YYYY-MM-DD
-    Time(String),  // ISO format: HH:MM:SS
-    DateTime(String),  // ISO format: YYYY-MM-DD HH:MM:SS
+    Date(String),     // ISO format: YYYY-MM-DD
+    Time(String),     // ISO format: HH:MM:SS
+    DateTime(String), // ISO format: YYYY-MM-DD HH:MM:SS
 }
 
 #[derive(Debug, Clone, PartialEq)]
