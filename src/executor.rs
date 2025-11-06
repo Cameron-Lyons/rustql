@@ -879,8 +879,13 @@ fn eval_subquery_values(db: &Database, subquery: &SelectStatement) -> Result<Vec
                 Ok(vec![value])
             }
         }
-        Column::Subquery(_) => {
-            Err("Nested subqueries in IN not supported yet".to_string())
+        Column::Subquery(nested) => {
+            let mut values = Vec::with_capacity(filtered_rows.len());
+            for row in filtered_rows {
+                let value = eval_scalar_subquery_with_outer(db, nested, &table.columns, row)?;
+                values.push(value);
+            }
+            Ok(values)
         }
     }
 }

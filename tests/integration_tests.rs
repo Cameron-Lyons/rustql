@@ -337,3 +337,24 @@ fn test_in_subquery_with_group_by_and_aggregate() {
 	assert!(result.contains("200") || result.contains("200.0"));
 	assert!(!result.contains("50.0") && !result.contains("120.0"));
 }
+
+#[test]
+fn test_in_subquery_with_nested_scalar_subquery() {
+	let _guard = setup_test();
+	process_query("CREATE TABLE numbers (value INTEGER)").unwrap();
+	process_query("INSERT INTO numbers VALUES (1), (2), (3)").unwrap();
+
+	process_query("CREATE TABLE wrapper (inner_id INTEGER)").unwrap();
+	process_query("INSERT INTO wrapper VALUES (1), (2)").unwrap();
+
+	process_query("CREATE TABLE inner_values (id INTEGER, wrapped INTEGER)").unwrap();
+	process_query("INSERT INTO inner_values VALUES (1, 2), (2, 3)").unwrap();
+
+	let result = process_query(
+		"SELECT value FROM numbers WHERE value IN (SELECT (SELECT wrapped FROM inner_values WHERE inner_values.id = wrapper.inner_id) FROM wrapper) ORDER BY value"
+	).unwrap();
+	assert!(result.contains("value"));
+	assert!(result.contains("2"));
+	assert!(result.contains("3"));
+	assert!(!result.contains("\n1\t"));
+}

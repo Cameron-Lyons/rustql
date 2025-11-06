@@ -284,8 +284,6 @@ cargo test select
 
 ## Limitations
 
-- Aggregates in subquery IN not yet supported
-- Nested subqueries in IN not yet supported
 - No indexes for performance optimization
 - No foreign key constraints
 - Limited to single-file JSON storage
@@ -296,8 +294,6 @@ cargo test select
 
 Possible improvements for the project:
 
-- [ ] Aggregates in subquery IN
-- [ ] Nested subqueries in IN
 - [ ] Index implementation for better performance
 - [ ] Foreign key constraints
 - [ ] Transaction support with rollback
