@@ -71,10 +71,16 @@ fn test_scalar_subquery_basic() {
         distinct: false,
         from: "users_scalar1".into(),
         columns: vec![
-            Column::Named("name".into()),
+            Column::Named {
+                name: "name".into(),
+                alias: None,
+            },
             Column::Subquery(Box::new(SelectStatement {
                 distinct: false,
-                columns: vec![Column::Named("amount".into())],
+                columns: vec![Column::Named {
+                    name: "amount".into(),
+                    alias: None,
+                }],
                 from: "orders_scalar1".into(),
                 joins: vec![],
                 where_clause: Some(Expression::BinaryOp {
@@ -152,10 +158,16 @@ fn test_scalar_subquery_null() {
         distinct: false,
         from: "users_scalar2".into(),
         columns: vec![
-            Column::Named("name".into()),
+            Column::Named {
+                name: "name".into(),
+                alias: None,
+            },
             Column::Subquery(Box::new(SelectStatement {
                 distinct: false,
-                columns: vec![Column::Named("amount".into())],
+                columns: vec![Column::Named {
+                    name: "amount".into(),
+                    alias: None,
+                }],
                 from: "orders_scalar2".into(),
                 joins: vec![],
                 where_clause: Some(Expression::BinaryOp {
@@ -248,7 +260,10 @@ fn test_scalar_subquery_aggregate() {
         distinct: false,
         from: "users_agg".into(),
         columns: vec![
-            Column::Named("name".into()),
+            Column::Named {
+                name: "name".into(),
+                alias: None,
+            },
             Column::Subquery(Box::new(SelectStatement {
                 distinct: false,
                 columns: vec![Column::Function(AggregateFunction {
@@ -341,12 +356,14 @@ fn test_scalar_subquery_aggregate_sum() {
     }))
     .unwrap();
 
-    // Test SUM aggregate in scalar subquery
     let stmt = Statement::Select(SelectStatement {
         distinct: false,
         from: "users_sum".into(),
         columns: vec![
-            Column::Named("name".into()),
+            Column::Named {
+                name: "name".into(),
+                alias: None,
+            },
             Column::Subquery(Box::new(SelectStatement {
                 distinct: false,
                 columns: vec![Column::Function(AggregateFunction {
@@ -470,12 +487,18 @@ fn test_scalar_subquery_nested() {
         distinct: false,
         from: "users_nested".into(),
         columns: vec![
-            Column::Named("name".into()),
+            Column::Named {
+                name: "name".into(),
+                alias: None,
+            },
             Column::Subquery(Box::new(SelectStatement {
                 distinct: false,
                 columns: vec![Column::Subquery(Box::new(SelectStatement {
                     distinct: false,
-                    columns: vec![Column::Named("price".into())],
+                    columns: vec![Column::Named {
+                        name: "price".into(),
+                        alias: None,
+                    }],
                     from: "items_nested".into(),
                     joins: vec![],
                     where_clause: Some(Expression::BinaryOp {
@@ -585,10 +608,16 @@ fn test_scalar_subquery_with_join() {
         distinct: false,
         from: "users_join".into(),
         columns: vec![
-            Column::Named("name".into()),
+            Column::Named {
+                name: "name".into(),
+                alias: None,
+            },
             Column::Subquery(Box::new(SelectStatement {
                 distinct: false,
-                columns: vec![Column::Named("amount".into())],
+                columns: vec![Column::Named {
+                    name: "amount".into(),
+                    alias: None,
+                }],
                 from: "orders_join".into(),
                 joins: vec![Join {
                     join_type: JoinType::Inner,
@@ -723,7 +752,10 @@ fn test_scalar_subquery_with_join_and_aggregate() {
         distinct: false,
         from: "users_join_agg".into(),
         columns: vec![
-            Column::Named("name".into()),
+            Column::Named {
+                name: "name".into(),
+                alias: None,
+            },
             Column::Subquery(Box::new(SelectStatement {
                 distinct: false,
                 columns: vec![Column::Function(AggregateFunction {

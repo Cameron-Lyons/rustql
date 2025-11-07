@@ -211,15 +211,17 @@ impl Parser {
                         let name = name.clone();
                         self.advance();
 
-                        if *self.current_token() == Token::As {
+                        let alias = if *self.current_token() == Token::As {
                             self.advance();
                             match self.advance() {
-                                Token::Identifier(_alias) => Column::Named(name),
+                                Token::Identifier(alias) => Some(alias),
                                 _ => return Err("Expected alias after AS".to_string()),
                             }
                         } else {
-                            Column::Named(name)
-                        }
+                            None
+                        };
+
+                        Column::Named { name, alias }
                     }
                     _ => break,
                 };

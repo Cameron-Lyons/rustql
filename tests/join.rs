@@ -117,6 +117,32 @@ fn test_join_all_columns() {
 }
 
 #[test]
+fn test_join_column_aliases() {
+    let _guard = setup_test();
+
+    process_query("CREATE TABLE users (id INTEGER, name TEXT)").unwrap();
+    process_query("CREATE TABLE orders (id INTEGER, user_id INTEGER, product TEXT)").unwrap();
+
+    process_query("INSERT INTO users VALUES (1, 'Alice'), (2, 'Bob')").unwrap();
+    process_query("INSERT INTO orders VALUES (101, 1, 'Laptop'), (102, 2, 'Keyboard')").unwrap();
+
+    let result = process_query("SELECT users.name AS user_name, orders.product AS product_name FROM users JOIN orders ON users.id = orders.user_id ORDER BY user_name").unwrap();
+
+    let mut lines = result.lines();
+    let header = lines.next().unwrap();
+    let header_cols: Vec<&str> = header.split('\t').filter(|s| !s.is_empty()).collect();
+    assert_eq!(header_cols, vec!["user_name", "product_name"]);
+
+    let separator = lines.next().unwrap();
+    assert!(separator.chars().all(|c| c == '-'));
+
+    let rows: Vec<&str> = lines.collect();
+    assert_eq!(rows.len(), 2);
+    assert!(rows[0].contains("Alice") && rows[0].contains("Laptop"));
+    assert!(rows[1].contains("Bob") && rows[1].contains("Keyboard"));
+}
+
+#[test]
 fn test_join_missing_table() {
     let _guard = setup_test();
 

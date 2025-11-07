@@ -129,13 +129,23 @@ fn execute_select(stmt: SelectStatement) -> Result<String, String> {
         table
             .columns
             .iter()
-            .map(|c| (c.name.clone(), Column::Named(c.name.clone())))
+            .map(|c| {
+                (
+                    c.name.clone(),
+                    Column::Named {
+                        name: c.name.clone(),
+                        alias: None,
+                    },
+                )
+            })
             .collect()
     } else {
         stmt.columns
             .iter()
             .map(|col| match col {
-                Column::Named(name) => (name.clone(), Column::Named(name.clone())),
+                Column::Named { name, alias } => {
+                    (alias.clone().unwrap_or_else(|| name.clone()), col.clone())
+                }
                 Column::Subquery(_) => ("<subquery>".to_string(), col.clone()),
                 Column::Function(_) => ("<aggregate>".to_string(), col.clone()),
                 Column::All => unreachable!(),
@@ -181,7 +191,7 @@ fn execute_select(stmt: SelectStatement) -> Result<String, String> {
                 Column::All => {
                     unreachable!("Column::All should not appear in column_specs")
                 }
-                Column::Named(name) => {
+                Column::Named { name, .. } => {
                     let idx = table
                         .columns
                         .iter()
@@ -236,8 +246,9 @@ fn execute_select_with_aggregates(
                     .unwrap_or_else(|| format!("{:?}(*)", agg.function));
                 result.push_str(&format!("{}\t", name));
             }
-            Column::Named(name) => {
-                result.push_str(&format!("{}\t", name));
+            Column::Named { name, alias } => {
+                let header = alias.clone().unwrap_or_else(|| name.clone());
+                result.push_str(&format!("{}\t", header));
             }
             _ => {}
         }
@@ -301,8 +312,9 @@ fn execute_select_with_grouping(
                     .unwrap_or_else(|| format!("{:?}(*)", agg.function));
                 result.push_str(&format!("{}\t", name));
             }
-            Column::Named(name) => {
-                result.push_str(&format!("{}\t", name));
+            Column::Named { name, alias } => {
+                let header = alias.clone().unwrap_or_else(|| name.clone());
+                result.push_str(&format!("{}\t", header));
             }
             _ => {}
         }
@@ -324,7 +336,7 @@ fn execute_select_with_grouping(
                     let value = compute_aggregate(&agg.function, &agg.expr, table, &group_rows)?;
                     result.push_str(&format!("{}\t", format_value(&value)));
                 }
-                Column::Named(name) => {
+                Column::Named { name, .. } => {
                     if let Some(idx) = stmt
                         .group_by
                         .as_ref()
@@ -824,7 +836,7 @@ fn eval_subquery_values(db: &Database, subquery: &SelectStatement) -> Result<Vec
 
     match &subquery.columns[0] {
         Column::All => Err("Subquery in IN cannot use *".to_string()),
-        Column::Named(name) => {
+        Column::Named { name, .. } => {
             if let Some(group_by_cols) = &subquery.group_by {
                 let group_by_indices: Vec<usize> = group_by_cols
                     .iter()
@@ -1195,7 +1207,7 @@ fn eval_scalar_subquery_with_outer(
         apply_order_and_slice(&mut candidate_rows)?;
 
         return match &subquery.columns[0] {
-            Column::Named(name) => {
+            Column::Named { name, .. } => {
                 let col_idx = combined_columns
                     .iter()
                     .position(|c| {
@@ -1369,7 +1381,7 @@ fn eval_scalar_subquery_with_outer(
         for combined_row in &candidate_rows {
             let val = match &subquery.columns[0] {
                 Column::All => return Err("Scalar subquery cannot use *".to_string()),
-                Column::Named(name) => {
+                Column::Named { name, .. } => {
                     let col_idx = combined_columns
                         .iter()
                         .position(|c| {
@@ -1467,38 +1479,42 @@ fn execute_select_with_joins(stmt: SelectStatement, db: &Database) -> Result<Str
         }
     }
 
-    let column_indices: Vec<usize> = match &stmt.columns[0] {
-        Column::All => (0..all_columns.len()).collect(),
-        Column::Named(_) => stmt
-            .columns
+    let column_specs: Vec<(String, usize)> = match &stmt.columns[0] {
+        Column::All => all_columns
             .iter()
-            .map(|col| match col {
-                Column::Named(name) => {
-                    let col_name = if name.contains('.') {
-                        name.split('.').next_back().unwrap_or(name)
-                    } else {
-                        name
-                    };
-                    all_columns
-                        .iter()
-                        .position(|c| c.name == col_name)
-                        .unwrap_or(usize::MAX)
-                }
-                _ => usize::MAX,
-            })
+            .enumerate()
+            .map(|(idx, col)| (col.name.clone(), idx))
             .collect(),
+        Column::Named { .. } => {
+            let mut specs = Vec::new();
+            for col in &stmt.columns {
+                match col {
+                    Column::Named { name, alias } => {
+                        let target_name = if name.contains('.') {
+                            name.split('.').next_back().unwrap_or(name)
+                        } else {
+                            name
+                        };
+                        let idx = all_columns
+                            .iter()
+                            .position(|c| c.name == target_name)
+                            .ok_or_else(|| format!("Column '{}' not found", name))?;
+                        let header = alias
+                            .clone()
+                            .unwrap_or_else(|| all_columns[idx].name.clone());
+                        specs.push((header, idx));
+                    }
+                    _ => return Err("Invalid column type".to_string()),
+                }
+            }
+            specs
+        }
         _ => return Err("Invalid column type".to_string()),
     };
 
-    for idx in &column_indices {
-        if *idx == usize::MAX {
-            return Err("Column not found".to_string());
-        }
-    }
-
     let mut result = String::new();
-    for idx in &column_indices {
-        result.push_str(&format!("{}\t", all_columns[*idx].name));
+    for (header, _) in &column_specs {
+        result.push_str(&format!("{}\t", header));
     }
     result.push('\n');
     result.push_str(&"-".repeat(40));
@@ -1507,7 +1523,10 @@ fn execute_select_with_joins(stmt: SelectStatement, db: &Database) -> Result<Str
     use std::collections::BTreeSet;
     let mut seen: BTreeSet<Vec<Value>> = BTreeSet::new();
     for row in &filtered_rows {
-        let projected: Vec<Value> = column_indices.iter().map(|&i| row[i].clone()).collect();
+        let projected: Vec<Value> = column_specs
+            .iter()
+            .map(|(_, idx)| row[*idx].clone())
+            .collect();
         if stmt.distinct && !seen.insert(projected.clone()) {
             continue;
         }

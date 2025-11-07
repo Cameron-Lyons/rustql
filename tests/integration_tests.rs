@@ -45,6 +45,33 @@ fn test_insert_and_select() {
 }
 
 #[test]
+fn test_select_aliases() {
+    let _guard = setup_test();
+    process_query("CREATE TABLE users (id INTEGER, name TEXT, age INTEGER)").unwrap();
+    process_query("INSERT INTO users VALUES (1, 'Alice', 25), (2, 'Bob', 30)").unwrap();
+
+    let result = process_query("SELECT name AS username, age FROM users ORDER BY id").unwrap();
+    let mut lines = result.lines();
+    let header = lines.next().unwrap();
+    let header_cols: Vec<&str> = header.split('\t').filter(|s| !s.is_empty()).collect();
+    assert_eq!(header_cols, vec!["username", "age"]);
+
+    let separator = lines.next().unwrap();
+    assert!(separator.chars().all(|c| c == '-'));
+
+    let rows: Vec<&str> = lines.collect();
+    assert_eq!(rows.len(), 2);
+    assert!(
+        rows.iter()
+            .any(|line| line.contains("Alice") && line.contains("25"))
+    );
+    assert!(
+        rows.iter()
+            .any(|line| line.contains("Bob") && line.contains("30"))
+    );
+}
+
+#[test]
 fn test_where_clause() {
     let _guard = setup_test();
     process_query("CREATE TABLE users (id INTEGER, name TEXT, age INTEGER)").unwrap();
