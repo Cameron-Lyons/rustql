@@ -1479,6 +1479,22 @@ fn execute_select_with_joins(stmt: SelectStatement, db: &Database) -> Result<Str
         }
     }
 
+    if let Some(ref order_by) = stmt.order_by {
+        filtered_rows.sort_by(|a, b| {
+            for order_expr in order_by {
+                let a_val = evaluate_value_expression(&order_expr.expr, &all_columns, a)
+                    .unwrap_or(Value::Null);
+                let b_val = evaluate_value_expression(&order_expr.expr, &all_columns, b)
+                    .unwrap_or(Value::Null);
+                let cmp = compare_values_for_sort(&a_val, &b_val);
+                if cmp != Ordering::Equal {
+                    return if order_expr.asc { cmp } else { cmp.reverse() };
+                }
+            }
+            Ordering::Equal
+        });
+    }
+
     let column_specs: Vec<(String, usize)> = match &stmt.columns[0] {
         Column::All => all_columns
             .iter()
@@ -1520,8 +1536,13 @@ fn execute_select_with_joins(stmt: SelectStatement, db: &Database) -> Result<Str
     result.push_str(&"-".repeat(40));
     result.push('\n');
 
+    let offset = stmt.offset.unwrap_or(0);
+    let limit = stmt.limit.unwrap_or(filtered_rows.len());
+
     use std::collections::BTreeSet;
     let mut seen: BTreeSet<Vec<Value>> = BTreeSet::new();
+    let mut skipped = 0usize;
+    let mut emitted = 0usize;
     for row in &filtered_rows {
         let projected: Vec<Value> = column_specs
             .iter()
@@ -1530,10 +1551,18 @@ fn execute_select_with_joins(stmt: SelectStatement, db: &Database) -> Result<Str
         if stmt.distinct && !seen.insert(projected.clone()) {
             continue;
         }
+        if skipped < offset {
+            skipped += 1;
+            continue;
+        }
+        if emitted >= limit {
+            break;
+        }
         for val in &projected {
             result.push_str(&format!("{}\t", format_value(val)));
         }
         result.push('\n');
+        emitted += 1;
     }
 
     Ok(result)
