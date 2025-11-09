@@ -296,3 +296,65 @@ fn test_full_join_multiple_unmatches() {
     assert!(result.contains("B1"));
     assert!(result.contains("B2"));
 }
+
+#[test]
+fn test_join_with_aggregate_function() {
+    let _guard = setup_test();
+
+    process_query("CREATE TABLE users (id INTEGER, name TEXT)").unwrap();
+    process_query("CREATE TABLE orders (id INTEGER, user_id INTEGER, product TEXT)").unwrap();
+
+    process_query("INSERT INTO users VALUES (1, 'Alice'), (2, 'Bob'), (3, 'Charlie')").unwrap();
+    process_query(
+        "INSERT INTO orders VALUES (101, 1, 'Laptop'), (102, 1, 'Mouse'), (103, 2, 'Keyboard')",
+    )
+    .unwrap();
+
+    let result =
+        process_query("SELECT COUNT(*) FROM users JOIN orders ON users.id = orders.user_id")
+            .unwrap();
+
+    assert!(result.contains("Count(*)"));
+    assert!(result.contains("3"));
+}
+
+#[test]
+fn test_join_group_by_with_aggregate() {
+    use std::collections::HashMap;
+
+    let _guard = setup_test();
+
+    process_query("CREATE TABLE users (id INTEGER, name TEXT)").unwrap();
+    process_query(
+        "CREATE TABLE orders (id INTEGER, user_id INTEGER, product TEXT, quantity INTEGER)",
+    )
+    .unwrap();
+
+    process_query("INSERT INTO users VALUES (1, 'Alice'), (2, 'Bob'), (3, 'Charlie')").unwrap();
+    process_query(
+        "INSERT INTO orders VALUES (101, 1, 'Laptop', 2), (102, 1, 'Mouse', 5), (103, 2, 'Keyboard', 1)",
+    )
+    .unwrap();
+
+    let result = process_query("SELECT users.name, COUNT(orders.product) AS order_count FROM users LEFT JOIN orders ON users.id = orders.user_id GROUP BY users.name").unwrap();
+
+    let mut lines = result.lines();
+    let header = lines.next().unwrap();
+    let headers: Vec<&str> = header.split('\t').filter(|s| !s.is_empty()).collect();
+    assert_eq!(headers, vec!["users.name", "order_count"]);
+
+    let separator = lines.next().unwrap();
+    assert!(separator.chars().all(|c| c == '-'));
+
+    let mut counts: HashMap<String, String> = HashMap::new();
+    for row in lines {
+        let cols: Vec<&str> = row.split('\t').filter(|s| !s.is_empty()).collect();
+        if cols.len() == 2 {
+            counts.insert(cols[0].to_string(), cols[1].to_string());
+        }
+    }
+
+    assert_eq!(counts.get("Alice").map(String::as_str), Some("2"));
+    assert_eq!(counts.get("Bob").map(String::as_str), Some("1"));
+    assert_eq!(counts.get("Charlie").map(String::as_str), Some("0"));
+}

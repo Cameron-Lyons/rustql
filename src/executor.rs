@@ -279,19 +279,26 @@ fn execute_select_with_grouping(
     table: &Table,
     rows: Vec<&Vec<Value>>,
 ) -> Result<String, String> {
-    let group_by_indices: Vec<usize> = stmt
-        .group_by
-        .as_ref()
-        .unwrap()
+    let raw_group_by = stmt.group_by.as_ref().unwrap();
+    let mut group_by_normalized_with_indices: Vec<(String, usize)> =
+        Vec::with_capacity(raw_group_by.len());
+    for name in raw_group_by {
+        let normalized = if name.contains('.') {
+            name.split('.').next_back().unwrap_or(name)
+        } else {
+            name.as_str()
+        };
+        let idx = table
+            .columns
+            .iter()
+            .position(|c| c.name == normalized)
+            .ok_or_else(|| format!("Column '{}' not found", name))?;
+        group_by_normalized_with_indices.push((normalized.to_string(), idx));
+    }
+    let group_by_indices: Vec<usize> = group_by_normalized_with_indices
         .iter()
-        .map(|name| {
-            table
-                .columns
-                .iter()
-                .position(|c| &c.name == name)
-                .ok_or_else(|| format!("Column '{}' not found", name))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+        .map(|(_, idx)| *idx)
+        .collect();
 
     let mut groups: BTreeMap<Vec<Value>, Vec<&Vec<Value>>> = BTreeMap::new();
     for row in rows {
@@ -337,15 +344,16 @@ fn execute_select_with_grouping(
                     result.push_str(&format!("{}\t", format_value(&value)));
                 }
                 Column::Named { name, .. } => {
-                    if let Some(idx) = stmt
-                        .group_by
-                        .as_ref()
-                        .unwrap()
+                    let column_name = if name.contains('.') {
+                        name.split('.').next_back().unwrap_or(name)
+                    } else {
+                        name.as_str()
+                    };
+                    if let Some((_, group_idx)) = group_by_normalized_with_indices
                         .iter()
-                        .position(|n| n == name)
+                        .find(|(normalized, _)| normalized == column_name)
                     {
-                        let group_idx = group_by_indices[idx];
-                        result.push_str(&format!("{}\t", format_value(&group_rows[0][group_idx])));
+                        result.push_str(&format!("{}\t", format_value(&group_rows[0][*group_idx])));
                     } else {
                         return Err(format!("Column '{}' must appear in GROUP BY clause", name));
                     }
@@ -510,7 +518,12 @@ fn evaluate_having_value(
         Expression::Value(val) => Ok(val.clone()),
         Expression::Column(name) => {
             if !rows.is_empty() {
-                if let Some(idx) = table.columns.iter().position(|c| &c.name == name) {
+                let normalized = if name.contains('.') {
+                    name.split('.').next_back().unwrap_or(name)
+                } else {
+                    name.as_str()
+                };
+                if let Some(idx) = table.columns.iter().position(|c| c.name == normalized) {
                     Ok(rows[0][idx].clone())
                 } else {
                     Err(format!("Column '{}' not found in HAVING clause", name))
@@ -1477,6 +1490,29 @@ fn execute_select_with_joins(stmt: SelectStatement, db: &Database) -> Result<Str
         if include_row {
             filtered_rows.push(row.clone());
         }
+    }
+
+    let has_aggregate = stmt
+        .columns
+        .iter()
+        .any(|col| matches!(col, Column::Function(_)));
+
+    if stmt.group_by.is_some() {
+        let temp_table = Table {
+            columns: all_columns.clone(),
+            rows: Vec::new(),
+        };
+        let row_refs: Vec<&Vec<Value>> = filtered_rows.iter().collect();
+        return execute_select_with_grouping(stmt, &temp_table, row_refs);
+    }
+
+    if has_aggregate {
+        let temp_table = Table {
+            columns: all_columns.clone(),
+            rows: Vec::new(),
+        };
+        let row_refs: Vec<&Vec<Value>> = filtered_rows.iter().collect();
+        return execute_select_with_aggregates(stmt, &temp_table, row_refs);
     }
 
     if let Some(ref order_by) = stmt.order_by {
