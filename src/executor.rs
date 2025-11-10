@@ -1551,9 +1551,7 @@ fn execute_select_with_joins(stmt: SelectStatement, db: &Database) -> Result<Str
                             .iter()
                             .position(|c| c.name == target_name)
                             .ok_or_else(|| format!("Column '{}' not found", name))?;
-                        let header = alias
-                            .clone()
-                            .unwrap_or_else(|| all_columns[idx].name.clone());
+                        let header = alias.clone().unwrap_or_else(|| name.clone());
                         specs.push((header, idx));
                     }
                     _ => return Err("Invalid column type".to_string()),
