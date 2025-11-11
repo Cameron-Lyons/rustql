@@ -309,26 +309,33 @@ fn execute_select_with_grouping(
         groups.entry(key).or_default().push(row);
     }
 
-    let mut result = String::new();
+    let mut column_specs: Vec<(String, Column)> = Vec::new();
     for col in &stmt.columns {
         match col {
             Column::Function(agg) => {
-                let name = agg
+                let header = agg
                     .alias
                     .clone()
                     .unwrap_or_else(|| format!("{:?}(*)", agg.function));
-                result.push_str(&format!("{}\t", name));
+                column_specs.push((header, col.clone()));
             }
             Column::Named { name, alias } => {
                 let header = alias.clone().unwrap_or_else(|| name.clone());
-                result.push_str(&format!("{}\t", header));
+                column_specs.push((header, col.clone()));
             }
             _ => {}
         }
     }
+
+    let mut result = String::new();
+    for (header, _) in &column_specs {
+        result.push_str(&format!("{}\t", header));
+    }
     result.push('\n');
     result.push_str(&"-".repeat(40));
     result.push('\n');
+
+    let mut grouped_outputs: Vec<(Vec<Value>, Vec<Value>)> = Vec::new();
 
     for (_group_key, group_rows) in groups {
         if let Some(ref having_expr) = stmt.having {
@@ -337,11 +344,12 @@ fn execute_select_with_grouping(
                 continue;
             }
         }
-        for col in &stmt.columns {
-            match col {
+        let mut projected_row: Vec<Value> = Vec::with_capacity(column_specs.len());
+        for (_, col_spec) in &column_specs {
+            match col_spec {
                 Column::Function(agg) => {
                     let value = compute_aggregate(&agg.function, &agg.expr, table, &group_rows)?;
-                    result.push_str(&format!("{}\t", format_value(&value)));
+                    projected_row.push(value);
                 }
                 Column::Named { name, .. } => {
                     let column_name = if name.contains('.') {
@@ -353,7 +361,7 @@ fn execute_select_with_grouping(
                         .iter()
                         .find(|(normalized, _)| normalized == column_name)
                     {
-                        result.push_str(&format!("{}\t", format_value(&group_rows[0][*group_idx])));
+                        projected_row.push(group_rows[0][*group_idx].clone());
                     } else {
                         return Err(format!("Column '{}' must appear in GROUP BY clause", name));
                     }
@@ -361,9 +369,131 @@ fn execute_select_with_grouping(
                 _ => {}
             }
         }
-        result.push('\n');
+
+        let mut order_values: Vec<Value> = Vec::new();
+        if let Some(ref order_by) = stmt.order_by {
+            for order_expr in order_by {
+                let value = evaluate_group_order_expression(
+                    &order_expr.expr,
+                    table,
+                    &group_rows,
+                    &column_specs,
+                    &projected_row,
+                    &group_by_normalized_with_indices,
+                )?;
+                order_values.push(value);
+            }
+        }
+
+        grouped_outputs.push((projected_row, order_values));
     }
+
+    if let Some(ref order_by) = stmt.order_by {
+        grouped_outputs.sort_by(|a, b| {
+            for (idx, order_expr) in order_by.iter().enumerate() {
+                let cmp = compare_values_for_sort(&a.1[idx], &b.1[idx]);
+                if cmp != Ordering::Equal {
+                    return if order_expr.asc { cmp } else { cmp.reverse() };
+                }
+            }
+            Ordering::Equal
+        });
+    }
+
+    let offset = stmt.offset.unwrap_or(0);
+    let limit = stmt.limit.unwrap_or(grouped_outputs.len());
+
+    use std::collections::BTreeSet;
+    let mut seen: BTreeSet<Vec<Value>> = BTreeSet::new();
+    let mut skipped = 0usize;
+    let mut emitted = 0usize;
+
+    for (row_values, _) in grouped_outputs {
+        if stmt.distinct && !seen.insert(row_values.clone()) {
+            continue;
+        }
+        if skipped < offset {
+            skipped += 1;
+            continue;
+        }
+        if emitted >= limit {
+            break;
+        }
+        for val in &row_values {
+            result.push_str(&format!("{}\t", format_value(val)));
+        }
+        result.push('\n');
+        emitted += 1;
+    }
+
     Ok(result)
+}
+
+fn evaluate_group_order_expression(
+    expr: &Expression,
+    table: &Table,
+    group_rows: &[&Vec<Value>],
+    column_specs: &[(String, Column)],
+    projected_row: &[Value],
+    group_by_indices: &[(String, usize)],
+) -> Result<Value, String> {
+    match expr {
+        Expression::Column(name) => {
+            for (idx, (header, col_spec)) in column_specs.iter().enumerate() {
+                if header == name {
+                    return Ok(projected_row[idx].clone());
+                }
+                if let Column::Named {
+                    name: original_name,
+                    alias,
+                } = col_spec
+                {
+                    if alias.as_ref().map(|a| a == name).unwrap_or(false)
+                        || original_name == name
+                        || original_name
+                            .split('.')
+                            .next_back()
+                            .map(|n| n == name)
+                            .unwrap_or(false)
+                    {
+                        return Ok(projected_row[idx].clone());
+                    }
+                }
+                if let Column::Function(agg) = col_spec {
+                    let default_alias = agg
+                        .alias
+                        .clone()
+                        .unwrap_or_else(|| format!("{:?}(*)", agg.function));
+                    if default_alias == *name {
+                        return Ok(projected_row[idx].clone());
+                    }
+                }
+            }
+
+            let normalized = if name.contains('.') {
+                name.split('.').next_back().unwrap_or(name)
+            } else {
+                name.as_str()
+            };
+
+            if let Some((_, idx)) = group_by_indices
+                .iter()
+                .find(|(normalized_name, _)| normalized_name == normalized)
+            {
+                if let Some(first_row) = group_rows.first() {
+                    return Ok(first_row[*idx].clone());
+                }
+            }
+
+            Err(format!(
+                "ORDER BY column '{}' not found in grouped result",
+                name
+            ))
+        }
+        Expression::Function(agg) => compute_aggregate(&agg.function, &agg.expr, table, group_rows),
+        Expression::Value(val) => Ok(val.clone()),
+        _ => Err("Unsupported expression in ORDER BY for grouped results".to_string()),
+    }
 }
 
 fn compute_aggregate(

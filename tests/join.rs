@@ -358,3 +358,32 @@ fn test_join_group_by_with_aggregate() {
     assert_eq!(counts.get("Bob").map(String::as_str), Some("1"));
     assert_eq!(counts.get("Charlie").map(String::as_str), Some("0"));
 }
+
+#[test]
+fn test_join_group_by_order_by_limit() {
+    let _guard = setup_test();
+
+    process_query("CREATE TABLE users (id INTEGER, name TEXT)").unwrap();
+    process_query(
+        "CREATE TABLE orders (id INTEGER, user_id INTEGER, product TEXT, quantity INTEGER)",
+    )
+    .unwrap();
+
+    process_query("INSERT INTO users VALUES (1, 'Alice'), (2, 'Bob'), (3, 'Charlie')").unwrap();
+    process_query(
+        "INSERT INTO orders VALUES (101, 1, 'Laptop', 2), (102, 1, 'Mouse', 5), (103, 2, 'Keyboard', 1)",
+    )
+    .unwrap();
+
+    let result = process_query("SELECT users.name, COUNT(orders.product) AS order_count FROM users LEFT JOIN orders ON users.id = orders.user_id GROUP BY users.name ORDER BY order_count DESC LIMIT 1").unwrap();
+
+    let rows: Vec<&str> = result
+        .lines()
+        .skip(2)
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].contains("Alice"));
+    assert!(rows[0].contains("2"));
+}
