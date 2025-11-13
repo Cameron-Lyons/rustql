@@ -387,3 +387,61 @@ fn test_join_group_by_order_by_limit() {
     assert!(rows[0].contains("Alice"));
     assert!(rows[0].contains("2"));
 }
+
+#[test]
+fn test_join_group_by_order_by_ordinal() {
+    let _guard = setup_test();
+
+    process_query("CREATE TABLE users (id INTEGER, name TEXT)").unwrap();
+    process_query(
+        "CREATE TABLE orders (id INTEGER, user_id INTEGER, product TEXT, quantity INTEGER)",
+    )
+    .unwrap();
+
+    process_query("INSERT INTO users VALUES (1, 'Alice'), (2, 'Bob'), (3, 'Charlie')").unwrap();
+    process_query(
+        "INSERT INTO orders VALUES (101, 1, 'Laptop', 2), (102, 1, 'Mouse', 5), (103, 2, 'Keyboard', 1)",
+    )
+    .unwrap();
+
+    let result = process_query("SELECT users.name, COUNT(orders.product) AS order_count FROM users LEFT JOIN orders ON users.id = orders.user_id GROUP BY users.name ORDER BY 2 DESC").unwrap();
+
+    let rows: Vec<&str> = result
+        .lines()
+        .skip(2)
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+
+    assert_eq!(rows.len(), 3);
+    assert!(rows[0].contains("Alice") && rows[0].contains("2"));
+    assert!(rows[1].contains("Bob") && rows[1].contains("1"));
+    assert!(rows[2].contains("Charlie") && rows[2].contains("0"));
+}
+
+#[test]
+fn test_join_group_by_order_by_expression() {
+    let _guard = setup_test();
+
+    process_query("CREATE TABLE users (id INTEGER, name TEXT)").unwrap();
+    process_query(
+        "CREATE TABLE orders (id INTEGER, user_id INTEGER, product TEXT, quantity INTEGER)",
+    )
+    .unwrap();
+
+    process_query("INSERT INTO users VALUES (1, 'Alice'), (2, 'Bob'), (3, 'Charlie')").unwrap();
+    process_query(
+        "INSERT INTO orders VALUES (101, 1, 'Laptop', 2), (102, 1, 'Mouse', 5), (103, 2, 'Keyboard', 1)",
+    )
+    .unwrap();
+
+    let result = process_query("SELECT users.name, COUNT(orders.product) AS order_count FROM users LEFT JOIN orders ON users.id = orders.user_id GROUP BY users.name ORDER BY order_count + 1 DESC LIMIT 1").unwrap();
+
+    let rows: Vec<&str> = result
+        .lines()
+        .skip(2)
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].contains("Alice"));
+}

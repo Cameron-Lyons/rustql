@@ -153,25 +153,6 @@ fn execute_select(stmt: SelectStatement) -> Result<String, String> {
             .collect()
     };
 
-    if let Some(ref order_by) = stmt.order_by {
-        filtered_rows.sort_by(|a, b| {
-            for order_expr in order_by {
-                let a_val = evaluate_value_expression(&order_expr.expr, &table.columns, a)
-                    .unwrap_or(Value::Null);
-                let b_val = evaluate_value_expression(&order_expr.expr, &table.columns, b)
-                    .unwrap_or(Value::Null);
-                let cmp = compare_values_for_sort(&a_val, &b_val);
-                if cmp != Ordering::Equal {
-                    return if order_expr.asc { cmp } else { cmp.reverse() };
-                }
-            }
-            Ordering::Equal
-        });
-    }
-
-    let offset = stmt.offset.unwrap_or(0);
-    let limit = stmt.limit.unwrap_or(filtered_rows.len());
-
     let mut result = String::new();
     for (name, _) in &column_specs {
         result.push_str(&format!("{}\t", name));
@@ -180,22 +161,25 @@ fn execute_select(stmt: SelectStatement) -> Result<String, String> {
     result.push_str(&"-".repeat(40));
     result.push('\n');
 
-    use std::collections::BTreeSet;
-    let mut seen: BTreeSet<Vec<Value>> = BTreeSet::new();
-    let mut emitted = 0usize;
-    let mut skipped = 0usize;
-    for row in filtered_rows.iter() {
-        let mut projected: Vec<Value> = Vec::new();
+    let mut outputs: Vec<(Vec<Value>, Vec<Value>)> = Vec::with_capacity(filtered_rows.len());
+    for row_ref in &filtered_rows {
+        let row = *row_ref;
+        let mut projected: Vec<Value> = Vec::with_capacity(column_specs.len());
         for (_, col) in &column_specs {
             let val = match col {
                 Column::All => {
                     unreachable!("Column::All should not appear in column_specs")
                 }
                 Column::Named { name, .. } => {
+                    let column_name = if name.contains('.') {
+                        name.split('.').next_back().unwrap_or(name)
+                    } else {
+                        name.as_str()
+                    };
                     let idx = table
                         .columns
                         .iter()
-                        .position(|c| &c.name == name)
+                        .position(|c| c.name == column_name)
                         .ok_or_else(|| format!("Column '{}' not found", name))?;
                     row[idx].clone()
                 }
@@ -211,6 +195,45 @@ fn execute_select(stmt: SelectStatement) -> Result<String, String> {
             };
             projected.push(val);
         }
+
+        let mut order_values: Vec<Value> = Vec::new();
+        if let Some(ref order_by) = stmt.order_by {
+            for order_expr in order_by {
+                let value = evaluate_select_order_expression(
+                    &order_expr.expr,
+                    &table.columns,
+                    row,
+                    &column_specs,
+                    &projected,
+                    true,
+                )?;
+                order_values.push(value);
+            }
+        }
+
+        outputs.push((projected, order_values));
+    }
+
+    if let Some(ref order_by) = stmt.order_by {
+        outputs.sort_by(|a, b| {
+            for (idx, order_expr) in order_by.iter().enumerate() {
+                let cmp = compare_values_for_sort(&a.1[idx], &b.1[idx]);
+                if cmp != Ordering::Equal {
+                    return if order_expr.asc { cmp } else { cmp.reverse() };
+                }
+            }
+            Ordering::Equal
+        });
+    }
+
+    let offset = stmt.offset.unwrap_or(0);
+    let limit = stmt.limit.unwrap_or(outputs.len());
+
+    use std::collections::BTreeSet;
+    let mut seen: BTreeSet<Vec<Value>> = BTreeSet::new();
+    let mut emitted = 0usize;
+    let mut skipped = 0usize;
+    for (projected, _) in outputs {
         if stmt.distinct && !seen.insert(projected.clone()) {
             continue;
         }
@@ -380,6 +403,7 @@ fn execute_select_with_grouping(
                     &column_specs,
                     &projected_row,
                     &group_by_normalized_with_indices,
+                    true,
                 )?;
                 order_values.push(value);
             }
@@ -429,6 +453,89 @@ fn execute_select_with_grouping(
     Ok(result)
 }
 
+fn evaluate_select_order_expression(
+    expr: &Expression,
+    columns: &[ColumnDefinition],
+    row: &[Value],
+    column_specs: &[(String, Column)],
+    projected_row: &[Value],
+    allow_ordinal: bool,
+) -> Result<Value, String> {
+    match expr {
+        Expression::Column(name) => {
+            for (idx, (header, col_spec)) in column_specs.iter().enumerate() {
+                if header == name {
+                    return Ok(projected_row[idx].clone());
+                }
+                if let Column::Named {
+                    name: original_name,
+                    alias,
+                } = col_spec
+                {
+                    if alias.as_ref().map(|a| a == name).unwrap_or(false)
+                        || original_name == name
+                        || original_name
+                            .split('.')
+                            .next_back()
+                            .map(|n| n == name)
+                            .unwrap_or(false)
+                    {
+                        return Ok(projected_row[idx].clone());
+                    }
+                }
+            }
+
+            let column_name = if name.contains('.') {
+                name.split('.').next_back().unwrap_or(name)
+            } else {
+                name.as_str()
+            };
+
+            let idx = columns
+                .iter()
+                .position(|c| c.name == column_name)
+                .ok_or_else(|| format!("ORDER BY column '{}' not found", name))?;
+            Ok(row[idx].clone())
+        }
+        Expression::Value(val) => {
+            if allow_ordinal {
+                if let Value::Integer(ord) = val {
+                    if *ord >= 1 && (*ord as usize) <= projected_row.len() {
+                        return Ok(projected_row[*ord as usize - 1].clone());
+                    }
+                }
+            }
+            Ok(val.clone())
+        }
+        Expression::BinaryOp { left, op, right } => match op {
+            BinaryOperator::Plus
+            | BinaryOperator::Minus
+            | BinaryOperator::Multiply
+            | BinaryOperator::Divide => {
+                let left_val = evaluate_select_order_expression(
+                    left,
+                    columns,
+                    row,
+                    column_specs,
+                    projected_row,
+                    false,
+                )?;
+                let right_val = evaluate_select_order_expression(
+                    right,
+                    columns,
+                    row,
+                    column_specs,
+                    projected_row,
+                    false,
+                )?;
+                apply_arithmetic(&left_val, &right_val, op)
+            }
+            _ => Err("Unsupported operator in ORDER BY".to_string()),
+        },
+        _ => Err("Unsupported expression in ORDER BY".to_string()),
+    }
+}
+
 fn evaluate_group_order_expression(
     expr: &Expression,
     table: &Table,
@@ -436,6 +543,7 @@ fn evaluate_group_order_expression(
     column_specs: &[(String, Column)],
     projected_row: &[Value],
     group_by_indices: &[(String, usize)],
+    allow_ordinal: bool,
 ) -> Result<Value, String> {
     match expr {
         Expression::Column(name) => {
@@ -491,8 +599,90 @@ fn evaluate_group_order_expression(
             ))
         }
         Expression::Function(agg) => compute_aggregate(&agg.function, &agg.expr, table, group_rows),
-        Expression::Value(val) => Ok(val.clone()),
+        Expression::Value(val) => {
+            if allow_ordinal {
+                if let Value::Integer(ord) = val {
+                    if *ord >= 1 && (*ord as usize) <= projected_row.len() {
+                        return Ok(projected_row[*ord as usize - 1].clone());
+                    }
+                }
+            }
+            Ok(val.clone())
+        }
+        Expression::BinaryOp { left, op, right } => match op {
+            BinaryOperator::Plus
+            | BinaryOperator::Minus
+            | BinaryOperator::Multiply
+            | BinaryOperator::Divide => {
+                let left_val = evaluate_group_order_expression(
+                    left,
+                    table,
+                    group_rows,
+                    column_specs,
+                    projected_row,
+                    group_by_indices,
+                    false,
+                )?;
+                let right_val = evaluate_group_order_expression(
+                    right,
+                    table,
+                    group_rows,
+                    column_specs,
+                    projected_row,
+                    group_by_indices,
+                    false,
+                )?;
+                apply_arithmetic(&left_val, &right_val, op)
+            }
+            _ => Err("Unsupported operator in ORDER BY for grouped results".to_string()),
+        },
         _ => Err("Unsupported expression in ORDER BY for grouped results".to_string()),
+    }
+}
+
+fn apply_arithmetic(left: &Value, right: &Value, op: &BinaryOperator) -> Result<Value, String> {
+    let to_float = |value: &Value| -> Result<f64, String> {
+        match value {
+            Value::Integer(i) => Ok(*i as f64),
+            Value::Float(f) => Ok(*f),
+            Value::Null => Ok(0.0),
+            _ => Err("Arithmetic in ORDER BY requires numeric values".to_string()),
+        }
+    };
+
+    match (left, right) {
+        (Value::Integer(l), Value::Integer(r)) => match op {
+            BinaryOperator::Plus => Ok(Value::Integer(l + r)),
+            BinaryOperator::Minus => Ok(Value::Integer(l - r)),
+            BinaryOperator::Multiply => Ok(Value::Integer(l * r)),
+            BinaryOperator::Divide => {
+                if *r == 0 {
+                    Err("Division by zero in ORDER BY".to_string())
+                } else if l % r == 0 {
+                    Ok(Value::Integer(l / r))
+                } else {
+                    Ok(Value::Float(*l as f64 / *r as f64))
+                }
+            }
+            _ => unreachable!(),
+        },
+        _ => {
+            let l = to_float(left)?;
+            let r = to_float(right)?;
+            match op {
+                BinaryOperator::Plus => Ok(Value::Float(l + r)),
+                BinaryOperator::Minus => Ok(Value::Float(l - r)),
+                BinaryOperator::Multiply => Ok(Value::Float(l * r)),
+                BinaryOperator::Divide => {
+                    if r.abs() < f64::EPSILON {
+                        Err("Division by zero in ORDER BY".to_string())
+                    } else {
+                        Ok(Value::Float(l / r))
+                    }
+                }
+                _ => unreachable!(),
+            }
+        }
     }
 }
 

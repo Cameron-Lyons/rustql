@@ -154,6 +154,55 @@ fn test_order_by() {
 }
 
 #[test]
+fn test_order_by_ordinal() {
+    let _guard = setup_test();
+    process_query("CREATE TABLE users (id INTEGER, name TEXT, age INTEGER)").unwrap();
+    process_query("INSERT INTO users VALUES (1, 'Alice', 30), (2, 'Bob', 25), (3, 'Charlie', 35)")
+        .unwrap();
+
+    let result = process_query("SELECT name, age FROM users ORDER BY 2 DESC").unwrap();
+    let rows: Vec<&str> = result
+        .lines()
+        .skip(2)
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+
+    assert_eq!(rows.len(), 3);
+    let parsed: Vec<Vec<&str>> = rows
+        .iter()
+        .map(|line| line.split('\t').filter(|s| !s.is_empty()).collect())
+        .collect();
+
+    assert_eq!(parsed[0], vec!["Charlie", "35"]);
+    assert_eq!(parsed[1], vec!["Alice", "30"]);
+    assert_eq!(parsed[2], vec!["Bob", "25"]);
+}
+
+#[test]
+fn test_order_by_expression() {
+    let _guard = setup_test();
+    process_query("CREATE TABLE sales (id INTEGER, price INTEGER, quantity INTEGER)").unwrap();
+    process_query("INSERT INTO sales VALUES (1, 10, 2), (2, 5, 5), (3, 7, 1)").unwrap();
+
+    let result =
+        process_query("SELECT id, price, quantity FROM sales ORDER BY price * quantity DESC")
+            .unwrap();
+    let rows: Vec<&str> = result
+        .lines()
+        .skip(2)
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+
+    assert_eq!(rows.len(), 3);
+    let parsed: Vec<Vec<&str>> = rows
+        .iter()
+        .map(|line| line.split('\t').filter(|s| !s.is_empty()).collect())
+        .collect();
+
+    assert_eq!(parsed[0], vec!["2", "5", "5"]);
+}
+
+#[test]
 fn test_limit_offset() {
     let _guard = setup_test();
     process_query("CREATE TABLE users (id INTEGER, name TEXT, age INTEGER)").unwrap();
