@@ -269,6 +269,7 @@ fn test_scalar_subquery_aggregate() {
                 columns: vec![Column::Function(AggregateFunction {
                     function: AggregateFunctionType::Count,
                     expr: Box::new(Expression::Column("*".into())),
+                    distinct: false,
                     alias: None,
                 })],
                 from: "orders_agg".into(),
@@ -369,6 +370,7 @@ fn test_scalar_subquery_aggregate_sum() {
                 columns: vec![Column::Function(AggregateFunction {
                     function: AggregateFunctionType::Sum,
                     expr: Box::new(Expression::Column("amount".into())),
+                    distinct: false,
                     alias: None,
                 })],
                 from: "orders_sum".into(),
@@ -761,6 +763,7 @@ fn test_scalar_subquery_with_join_and_aggregate() {
                 columns: vec![Column::Function(AggregateFunction {
                     function: AggregateFunctionType::Sum,
                     expr: Box::new(Expression::Column("products_join_agg.price".into())),
+                    distinct: false,
                     alias: None,
                 })],
                 from: "orders_join_agg".into(),

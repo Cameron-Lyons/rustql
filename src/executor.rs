@@ -283,7 +283,8 @@ fn execute_select_with_aggregates(
     for col in &stmt.columns {
         match col {
             Column::Function(agg) => {
-                let value = compute_aggregate(&agg.function, &agg.expr, table, &rows)?;
+                let value =
+                    compute_aggregate(&agg.function, &agg.expr, table, &rows, agg.distinct)?;
                 result.push_str(&format!("{}\t", format_value(&value)));
             }
             _ => {
@@ -371,7 +372,13 @@ fn execute_select_with_grouping(
         for (_, col_spec) in &column_specs {
             match col_spec {
                 Column::Function(agg) => {
-                    let value = compute_aggregate(&agg.function, &agg.expr, table, &group_rows)?;
+                    let value = compute_aggregate(
+                        &agg.function,
+                        &agg.expr,
+                        table,
+                        &group_rows,
+                        agg.distinct,
+                    )?;
                     projected_row.push(value);
                 }
                 Column::Named { name, .. } => {
@@ -598,7 +605,9 @@ fn evaluate_group_order_expression(
                 name
             ))
         }
-        Expression::Function(agg) => compute_aggregate(&agg.function, &agg.expr, table, group_rows),
+        Expression::Function(agg) => {
+            compute_aggregate(&agg.function, &agg.expr, table, group_rows, agg.distinct)
+        }
         Expression::Value(val) => {
             if allow_ordinal {
                 if let Value::Integer(ord) = val {
@@ -686,23 +695,41 @@ fn apply_arithmetic(left: &Value, right: &Value, op: &BinaryOperator) -> Result<
     }
 }
 
+fn remember_distinct(seen: &mut Vec<Value>, val: &Value) -> bool {
+    if seen.iter().any(|existing| existing == val) {
+        false
+    } else {
+        seen.push(val.clone());
+        true
+    }
+}
+
 fn compute_aggregate(
     func: &AggregateFunctionType,
     expr: &Expression,
     table: &Table,
     rows: &[&Vec<Value>],
+    distinct: bool,
 ) -> Result<Value, String> {
     match func {
         AggregateFunctionType::Count => {
             if matches!(expr, Expression::Column(name) if name == "*") {
+                if distinct {
+                    return Err("COUNT(DISTINCT *) is not supported".to_string());
+                }
                 Ok(Value::Integer(rows.len() as i64))
             } else {
                 let mut count = 0;
+                let mut seen: Vec<Value> = Vec::new();
                 for row in rows {
                     let val = evaluate_value_expression(expr, &table.columns, row)?;
-                    if !matches!(val, Value::Null) {
-                        count += 1;
+                    if matches!(&val, Value::Null) {
+                        continue;
                     }
+                    if distinct && !remember_distinct(&mut seen, &val) {
+                        continue;
+                    }
+                    count += 1;
                 }
                 Ok(Value::Integer(count))
             }
@@ -710,20 +737,26 @@ fn compute_aggregate(
         AggregateFunctionType::Sum => {
             let mut sum = 0.0;
             let mut has_value = false;
+            let mut seen: Vec<Value> = Vec::new();
             for row in rows {
                 let val = evaluate_value_expression(expr, &table.columns, row)?;
-                match val {
+                if matches!(&val, Value::Null) {
+                    continue;
+                }
+                if distinct && !remember_distinct(&mut seen, &val) {
+                    continue;
+                }
+                match &val {
                     Value::Integer(n) => {
-                        sum += n as f64;
+                        sum += *n as f64;
                         has_value = true;
                     }
                     Value::Float(f) => {
-                        sum += f;
+                        sum += *f;
                         has_value = true;
                     }
-                    Value::Null => {}
                     _ => return Err("SUM requires numeric values".to_string()),
-                }
+                };
             }
             if has_value {
                 Ok(Value::Float(sum))
@@ -734,20 +767,26 @@ fn compute_aggregate(
         AggregateFunctionType::Avg => {
             let mut sum = 0.0;
             let mut count = 0;
+            let mut seen: Vec<Value> = Vec::new();
             for row in rows {
                 let val = evaluate_value_expression(expr, &table.columns, row)?;
-                match val {
+                if matches!(&val, Value::Null) {
+                    continue;
+                }
+                if distinct && !remember_distinct(&mut seen, &val) {
+                    continue;
+                }
+                match &val {
                     Value::Integer(n) => {
-                        sum += n as f64;
+                        sum += *n as f64;
                         count += 1;
                     }
                     Value::Float(f) => {
-                        sum += f;
+                        sum += *f;
                         count += 1;
                     }
-                    Value::Null => {}
                     _ => return Err("AVG requires numeric values".to_string()),
-                }
+                };
             }
             if count > 0 {
                 Ok(Value::Float(sum / count as f64))
@@ -834,7 +873,9 @@ fn evaluate_having_value(
     rows: &[&Vec<Value>],
 ) -> Result<Value, String> {
     match expr {
-        Expression::Function(agg) => compute_aggregate(&agg.function, &agg.expr, table, rows),
+        Expression::Function(agg) => {
+            compute_aggregate(&agg.function, &agg.expr, table, rows, agg.distinct)
+        }
         Expression::Value(val) => Ok(val.clone()),
         Expression::Column(name) => {
             if !rows.is_empty() {
@@ -1246,12 +1287,19 @@ fn eval_subquery_values(db: &Database, subquery: &SelectStatement) -> Result<Vec
                     {
                         continue;
                     }
-                    let v = compute_aggregate(&agg.function, &agg.expr, table, &rows)?;
+                    let v =
+                        compute_aggregate(&agg.function, &agg.expr, table, &rows, agg.distinct)?;
                     values.push(v);
                 }
                 Ok(values)
             } else {
-                let value = compute_aggregate(&agg.function, &agg.expr, table, &filtered_rows)?;
+                let value = compute_aggregate(
+                    &agg.function,
+                    &agg.expr,
+                    table,
+                    &filtered_rows,
+                    agg.distinct,
+                )?;
                 Ok(vec![value])
             }
         }
@@ -1594,7 +1642,13 @@ fn eval_scalar_subquery_with_outer(
                     rows: subquery_rows.clone(),
                 };
 
-                compute_aggregate(&agg.function, &agg.expr, &temp_table, &filtered_rows)
+                compute_aggregate(
+                    &agg.function,
+                    &agg.expr,
+                    &temp_table,
+                    &filtered_rows,
+                    agg.distinct,
+                )
             }
             Column::All => Err("Scalar subquery cannot use *".to_string()),
         };
@@ -1655,7 +1709,13 @@ fn eval_scalar_subquery_with_outer(
                 filtered_rows.push(inner_row);
             }
         }
-        return compute_aggregate(&agg.function, &agg.expr, table, &filtered_rows);
+        return compute_aggregate(
+            &agg.function,
+            &agg.expr,
+            table,
+            &filtered_rows,
+            agg.distinct,
+        );
     }
 
     if let Column::Subquery(nested_subquery) = &subquery.columns[0] {

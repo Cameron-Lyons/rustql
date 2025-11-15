@@ -52,6 +52,7 @@ pub enum Column {
 pub struct AggregateFunction {
     pub function: AggregateFunctionType,
     pub expr: Box<Expression>,
+    pub distinct: bool,
     pub alias: Option<String>,
 }
 

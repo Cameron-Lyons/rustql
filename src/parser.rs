@@ -254,12 +254,23 @@ impl Parser {
 
         self.consume(Token::LeftParen)?;
 
+        let distinct = if *self.current_token() == Token::Distinct {
+            self.advance();
+            true
+        } else {
+            false
+        };
+
         let expr = if *self.current_token() == Token::Star {
             self.advance();
             Box::new(Expression::Column("*".to_string()))
         } else {
             Box::new(self.parse_expression()?)
         };
+
+        if distinct && matches!(&*expr, Expression::Column(name) if name == "*") {
+            return Err("DISTINCT * is not supported".to_string());
+        }
 
         self.consume(Token::RightParen)?;
 
@@ -276,6 +287,7 @@ impl Parser {
         Ok(Column::Function(AggregateFunction {
             function: func_type,
             expr,
+            distinct,
             alias,
         }))
     }
