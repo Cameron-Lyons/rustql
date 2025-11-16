@@ -796,39 +796,49 @@ fn compute_aggregate(
         }
         AggregateFunctionType::Min => {
             let mut min_val: Option<Value> = None;
+            let mut seen: Vec<Value> = Vec::new();
             for row in rows {
                 let val = evaluate_value_expression(expr, &table.columns, row)?;
-                if !matches!(val, Value::Null) {
-                    min_val = Some(match min_val {
-                        None => val,
-                        Some(ref current) => {
-                            if compare_values_for_sort(&val, current) == Ordering::Less {
-                                val
-                            } else {
-                                current.clone()
-                            }
-                        }
-                    });
+                if matches!(&val, Value::Null) {
+                    continue;
                 }
+                if distinct && !remember_distinct(&mut seen, &val) {
+                    continue;
+                }
+                min_val = Some(match min_val {
+                    None => val,
+                    Some(ref current) => {
+                        if compare_values_for_sort(&val, current) == Ordering::Less {
+                            val
+                        } else {
+                            current.clone()
+                        }
+                    }
+                });
             }
             Ok(min_val.unwrap_or(Value::Null))
         }
         AggregateFunctionType::Max => {
             let mut max_val: Option<Value> = None;
+            let mut seen: Vec<Value> = Vec::new();
             for row in rows {
                 let val = evaluate_value_expression(expr, &table.columns, row)?;
-                if !matches!(val, Value::Null) {
-                    max_val = Some(match max_val {
-                        None => val,
-                        Some(ref current) => {
-                            if compare_values_for_sort(&val, current) == Ordering::Greater {
-                                val
-                            } else {
-                                current.clone()
-                            }
-                        }
-                    });
+                if matches!(&val, Value::Null) {
+                    continue;
                 }
+                if distinct && !remember_distinct(&mut seen, &val) {
+                    continue;
+                }
+                max_val = Some(match max_val {
+                    None => val,
+                    Some(ref current) => {
+                        if compare_values_for_sort(&val, current) == Ordering::Greater {
+                            val
+                        } else {
+                            current.clone()
+                        }
+                    }
+                });
             }
             Ok(max_val.unwrap_or(Value::Null))
         }

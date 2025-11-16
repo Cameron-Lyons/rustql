@@ -1,6 +1,6 @@
 {
   "tables": {
-    "users": {
+    "prices": {
       "columns": [
         {
           "name": "id",
@@ -8,12 +8,51 @@
           "nullable": false
         },
         {
-          "name": "name",
-          "data_type": "Text",
+          "name": "price",
+          "data_type": "Float",
           "nullable": false
         }
       ],
-      "rows": []
+      "rows": [
+        [
+          {
+            "Integer": 1
+          },
+          {
+            "Float": 25.5
+          }
+        ],
+        [
+          {
+            "Integer": 2
+          },
+          {
+            "Float": 25.5
+          }
+        ],
+        [
+          {
+            "Integer": 3
+          },
+          {
+            "Float": 50.0
+          }
+        ],
+        [
+          {
+            "Integer": 4
+          },
+          {
+            "Float": 30.0
+          }
+        ],
+        [
+          {
+            "Integer": 5
+          },
+          "Null"
+        ]
+      ]
     }
   }
 }
