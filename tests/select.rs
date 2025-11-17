@@ -1,9 +1,18 @@
 use rustql::ast::*;
 use rustql::executor::{execute, reset_database_state};
+use std::sync::Mutex;
+
+static TEST_MUTEX: Mutex<()> = Mutex::new(());
+
+fn setup_test() -> std::sync::MutexGuard<'static, ()> {
+    let guard = TEST_MUTEX.lock().unwrap();
+    reset_database_state();
+    guard
+}
 
 #[test]
 fn test_select_all() {
-    reset_database_state();
+    let _guard = setup_test();
 
     execute(Statement::CreateTable(CreateTableStatement {
         name: "users".to_string(),
@@ -52,7 +61,7 @@ fn test_select_all() {
 
 #[test]
 fn test_count_distinct_values() {
-    reset_database_state();
+    let _guard = setup_test();
 
     execute(Statement::CreateTable(CreateTableStatement {
         name: "cities".to_string(),
@@ -106,7 +115,7 @@ fn test_count_distinct_values() {
 
 #[test]
 fn test_sum_distinct_values() {
-    reset_database_state();
+    let _guard = setup_test();
 
     execute(Statement::CreateTable(CreateTableStatement {
         name: "purchases".to_string(),
@@ -161,7 +170,7 @@ fn test_sum_distinct_values() {
 
 #[test]
 fn test_min_distinct_values() {
-    reset_database_state();
+    let _guard = setup_test();
 
     execute(Statement::CreateTable(CreateTableStatement {
         name: "scores".to_string(),
@@ -218,7 +227,7 @@ fn test_min_distinct_values() {
 
 #[test]
 fn test_max_distinct_values() {
-    reset_database_state();
+    let _guard = setup_test();
 
     execute(Statement::CreateTable(CreateTableStatement {
         name: "prices".to_string(),
@@ -271,4 +280,61 @@ fn test_max_distinct_values() {
     let output = execute(stmt).unwrap();
     // MAX(DISTINCT price) should be 50.0 (ignoring duplicates of 25.5 and 30.0)
     assert!(output.contains("50"));
+}
+
+#[test]
+fn test_avg_distinct_values() {
+    let _guard = setup_test();
+
+    execute(Statement::CreateTable(CreateTableStatement {
+        name: "grades".to_string(),
+        columns: vec![
+            ColumnDefinition {
+                name: "id".into(),
+                data_type: DataType::Integer,
+                nullable: false,
+            },
+            ColumnDefinition {
+                name: "grade".into(),
+                data_type: DataType::Float,
+                nullable: false,
+            },
+        ],
+    }))
+    .unwrap();
+
+    execute(Statement::Insert(InsertStatement {
+        table: "grades".to_string(),
+        columns: Some(vec!["id".into(), "grade".into()]),
+        values: vec![
+            vec![Value::Integer(1), Value::Float(85.0)],
+            vec![Value::Integer(2), Value::Float(85.0)],
+            vec![Value::Integer(3), Value::Float(90.0)],
+            vec![Value::Integer(4), Value::Float(95.0)],
+            vec![Value::Integer(5), Value::Null],
+        ],
+    }))
+    .unwrap();
+
+    let stmt = Statement::Select(SelectStatement {
+        distinct: false,
+        from: "grades".into(),
+        columns: vec![Column::Function(AggregateFunction {
+            function: AggregateFunctionType::Avg,
+            expr: Box::new(Expression::Column("grade".into())),
+            distinct: true,
+            alias: Some("avg_distinct_grade".into()),
+        })],
+        joins: vec![],
+        where_clause: None,
+        group_by: None,
+        having: None,
+        order_by: None,
+        limit: None,
+        offset: None,
+    });
+
+    let output = execute(stmt).unwrap();
+    // AVG(DISTINCT grade) should be (85.0 + 90.0 + 95.0) / 3 = 90.0 (ignoring duplicate 85.0 and NULL)
+    assert!(output.contains("90"));
 }
