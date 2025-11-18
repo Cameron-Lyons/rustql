@@ -1,6 +1,6 @@
 {
   "tables": {
-    "purchases": {
+    "users": {
       "columns": [
         {
           "name": "id",
@@ -8,43 +8,12 @@
           "nullable": false
         },
         {
-          "name": "amount",
-          "data_type": "Float",
+          "name": "name",
+          "data_type": "Text",
           "nullable": false
         }
       ],
-      "rows": [
-        [
-          {
-            "Integer": 1
-          },
-          {
-            "Float": 10.0
-          }
-        ],
-        [
-          {
-            "Integer": 2
-          },
-          {
-            "Float": 10.0
-          }
-        ],
-        [
-          {
-            "Integer": 3
-          },
-          {
-            "Float": 20.0
-          }
-        ],
-        [
-          {
-            "Integer": 4
-          },
-          "Null"
-        ]
-      ]
+      "rows": []
     }
   }
 }

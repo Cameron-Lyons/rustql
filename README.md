@@ -19,6 +19,7 @@ A lightweight SQL database engine written in Rust. RustQL is an educational impl
 
 - **SELECT Features**
   - Column selection (SELECT *)
+  - **SELECT DISTINCT**: `SELECT DISTINCT column FROM table` - Remove duplicate rows
   - WHERE clause with comparison operators (=, !=, <, <=, >, >=)
   - Logical operators (AND, OR, NOT)
   - **IN operator**: `WHERE column IN (value1, value2, ...)`
@@ -27,7 +28,7 @@ A lightweight SQL database engine written in Rust. RustQL is an educational impl
   - **IS NULL / IS NOT NULL**: `WHERE column IS NULL` or `WHERE column IS NOT NULL`
   - ORDER BY (ASC/DESC)
   - LIMIT and OFFSET
-  - Aggregate functions: COUNT, SUM, AVG, MIN, MAX
+  - Aggregate functions: COUNT, SUM, AVG, MIN, MAX (with DISTINCT support: `COUNT(DISTINCT column)`)
   - GROUP BY with HAVING clause
   - **JOIN operations** (INNER, LEFT, RIGHT, FULL) - All join types now supported!
   - **Subqueries**: 
@@ -150,6 +151,10 @@ SELECT * FROM users ORDER BY name DESC;
 -- Limit and Offset
 SELECT * FROM users LIMIT 5;
 SELECT * FROM users OFFSET 2 LIMIT 3;
+
+-- SELECT DISTINCT
+SELECT DISTINCT age FROM users;
+SELECT DISTINCT name, email FROM users;
 ```
 
 ### Aggregate Functions
@@ -160,6 +165,13 @@ SELECT AVG(age) FROM users;
 SELECT MIN(age) FROM users;
 SELECT MAX(age) FROM users;
 SELECT SUM(amount) FROM orders;
+
+-- With DISTINCT
+SELECT COUNT(DISTINCT age) FROM users;
+SELECT SUM(DISTINCT amount) FROM orders;
+SELECT AVG(DISTINCT score) FROM grades;
+SELECT MIN(DISTINCT price) FROM products;
+SELECT MAX(DISTINCT salary) FROM employees;
 ```
 
 ### GROUP BY

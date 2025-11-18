@@ -263,10 +263,7 @@ fn execute_select_with_aggregates(
     for col in &stmt.columns {
         match col {
             Column::Function(agg) => {
-                let name = agg
-                    .alias
-                    .clone()
-                    .unwrap_or_else(|| format!("{:?}(*)", agg.function));
+                let name = format_aggregate_header(agg);
                 result.push_str(&format!("{}\t", name));
             }
             Column::Named { name, alias } => {
@@ -337,10 +334,7 @@ fn execute_select_with_grouping(
     for col in &stmt.columns {
         match col {
             Column::Function(agg) => {
-                let header = agg
-                    .alias
-                    .clone()
-                    .unwrap_or_else(|| format!("{:?}(*)", agg.function));
+                let header = format_aggregate_header(agg);
                 column_specs.push((header, col.clone()));
             }
             Column::Named { name, alias } => {
@@ -702,6 +696,30 @@ fn remember_distinct(seen: &mut Vec<Value>, val: &Value) -> bool {
         seen.push(val.clone());
         true
     }
+}
+
+fn format_aggregate_header(agg: &AggregateFunction) -> String {
+    if let Some(alias) = &agg.alias {
+        return alias.clone();
+    }
+    
+    let func_name = match agg.function {
+        AggregateFunctionType::Count => "Count",
+        AggregateFunctionType::Sum => "Sum",
+        AggregateFunctionType::Avg => "Avg",
+        AggregateFunctionType::Min => "Min",
+        AggregateFunctionType::Max => "Max",
+    };
+    
+    let distinct_str = if agg.distinct { "DISTINCT " } else { "" };
+    
+    let expr_str = match &*agg.expr {
+        Expression::Column(name) if name == "*" => "*".to_string(),
+        Expression::Column(name) => name.clone(),
+        _ => "*".to_string(), // Fallback for complex expressions
+    };
+    
+    format!("{}({}{})", func_name, distinct_str, expr_str)
 }
 
 fn compute_aggregate(
