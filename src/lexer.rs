@@ -52,6 +52,13 @@ pub enum Token {
     Date,
     Time,
     DateTime,
+    Foreign,
+    Key,
+    References,
+    Cascade,
+    Restrict,
+    No,
+    Action,
 
     Identifier(String),
     Number(i64),
@@ -331,6 +338,13 @@ fn match_keyword(ident: &str) -> Token {
         "DATE" => Token::Date,
         "TIME" => Token::Time,
         "DATETIME" => Token::DateTime,
+        "FOREIGN" => Token::Foreign,
+        "KEY" => Token::Key,
+        "REFERENCES" => Token::References,
+        "CASCADE" => Token::Cascade,
+        "RESTRICT" => Token::Restrict,
+        "NO" => Token::No,
+        "ACTION" => Token::Action,
         _ => Token::Identifier(ident.to_string()),
     }
 }

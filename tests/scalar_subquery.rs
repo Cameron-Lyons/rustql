@@ -17,11 +17,13 @@ fn test_scalar_subquery_basic() {
         name: "users_scalar1".to_string(),
         columns: vec![
             ColumnDefinition {
+                foreign_key: None,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
             },
             ColumnDefinition {
+                foreign_key: None,
                 name: "name".into(),
                 data_type: DataType::Text,
                 nullable: false,
@@ -44,11 +46,13 @@ fn test_scalar_subquery_basic() {
         name: "orders_scalar1".to_string(),
         columns: vec![
             ColumnDefinition {
+                foreign_key: None,
                 name: "user_id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
             },
             ColumnDefinition {
+                foreign_key: None,
                 name: "amount".into(),
                 data_type: DataType::Float,
                 nullable: false,
@@ -117,11 +121,13 @@ fn test_scalar_subquery_null() {
         name: "users_scalar2".to_string(),
         columns: vec![
             ColumnDefinition {
+                foreign_key: None,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
             },
             ColumnDefinition {
+                foreign_key: None,
                 name: "name".into(),
                 data_type: DataType::Text,
                 nullable: false,
@@ -141,11 +147,13 @@ fn test_scalar_subquery_null() {
         name: "orders_scalar2".to_string(),
         columns: vec![
             ColumnDefinition {
+                foreign_key: None,
                 name: "user_id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
             },
             ColumnDefinition {
+                foreign_key: None,
                 name: "amount".into(),
                 data_type: DataType::Float,
                 nullable: false,
@@ -204,11 +212,13 @@ fn test_scalar_subquery_aggregate() {
         name: "users_agg".to_string(),
         columns: vec![
             ColumnDefinition {
+                foreign_key: None,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
             },
             ColumnDefinition {
+                foreign_key: None,
                 name: "name".into(),
                 data_type: DataType::Text,
                 nullable: false,
@@ -231,11 +241,13 @@ fn test_scalar_subquery_aggregate() {
         name: "orders_agg".to_string(),
         columns: vec![
             ColumnDefinition {
+                foreign_key: None,
                 name: "user_id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
             },
             ColumnDefinition {
+                foreign_key: None,
                 name: "amount".into(),
                 data_type: DataType::Float,
                 nullable: false,
@@ -309,11 +321,13 @@ fn test_scalar_subquery_aggregate_sum() {
         name: "users_sum".to_string(),
         columns: vec![
             ColumnDefinition {
+                foreign_key: None,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
             },
             ColumnDefinition {
+                foreign_key: None,
                 name: "name".into(),
                 data_type: DataType::Text,
                 nullable: false,
@@ -333,11 +347,13 @@ fn test_scalar_subquery_aggregate_sum() {
         name: "orders_sum".to_string(),
         columns: vec![
             ColumnDefinition {
+                foreign_key: None,
                 name: "user_id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
             },
             ColumnDefinition {
+                foreign_key: None,
                 name: "amount".into(),
                 data_type: DataType::Float,
                 nullable: false,
@@ -408,11 +424,13 @@ fn test_scalar_subquery_nested() {
         name: "users_nested".to_string(),
         columns: vec![
             ColumnDefinition {
+                foreign_key: None,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
             },
             ColumnDefinition {
+                foreign_key: None,
                 name: "name".into(),
                 data_type: DataType::Text,
                 nullable: false,
@@ -432,11 +450,13 @@ fn test_scalar_subquery_nested() {
         name: "orders_nested".to_string(),
         columns: vec![
             ColumnDefinition {
+                foreign_key: None,
                 name: "user_id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
             },
             ColumnDefinition {
+                foreign_key: None,
                 name: "amount".into(),
                 data_type: DataType::Float,
                 nullable: false,
@@ -456,16 +476,19 @@ fn test_scalar_subquery_nested() {
         name: "items_nested".to_string(),
         columns: vec![
             ColumnDefinition {
+                foreign_key: None,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
             },
             ColumnDefinition {
+                foreign_key: None,
                 name: "order_id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
             },
             ColumnDefinition {
+                foreign_key: None,
                 name: "price".into(),
                 data_type: DataType::Float,
                 nullable: false,
@@ -551,11 +574,13 @@ fn test_scalar_subquery_with_join() {
         name: "users_join".to_string(),
         columns: vec![
             ColumnDefinition {
+                foreign_key: None,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
             },
             ColumnDefinition {
+                foreign_key: None,
                 name: "name".into(),
                 data_type: DataType::Text,
                 nullable: false,
@@ -578,16 +603,19 @@ fn test_scalar_subquery_with_join() {
         name: "orders_join".to_string(),
         columns: vec![
             ColumnDefinition {
+                foreign_key: None,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
             },
             ColumnDefinition {
+                foreign_key: None,
                 name: "user_id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
             },
             ColumnDefinition {
+                foreign_key: None,
                 name: "amount".into(),
                 data_type: DataType::Float,
                 nullable: false,
@@ -666,11 +694,13 @@ fn test_scalar_subquery_with_join_and_aggregate() {
         name: "users_join_agg".to_string(),
         columns: vec![
             ColumnDefinition {
+                foreign_key: None,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
             },
             ColumnDefinition {
+                foreign_key: None,
                 name: "name".into(),
                 data_type: DataType::Text,
                 nullable: false,
@@ -693,16 +723,19 @@ fn test_scalar_subquery_with_join_and_aggregate() {
         name: "orders_join_agg".to_string(),
         columns: vec![
             ColumnDefinition {
+                foreign_key: None,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
             },
             ColumnDefinition {
+                foreign_key: None,
                 name: "user_id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
             },
             ColumnDefinition {
+                foreign_key: None,
                 name: "amount".into(),
                 data_type: DataType::Float,
                 nullable: false,
@@ -726,11 +759,13 @@ fn test_scalar_subquery_with_join_and_aggregate() {
         name: "products_join_agg".to_string(),
         columns: vec![
             ColumnDefinition {
+                foreign_key: None,
                 name: "order_id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
             },
             ColumnDefinition {
+                foreign_key: None,
                 name: "price".into(),
                 data_type: DataType::Float,
                 nullable: false,

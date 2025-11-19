@@ -18,11 +18,13 @@ fn test_select_all() {
         name: "users".to_string(),
         columns: vec![
             ColumnDefinition {
+                foreign_key: None,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
             },
             ColumnDefinition {
+                foreign_key: None,
                 name: "name".into(),
                 data_type: DataType::Text,
                 nullable: false,
@@ -67,11 +69,13 @@ fn test_count_distinct_values() {
         name: "cities".to_string(),
         columns: vec![
             ColumnDefinition {
+                foreign_key: None,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
             },
             ColumnDefinition {
+                foreign_key: None,
                 name: "city".into(),
                 data_type: DataType::Text,
                 nullable: false,
@@ -121,11 +125,13 @@ fn test_sum_distinct_values() {
         name: "purchases".to_string(),
         columns: vec![
             ColumnDefinition {
+                foreign_key: None,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
             },
             ColumnDefinition {
+                foreign_key: None,
                 name: "amount".into(),
                 data_type: DataType::Float,
                 nullable: false,
@@ -176,11 +182,13 @@ fn test_min_distinct_values() {
         name: "scores".to_string(),
         columns: vec![
             ColumnDefinition {
+                foreign_key: None,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
             },
             ColumnDefinition {
+                foreign_key: None,
                 name: "score".into(),
                 data_type: DataType::Integer,
                 nullable: false,
@@ -233,11 +241,13 @@ fn test_max_distinct_values() {
         name: "prices".to_string(),
         columns: vec![
             ColumnDefinition {
+                foreign_key: None,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
             },
             ColumnDefinition {
+                foreign_key: None,
                 name: "price".into(),
                 data_type: DataType::Float,
                 nullable: false,
@@ -290,11 +300,13 @@ fn test_avg_distinct_values() {
         name: "grades".to_string(),
         columns: vec![
             ColumnDefinition {
+                foreign_key: None,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
             },
             ColumnDefinition {
+                foreign_key: None,
                 name: "grade".into(),
                 data_type: DataType::Float,
                 nullable: false,

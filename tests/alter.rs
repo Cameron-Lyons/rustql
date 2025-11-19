@@ -11,6 +11,7 @@ fn test_alter_table_add_column() {
             name: "id".into(),
             data_type: DataType::Integer,
             nullable: false,
+            foreign_key: None,
         }],
     }))
     .unwrap();
@@ -21,6 +22,7 @@ fn test_alter_table_add_column() {
             name: "name".into(),
             data_type: DataType::Text,
             nullable: false,
+            foreign_key: None,
         }),
     });
 

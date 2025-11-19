@@ -12,11 +12,13 @@ fn test_insert() {
                 name: "id".to_string(),
                 data_type: DataType::Integer,
                 nullable: false,
+                foreign_key: None,
             },
             ColumnDefinition {
                 name: "name".to_string(),
                 data_type: DataType::Text,
                 nullable: false,
+                foreign_key: None,
             },
         ],
     });

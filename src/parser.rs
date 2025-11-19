@@ -497,10 +497,82 @@ impl Parser {
 
             let data_type = self.parse_data_type()?;
 
+            let foreign_key = if *self.current_token() == Token::Foreign {
+                self.advance();
+                if *self.current_token() == Token::Key {
+                    self.advance();
+                }
+                self.consume(Token::References)?;
+                let ref_table = match self.advance() {
+                    Token::Identifier(name) => name,
+                    _ => return Err("Expected table name after REFERENCES".to_string()),
+                };
+                self.consume(Token::LeftParen)?;
+                let ref_column = match self.advance() {
+                    Token::Identifier(name) => name,
+                    _ => return Err("Expected column name after REFERENCES table".to_string()),
+                };
+                self.consume(Token::RightParen)?;
+
+                let mut on_delete = crate::ast::ForeignKeyAction::Restrict;
+                let mut on_update = crate::ast::ForeignKeyAction::Restrict;
+
+                while *self.current_token() == Token::On {
+                    self.advance();
+                    let action_type = match self.current_token() {
+                        Token::Delete => {
+                            self.advance();
+                            &mut on_delete
+                        }
+                        Token::Update => {
+                            self.advance();
+                            &mut on_update
+                        }
+                        _ => return Err("Expected DELETE or UPDATE after ON".to_string()),
+                    };
+
+                    *action_type = match self.current_token() {
+                        Token::Cascade => {
+                            self.advance();
+                            crate::ast::ForeignKeyAction::Cascade
+                        }
+                        Token::Restrict => {
+                            self.advance();
+                            crate::ast::ForeignKeyAction::Restrict
+                        }
+                        Token::Set => {
+                            self.advance();
+                            self.consume(Token::Null)?;
+                            crate::ast::ForeignKeyAction::SetNull
+                        }
+                        Token::No => {
+                            self.advance();
+                            self.consume(Token::Action)?;
+                            crate::ast::ForeignKeyAction::NoAction
+                        }
+                        _ => {
+                            return Err(
+                                "Expected CASCADE, RESTRICT, SET NULL, or NO ACTION".to_string()
+                            );
+                        }
+                    };
+                }
+
+                Some(crate::ast::ForeignKeyConstraint {
+                    referenced_table: ref_table,
+                    referenced_column: ref_column,
+                    on_delete,
+                    on_update,
+                })
+            } else {
+                None
+            };
+
             columns.push(ColumnDefinition {
                 name,
                 data_type,
                 nullable: true,
+                foreign_key,
             });
 
             if *self.current_token() == Token::Comma {
@@ -565,6 +637,7 @@ impl Parser {
                     name,
                     data_type,
                     nullable: true,
+                    foreign_key: None,
                 })
             }
             Token::Drop => {

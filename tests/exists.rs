@@ -7,11 +7,13 @@ fn test_where_exists_true() {
         name: "users_ex1".to_string(),
         columns: vec![
             ColumnDefinition {
+                foreign_key: None,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
             },
             ColumnDefinition {
+                foreign_key: None,
                 name: "name".into(),
                 data_type: DataType::Text,
                 nullable: false,
@@ -34,11 +36,13 @@ fn test_where_exists_true() {
         name: "orders_ex1".to_string(),
         columns: vec![
             ColumnDefinition {
+                foreign_key: None,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
             },
             ColumnDefinition {
+                foreign_key: None,
                 name: "amount".into(),
                 data_type: DataType::Float,
                 nullable: false,
@@ -98,11 +102,13 @@ fn test_where_exists_false_filters_all() {
         name: "users_ex2".to_string(),
         columns: vec![
             ColumnDefinition {
+                foreign_key: None,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
             },
             ColumnDefinition {
+                foreign_key: None,
                 name: "name".into(),
                 data_type: DataType::Text,
                 nullable: false,
@@ -125,11 +131,13 @@ fn test_where_exists_false_filters_all() {
         name: "orders_ex2".to_string(),
         columns: vec![
             ColumnDefinition {
+                foreign_key: None,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
             },
             ColumnDefinition {
+                foreign_key: None,
                 name: "amount".into(),
                 data_type: DataType::Float,
                 nullable: false,
@@ -189,11 +197,13 @@ fn test_where_not_exists_true_filters_all() {
         name: "t_users_ne1".to_string(),
         columns: vec![
             ColumnDefinition {
+                foreign_key: None,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
             },
             ColumnDefinition {
+                foreign_key: None,
                 name: "name".into(),
                 data_type: DataType::Text,
                 nullable: false,
@@ -216,11 +226,13 @@ fn test_where_not_exists_true_filters_all() {
         name: "t_orders_ne1".to_string(),
         columns: vec![
             ColumnDefinition {
+                foreign_key: None,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
             },
             ColumnDefinition {
+                foreign_key: None,
                 name: "amount".into(),
                 data_type: DataType::Float,
                 nullable: false,
@@ -283,11 +295,13 @@ fn test_where_exists_correlated_true() {
         name: "users_corr1".to_string(),
         columns: vec![
             ColumnDefinition {
+                foreign_key: None,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
             },
             ColumnDefinition {
+                foreign_key: None,
                 name: "name".into(),
                 data_type: DataType::Text,
                 nullable: false,
@@ -310,11 +324,13 @@ fn test_where_exists_correlated_true() {
         name: "orders_corr1".to_string(),
         columns: vec![
             ColumnDefinition {
+                foreign_key: None,
                 name: "user_id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
             },
             ColumnDefinition {
+                foreign_key: None,
                 name: "amount".into(),
                 data_type: DataType::Float,
                 nullable: false,
@@ -382,11 +398,13 @@ fn test_where_not_exists_false() {
         name: "t_users_ne2".to_string(),
         columns: vec![
             ColumnDefinition {
+                foreign_key: None,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
             },
             ColumnDefinition {
+                foreign_key: None,
                 name: "name".into(),
                 data_type: DataType::Text,
                 nullable: false,
@@ -409,11 +427,13 @@ fn test_where_not_exists_false() {
         name: "t_orders_ne2".to_string(),
         columns: vec![
             ColumnDefinition {
+                foreign_key: None,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
             },
             ColumnDefinition {
+                foreign_key: None,
                 name: "amount".into(),
                 data_type: DataType::Float,
                 nullable: false,
@@ -476,11 +496,13 @@ fn test_where_exists_correlated_false() {
         name: "users_corr2".to_string(),
         columns: vec![
             ColumnDefinition {
+                foreign_key: None,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
             },
             ColumnDefinition {
+                foreign_key: None,
                 name: "name".into(),
                 data_type: DataType::Text,
                 nullable: false,
@@ -503,11 +525,13 @@ fn test_where_exists_correlated_false() {
         name: "orders_corr2".to_string(),
         columns: vec![
             ColumnDefinition {
+                foreign_key: None,
                 name: "user_id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
             },
             ColumnDefinition {
+                foreign_key: None,
                 name: "amount".into(),
                 data_type: DataType::Float,
                 nullable: false,
@@ -575,11 +599,13 @@ fn test_where_exists_with_join() {
         name: "users_join1".to_string(),
         columns: vec![
             ColumnDefinition {
+                foreign_key: None,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
             },
             ColumnDefinition {
+                foreign_key: None,
                 name: "name".into(),
                 data_type: DataType::Text,
                 nullable: false,
@@ -602,11 +628,13 @@ fn test_where_exists_with_join() {
         name: "orders_join1".to_string(),
         columns: vec![
             ColumnDefinition {
+                foreign_key: None,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
             },
             ColumnDefinition {
+                foreign_key: None,
                 name: "user_id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
@@ -629,11 +657,13 @@ fn test_where_exists_with_join() {
         name: "payments_join1".to_string(),
         columns: vec![
             ColumnDefinition {
+                foreign_key: None,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
             },
             ColumnDefinition {
+                foreign_key: None,
                 name: "order_id".into(),
                 data_type: DataType::Integer,
                 nullable: false,

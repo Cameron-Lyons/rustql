@@ -10,6 +10,7 @@ A lightweight SQL database engine written in Rust. RustQL is an educational impl
   - `CREATE TABLE` - Create tables with column definitions
   - `DROP TABLE` - Delete tables
   - `ALTER TABLE` - Add, drop, and rename columns
+  - **Foreign Key Constraints** - Enforce referential integrity with ON DELETE and ON UPDATE actions
 
 - **Data Manipulation Language (DML)**
   - `INSERT` - Insert single or multiple rows
@@ -248,16 +249,42 @@ DELETE FROM users WHERE age < 18;
 DELETE FROM users WHERE name = 'Charlie';
 ```
 
+### Foreign Key Constraints
+
+```sql
+CREATE TABLE orders (
+    id INTEGER,
+    user_id INTEGER FOREIGN KEY REFERENCES users(id)
+);
+
+CREATE TABLE order_items (
+    id INTEGER,
+    order_id INTEGER FOREIGN KEY REFERENCES orders(id) ON DELETE CASCADE
+);
+
+CREATE TABLE payments (
+    id INTEGER,
+    order_id INTEGER FOREIGN KEY REFERENCES orders(id) ON DELETE RESTRICT
+);
+
+CREATE TABLE comments (
+    id INTEGER,
+    post_id INTEGER FOREIGN KEY REFERENCES posts(id) ON DELETE SET NULL
+);
+
+CREATE TABLE order_history (
+    id INTEGER,
+    order_id INTEGER FOREIGN KEY REFERENCES orders(id) ON UPDATE CASCADE
+);
+```
+
 ### Altering Tables
 
 ```sql
--- Add a column
 ALTER TABLE users ADD COLUMN city TEXT;
 
--- Rename a column
 ALTER TABLE users RENAME COLUMN email TO email_address;
 
--- Drop a column
 ALTER TABLE users DROP COLUMN city;
 ```
 
@@ -285,10 +312,8 @@ The project is organized into several key modules:
 The project includes comprehensive tests in the `tests/` directory:
 
 ```bash
-# Run all tests
 cargo test
 
-# Run tests for specific modules
 cargo test integration_tests
 cargo test alter
 cargo test select
@@ -297,7 +322,6 @@ cargo test select
 ## Limitations
 
 - No indexes for performance optimization
-- No foreign key constraints
 - Limited to single-file JSON storage
 - No concurrent access support
 - No transactions or rollback capabilities
@@ -307,7 +331,6 @@ cargo test select
 Possible improvements for the project:
 
 - [ ] Index implementation for better performance
-- [ ] Foreign key constraints
 - [ ] Transaction support with rollback
 - [ ] B-tree or LSM-tree storage engine
 - [ ] Concurrency control

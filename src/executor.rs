@@ -68,19 +68,29 @@ fn execute_drop_table(stmt: DropTableStatement) -> Result<String, String> {
 
 fn execute_insert(stmt: InsertStatement) -> Result<String, String> {
     let mut db = get_database();
+
+    let table_ref = db
+        .tables
+        .get(&stmt.table)
+        .ok_or_else(|| format!("Table '{}' does not exist", stmt.table))?;
+
+    for values in &stmt.values {
+        if values.len() != table_ref.columns.len() {
+            return Err(format!(
+                "Column count mismatch: expected {}, got {}",
+                table_ref.columns.len(),
+                values.len()
+            ));
+        }
+        validate_foreign_keys_for_insert(&db, &table_ref.columns, values)?;
+    }
+
     let table = db
         .tables
         .get_mut(&stmt.table)
         .ok_or_else(|| format!("Table '{}' does not exist", stmt.table))?;
     let row_count = stmt.values.len();
     for values in stmt.values {
-        if values.len() != table.columns.len() {
-            return Err(format!(
-                "Column count mismatch: expected {}, got {}",
-                table.columns.len(),
-                values.len()
-            ));
-        }
         table.rows.push(values);
     }
     db.save()?;
@@ -702,7 +712,7 @@ fn format_aggregate_header(agg: &AggregateFunction) -> String {
     if let Some(alias) = &agg.alias {
         return alias.clone();
     }
-    
+
     let func_name = match agg.function {
         AggregateFunctionType::Count => "Count",
         AggregateFunctionType::Sum => "Sum",
@@ -710,15 +720,15 @@ fn format_aggregate_header(agg: &AggregateFunction) -> String {
         AggregateFunctionType::Min => "Min",
         AggregateFunctionType::Max => "Max",
     };
-    
+
     let distinct_str = if agg.distinct { "DISTINCT " } else { "" };
-    
+
     let expr_str = match &*agg.expr {
         Expression::Column(name) if name == "*" => "*".to_string(),
         Expression::Column(name) => name.clone(),
         _ => "*".to_string(), // Fallback for complex expressions
     };
-    
+
     format!("{}({}{})", func_name, distinct_str, expr_str)
 }
 
@@ -927,31 +937,44 @@ fn evaluate_having_value(
 
 fn execute_update(stmt: UpdateStatement) -> Result<String, String> {
     let mut db = get_database();
-    let table = db
+
+    let table_ref = db
         .tables
-        .get_mut(&stmt.table)
+        .get(&stmt.table)
         .ok_or_else(|| format!("Table '{}' does not exist", stmt.table))?;
-    let mut updated_count = 0;
-    for row in &mut table.rows {
+
+    let mut rows_to_update: Vec<(usize, Vec<Value>)> = Vec::new();
+    for (row_idx, row) in table_ref.rows.iter().enumerate() {
         let should_update = if let Some(ref where_expr) = stmt.where_clause {
-            evaluate_expression(None, where_expr, &table.columns, row)?
+            evaluate_expression(None, where_expr, &table_ref.columns, row)?
         } else {
             true
         };
         if should_update {
+            let mut updated_row = row.clone();
             for assignment in &stmt.assignments {
-                if let Some(idx) = table
+                if let Some(idx) = table_ref
                     .columns
                     .iter()
                     .position(|c| c.name == assignment.column)
                 {
-                    row[idx] = assignment.value.clone();
+                    updated_row[idx] = assignment.value.clone();
                 } else {
                     return Err(format!("Column '{}' not found", assignment.column));
                 }
             }
-            updated_count += 1;
+            validate_foreign_keys_for_update(&db, &table_ref.columns, &updated_row)?;
+            rows_to_update.push((row_idx, updated_row));
         }
+    }
+
+    let table = db
+        .tables
+        .get_mut(&stmt.table)
+        .ok_or_else(|| format!("Table '{}' does not exist", stmt.table))?;
+    let updated_count = rows_to_update.len();
+    for (row_idx, updated_row) in rows_to_update {
+        table.rows[row_idx] = updated_row;
     }
     db.save()?;
     Ok(format!("{} row(s) updated", updated_count))
@@ -959,6 +982,31 @@ fn execute_update(stmt: UpdateStatement) -> Result<String, String> {
 
 fn execute_delete(stmt: DeleteStatement) -> Result<String, String> {
     let mut db = get_database();
+
+    let (columns, rows_to_delete) = {
+        let table_ref = db
+            .tables
+            .get(&stmt.table)
+            .ok_or_else(|| format!("Table '{}' does not exist", stmt.table))?;
+
+        let mut rows: Vec<Vec<Value>> = Vec::new();
+        if let Some(ref where_expr) = stmt.where_clause {
+            for row in &table_ref.rows {
+                if evaluate_expression(None, where_expr, &table_ref.columns, row).unwrap_or(false) {
+                    rows.push(row.clone());
+                }
+            }
+        } else {
+            rows = table_ref.rows.clone();
+        }
+
+        (table_ref.columns.clone(), rows)
+    };
+
+    for row_to_delete in &rows_to_delete {
+        handle_foreign_keys_for_delete(&mut db, &stmt.table, &columns, row_to_delete)?;
+    }
+
     let table = db
         .tables
         .get_mut(&stmt.table)
@@ -2080,4 +2128,129 @@ fn execute_alter_table(stmt: AlterTableStatement) -> Result<String, String> {
             ))
         }
     }
+}
+
+fn validate_foreign_keys_for_insert(
+    db: &Database,
+    columns: &[ColumnDefinition],
+    row: &[Value],
+) -> Result<(), String> {
+    for (col_idx, col_def) in columns.iter().enumerate() {
+        if let Some(ref fk) = col_def.foreign_key {
+            let fk_value = &row[col_idx];
+
+            if matches!(fk_value, Value::Null) {
+                continue;
+            }
+
+            let ref_table = db.tables.get(&fk.referenced_table).ok_or_else(|| {
+                format!(
+                    "Foreign key constraint violation: Referenced table '{}' does not exist",
+                    fk.referenced_table
+                )
+            })?;
+
+            let ref_col_idx = ref_table
+                .columns
+                .iter()
+                .position(|c| c.name == fk.referenced_column)
+                .ok_or_else(|| {
+                    format!(
+                        "Foreign key constraint violation: Referenced column '{}' does not exist in table '{}'",
+                        fk.referenced_column, fk.referenced_table
+                    )
+                })?;
+
+            let value_exists = ref_table.rows.iter().any(|ref_row| {
+                ref_row
+                    .get(ref_col_idx)
+                    .map(|v| v == fk_value)
+                    .unwrap_or(false)
+            });
+
+            if !value_exists {
+                return Err(format!(
+                    "Foreign key constraint violation: Value {:?} does not exist in referenced table '{}'.{}",
+                    fk_value, fk.referenced_table, fk.referenced_column
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_foreign_keys_for_update(
+    db: &Database,
+    columns: &[ColumnDefinition],
+    row: &[Value],
+) -> Result<(), String> {
+    validate_foreign_keys_for_insert(db, columns, row)
+}
+
+fn handle_foreign_keys_for_delete(
+    db: &mut Database,
+    table_name: &str,
+    columns: &[ColumnDefinition],
+    row_to_delete: &[Value],
+) -> Result<(), String> {
+    for (other_table_name, other_table) in db.tables.iter_mut() {
+        if other_table_name == table_name {
+            continue;
+        }
+
+        for (col_idx, col_def) in other_table.columns.iter().enumerate() {
+            if let Some(ref fk) = col_def.foreign_key {
+                if fk.referenced_table == table_name {
+                    let ref_col_idx = columns
+                        .iter()
+                        .position(|c| c.name == fk.referenced_column)
+                        .ok_or_else(|| {
+                            format!(
+                                "Foreign key constraint: Referenced column '{}' not found in table '{}'",
+                                fk.referenced_column, table_name
+                            )
+                        })?;
+
+                    let ref_value = &row_to_delete[ref_col_idx];
+
+                    let mut rows_to_modify: Vec<usize> = Vec::new();
+                    for (row_idx, other_row) in other_table.rows.iter().enumerate() {
+                        if other_row
+                            .get(col_idx)
+                            .map(|v| v == ref_value)
+                            .unwrap_or(false)
+                        {
+                            rows_to_modify.push(row_idx);
+                        }
+                    }
+
+                    match fk.on_delete {
+                        ForeignKeyAction::Restrict | ForeignKeyAction::NoAction => {
+                            if !rows_to_modify.is_empty() {
+                                return Err(format!(
+                                    "Foreign key constraint violation: Cannot delete row from '{}' because it is referenced by '{}'",
+                                    table_name, other_table_name
+                                ));
+                            }
+                        }
+                        ForeignKeyAction::Cascade => {
+                            rows_to_modify.sort();
+                            rows_to_modify.reverse();
+                            for row_idx in rows_to_modify {
+                                other_table.rows.remove(row_idx);
+                            }
+                        }
+                        ForeignKeyAction::SetNull => {
+                            for row_idx in rows_to_modify {
+                                if let Some(row) = other_table.rows.get_mut(row_idx) {
+                                    row[col_idx] = Value::Null;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
 }

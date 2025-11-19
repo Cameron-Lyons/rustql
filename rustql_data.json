@@ -5,12 +5,14 @@
         {
           "name": "id",
           "data_type": "Integer",
-          "nullable": false
+          "nullable": false,
+          "foreign_key": null
         },
         {
           "name": "name",
           "data_type": "Text",
-          "nullable": false
+          "nullable": false,
+          "foreign_key": null
         }
       ],
       "rows": []

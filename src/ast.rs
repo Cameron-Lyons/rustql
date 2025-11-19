@@ -102,6 +102,23 @@ pub struct ColumnDefinition {
     pub name: String,
     pub data_type: DataType,
     pub nullable: bool,
+    pub foreign_key: Option<ForeignKeyConstraint>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ForeignKeyConstraint {
+    pub referenced_table: String,
+    pub referenced_column: String,
+    pub on_delete: ForeignKeyAction,
+    pub on_update: ForeignKeyAction,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum ForeignKeyAction {
+    Restrict,
+    Cascade,
+    SetNull,
+    NoAction,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
