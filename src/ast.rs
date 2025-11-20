@@ -43,9 +43,16 @@ pub enum JoinType {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Column {
     All,
-    Named { name: String, alias: Option<String> },
+    Named {
+        name: String,
+        alias: Option<String>,
+    },
     Function(AggregateFunction),
     Subquery(Box<SelectStatement>),
+    Expression {
+        expr: Expression,
+        alias: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]

@@ -74,14 +74,56 @@ fn execute_insert(stmt: InsertStatement) -> Result<String, String> {
         .get(&stmt.table)
         .ok_or_else(|| format!("Table '{}' does not exist", stmt.table))?;
 
-    for values in &stmt.values {
-        if values.len() != table_ref.columns.len() {
-            return Err(format!(
-                "Column count mismatch: expected {}, got {}",
-                table_ref.columns.len(),
-                values.len()
-            ));
+    let mapped_values: Vec<Vec<Value>> = if let Some(ref specified_columns) = stmt.columns {
+        for col_name in specified_columns {
+            if !table_ref.columns.iter().any(|c| c.name == *col_name) {
+                return Err(format!(
+                    "Column '{}' does not exist in table '{}'",
+                    col_name, stmt.table
+                ));
+            }
         }
+
+        stmt.values
+            .iter()
+            .map(|values| {
+                if values.len() != specified_columns.len() {
+                    return Err(format!(
+                        "Column count mismatch: expected {} values for {} columns, got {}",
+                        specified_columns.len(),
+                        specified_columns.len(),
+                        values.len()
+                    ));
+                }
+
+                let mut full_row = vec![Value::Null; table_ref.columns.len()];
+
+                for (idx, col_name) in specified_columns.iter().enumerate() {
+                    let col_pos = table_ref
+                        .columns
+                        .iter()
+                        .position(|c| c.name == *col_name)
+                        .unwrap();
+                    full_row[col_pos] = values[idx].clone();
+                }
+
+                Ok(full_row)
+            })
+            .collect::<Result<Vec<Vec<Value>>, String>>()?
+    } else {
+        for values in &stmt.values {
+            if values.len() != table_ref.columns.len() {
+                return Err(format!(
+                    "Column count mismatch: expected {}, got {}",
+                    table_ref.columns.len(),
+                    values.len()
+                ));
+            }
+        }
+        stmt.values
+    };
+
+    for values in &mapped_values {
         validate_foreign_keys_for_insert(&db, &table_ref.columns, values)?;
     }
 
@@ -89,8 +131,8 @@ fn execute_insert(stmt: InsertStatement) -> Result<String, String> {
         .tables
         .get_mut(&stmt.table)
         .ok_or_else(|| format!("Table '{}' does not exist", stmt.table))?;
-    let row_count = stmt.values.len();
-    for values in stmt.values {
+    let row_count = mapped_values.len();
+    for values in mapped_values {
         table.rows.push(values);
     }
     db.save()?;
@@ -158,6 +200,10 @@ fn execute_select(stmt: SelectStatement) -> Result<String, String> {
                 }
                 Column::Subquery(_) => ("<subquery>".to_string(), col.clone()),
                 Column::Function(_) => ("<aggregate>".to_string(), col.clone()),
+                Column::Expression { alias, .. } => (
+                    alias.clone().unwrap_or_else(|| "<expression>".to_string()),
+                    col.clone(),
+                ),
                 Column::All => unreachable!(),
             })
             .collect()
@@ -195,6 +241,9 @@ fn execute_select(stmt: SelectStatement) -> Result<String, String> {
                 }
                 Column::Subquery(subquery) => {
                     eval_scalar_subquery_with_outer(db_ref, subquery, &table.columns, row)?
+                }
+                Column::Expression { expr, .. } => {
+                    evaluate_value_expression(expr, &table.columns, row)?
                 }
                 Column::Function(_) => {
                     return Err(
@@ -280,6 +329,10 @@ fn execute_select_with_aggregates(
                 let header = alias.clone().unwrap_or_else(|| name.clone());
                 result.push_str(&format!("{}\t", header));
             }
+            Column::Expression { alias, .. } => {
+                let header = alias.clone().unwrap_or_else(|| "<expression>".to_string());
+                result.push_str(&format!("{}\t", header));
+            }
             _ => {}
         }
     }
@@ -351,6 +404,10 @@ fn execute_select_with_grouping(
                 let header = alias.clone().unwrap_or_else(|| name.clone());
                 column_specs.push((header, col.clone()));
             }
+            Column::Expression { alias, .. } => {
+                let header = alias.clone().unwrap_or_else(|| "<expression>".to_string());
+                column_specs.push((header, col.clone()));
+            }
             _ => {}
         }
     }
@@ -399,6 +456,18 @@ fn execute_select_with_grouping(
                     } else {
                         return Err(format!("Column '{}' must appear in GROUP BY clause", name));
                     }
+                }
+                Column::Expression { expr, .. } => {
+                    let value = evaluate_group_order_expression(
+                        expr,
+                        table,
+                        &group_rows,
+                        &column_specs,
+                        &projected_row,
+                        &group_by_normalized_with_indices,
+                        false,
+                    )?;
+                    projected_row.push(value);
                 }
                 _ => {}
             }
@@ -1186,7 +1255,31 @@ fn evaluate_value_expression(
             Ok(row[idx].clone())
         }
         Expression::Value(val) => Ok(val.clone()),
-        _ => Err("Complex expressions not yet supported".to_string()),
+        Expression::BinaryOp { left, op, right } => {
+            let left_val = evaluate_value_expression(left, columns, row)?;
+            let right_val = evaluate_value_expression(right, columns, row)?;
+            match op {
+                BinaryOperator::Plus
+                | BinaryOperator::Minus
+                | BinaryOperator::Multiply
+                | BinaryOperator::Divide => apply_arithmetic(&left_val, &right_val, op),
+                _ => {
+                    Err("Only arithmetic operators are supported in SELECT expressions".to_string())
+                }
+            }
+        }
+        Expression::UnaryOp { op, expr } => {
+            let val = evaluate_value_expression(expr, columns, row)?;
+            match op {
+                UnaryOperator::Minus => match val {
+                    Value::Integer(n) => Ok(Value::Integer(-n)),
+                    Value::Float(f) => Ok(Value::Float(-f)),
+                    _ => Err("Unary minus only supported for numeric types".to_string()),
+                },
+                _ => Err("Unsupported unary operator in SELECT expression".to_string()),
+            }
+        }
+        _ => Err("Complex expressions not yet supported in SELECT".to_string()),
     }
 }
 
@@ -1286,6 +1379,10 @@ fn eval_subquery_values(db: &Database, subquery: &SelectStatement) -> Result<Vec
 
     match &subquery.columns[0] {
         Column::All => Err("Subquery in IN cannot use *".to_string()),
+        Column::Expression { .. } => Err("Subquery in IN cannot use expressions".to_string()),
+        Column::Subquery(_) => Err("Subquery in IN cannot use nested subqueries".to_string()),
+        Column::Function(_) => Err("Subquery in IN cannot use aggregate functions".to_string()),
+        Column::Expression { .. } => Err("Subquery in IN cannot use expressions".to_string()),
         Column::Named { name, .. } => {
             if let Some(group_by_cols) = &subquery.group_by {
                 let group_by_indices: Vec<usize> = group_by_cols
@@ -1664,6 +1761,12 @@ fn eval_scalar_subquery_with_outer(
         apply_order_and_slice(&mut candidate_rows)?;
 
         return match &subquery.columns[0] {
+            Column::All => Err("Scalar subquery cannot use *".to_string()),
+            Column::Expression { .. } => Err("Scalar subquery cannot use expressions".to_string()),
+            Column::Function(_) => {
+                Err("Scalar subquery cannot use aggregate functions".to_string())
+            }
+            Column::Subquery(_) => Err("Scalar subquery cannot use nested subqueries".to_string()),
             Column::Named { name, .. } => {
                 let col_idx = combined_columns
                     .iter()
@@ -1850,6 +1953,15 @@ fn eval_scalar_subquery_with_outer(
         for combined_row in &candidate_rows {
             let val = match &subquery.columns[0] {
                 Column::All => return Err("Scalar subquery cannot use *".to_string()),
+                Column::Expression { .. } => {
+                    return Err("Scalar subquery cannot use expressions".to_string());
+                }
+                Column::Function(_) => {
+                    return Err("Scalar subquery cannot use aggregate functions".to_string());
+                }
+                Column::Subquery(_) => {
+                    return Err("Scalar subquery cannot use nested subqueries".to_string());
+                }
                 Column::Named { name, .. } => {
                     let col_idx = combined_columns
                         .iter()
@@ -1864,10 +1976,7 @@ fn eval_scalar_subquery_with_outer(
                         .ok_or_else(|| format!("Column '{}' not found", name))?;
                     combined_row[col_idx].clone()
                 }
-                Column::Function(_) => {
-                    unreachable!()
-                }
-                Column::Subquery(_) => {
+                Column::Function(_) | Column::Subquery(_) | Column::Expression { .. } => {
                     unreachable!()
                 }
             };

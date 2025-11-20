@@ -5,17 +5,35 @@
         {
           "name": "id",
           "data_type": "Integer",
-          "nullable": false,
+          "nullable": true,
           "foreign_key": null
         },
         {
           "name": "name",
           "data_type": "Text",
-          "nullable": false,
+          "nullable": true,
+          "foreign_key": null
+        },
+        {
+          "name": "age",
+          "data_type": "Integer",
+          "nullable": true,
           "foreign_key": null
         }
       ],
-      "rows": []
+      "rows": [
+        [
+          {
+            "Integer": 1
+          },
+          {
+            "Text": "Alice"
+          },
+          {
+            "Integer": 25
+          }
+        ]
+      ]
     }
   }
 }

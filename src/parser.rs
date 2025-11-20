@@ -204,26 +204,57 @@ impl Parser {
                                 );
                             }
                         } else {
-                            return Err("Unexpected '(' in column list".to_string());
+                            let saved_pos = self.current;
+                            match self.parse_column_expression() {
+                                Ok((expr, alias)) => Column::Expression { expr, alias },
+                                Err(_) => {
+                                    self.current = saved_pos;
+                                    return Err("Unexpected '(' in column list".to_string());
+                                }
+                            }
                         }
                     }
-                    Token::Identifier(name) => {
-                        let name = name.clone();
-                        self.advance();
-
-                        let alias = if *self.current_token() == Token::As {
-                            self.advance();
-                            match self.advance() {
-                                Token::Identifier(alias) => Some(alias),
-                                _ => return Err("Expected alias after AS".to_string()),
+                    _ => {
+                        let saved_pos = self.current;
+                        match self.parse_column_expression() {
+                            Ok((expr, alias)) => {
+                                if let Expression::Column(name) = &expr {
+                                    Column::Named {
+                                        name: name.clone(),
+                                        alias,
+                                    }
+                                } else {
+                                    Column::Expression { expr, alias }
+                                }
                             }
-                        } else {
-                            None
-                        };
+                            Err(_) => {
+                                self.current = saved_pos;
+                                match self.current_token() {
+                                    Token::Identifier(name) => {
+                                        let name = name.clone();
+                                        self.advance();
 
-                        Column::Named { name, alias }
+                                        let alias = if *self.current_token() == Token::As {
+                                            self.advance();
+                                            match self.advance() {
+                                                Token::Identifier(alias) => Some(alias),
+                                                _ => {
+                                                    return Err(
+                                                        "Expected alias after AS".to_string()
+                                                    );
+                                                }
+                                            }
+                                        } else {
+                                            None
+                                        };
+
+                                        Column::Named { name, alias }
+                                    }
+                                    _ => break,
+                                }
+                            }
+                        }
                     }
-                    _ => break,
                 };
 
                 columns.push(column);
@@ -240,6 +271,127 @@ impl Parser {
         }
 
         Ok(columns)
+    }
+
+    fn parse_column_expression(&mut self) -> Result<(Expression, Option<String>), String> {
+        let expr = self.parse_arithmetic_expression()?;
+
+        let alias = if *self.current_token() == Token::As {
+            self.advance();
+            match self.advance() {
+                Token::Identifier(alias) => Some(alias),
+                _ => return Err("Expected alias after AS".to_string()),
+            }
+        } else {
+            None
+        };
+
+        Ok((expr, alias))
+    }
+
+    fn parse_arithmetic_expression(&mut self) -> Result<Expression, String> {
+        self.parse_arithmetic_term()
+    }
+
+    fn parse_arithmetic_term(&mut self) -> Result<Expression, String> {
+        let mut expr = self.parse_arithmetic_factor()?;
+
+        loop {
+            let op = match self.current_token() {
+                Token::Plus => BinaryOperator::Plus,
+                Token::Minus => BinaryOperator::Minus,
+                _ => break,
+            };
+
+            self.advance();
+            let right = self.parse_arithmetic_factor()?;
+            expr = Expression::BinaryOp {
+                left: Box::new(expr),
+                op,
+                right: Box::new(right),
+            };
+        }
+
+        Ok(expr)
+    }
+
+    fn parse_arithmetic_factor(&mut self) -> Result<Expression, String> {
+        let mut expr = self.parse_arithmetic_unary()?;
+
+        loop {
+            let op = match self.current_token() {
+                Token::Star => {
+                    self.advance();
+                    BinaryOperator::Multiply
+                }
+                Token::Divide => {
+                    self.advance();
+                    BinaryOperator::Divide
+                }
+                _ => break,
+            };
+
+            let right = self.parse_arithmetic_unary()?;
+            expr = Expression::BinaryOp {
+                left: Box::new(expr),
+                op,
+                right: Box::new(right),
+            };
+        }
+
+        Ok(expr)
+    }
+
+    fn parse_arithmetic_unary(&mut self) -> Result<Expression, String> {
+        match self.current_token() {
+            Token::Minus => {
+                self.advance();
+                Ok(Expression::UnaryOp {
+                    op: UnaryOperator::Minus,
+                    expr: Box::new(self.parse_arithmetic_unary()?),
+                })
+            }
+            Token::Plus => {
+                self.advance();
+                self.parse_arithmetic_unary()
+            }
+            _ => self.parse_arithmetic_primary(),
+        }
+    }
+
+    fn parse_arithmetic_primary(&mut self) -> Result<Expression, String> {
+        match self.current_token() {
+            Token::LeftParen => {
+                self.advance();
+                let expr = self.parse_arithmetic_expression()?;
+                self.consume(Token::RightParen)?;
+                Ok(expr)
+            }
+            Token::Identifier(name) => {
+                let name = name.clone();
+                self.advance();
+                Ok(Expression::Column(name))
+            }
+            Token::Number(n) => {
+                let n = *n;
+                self.advance();
+                Ok(Expression::Value(Value::Integer(n)))
+            }
+            Token::Float(n) => {
+                let n = *n;
+                self.advance();
+                Ok(Expression::Value(Value::Float(n)))
+            }
+            Token::StringLiteral(s) => {
+                let s = s.clone();
+                self.advance();
+                Ok(Expression::Value(Value::Text(s)))
+            }
+            _ => Err(format!(
+                "Unexpected token in expression: {:?}",
+                self.current_token()
+            )),
+        }
     }
 
     fn parse_aggregate_function(&mut self) -> Result<Column, String> {
