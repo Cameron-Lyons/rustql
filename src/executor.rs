@@ -96,7 +96,11 @@ fn execute_insert(stmt: InsertStatement) -> Result<String, String> {
                     ));
                 }
 
-                let mut full_row = vec![Value::Null; table_ref.columns.len()];
+                let mut full_row: Vec<Value> = table_ref
+                    .columns
+                    .iter()
+                    .map(|col| col.default_value.clone().unwrap_or(Value::Null))
+                    .collect();
 
                 for (idx, col_name) in specified_columns.iter().enumerate() {
                     let col_pos = table_ref
@@ -111,17 +115,44 @@ fn execute_insert(stmt: InsertStatement) -> Result<String, String> {
             })
             .collect::<Result<Vec<Vec<Value>>, String>>()?
     } else {
-        for values in &stmt.values {
-            if values.len() != table_ref.columns.len() {
-                return Err(format!(
-                    "Column count mismatch: expected {}, got {}",
-                    table_ref.columns.len(),
-                    values.len()
-                ));
-            }
-        }
         stmt.values
+            .iter()
+            .map(|values| {
+                let mut full_row: Vec<Value> = table_ref
+                    .columns
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, col)| {
+                        if idx < values.len() {
+                            values[idx].clone()
+                        } else {
+                            col.default_value.clone().unwrap_or(Value::Null)
+                        }
+                    })
+                    .collect();
+
+                for (idx, val) in values.iter().enumerate() {
+                    if idx < full_row.len() {
+                        full_row[idx] = val.clone();
+                    }
+                }
+
+                if full_row.len() != table_ref.columns.len() {
+                    return Err(format!(
+                        "Column count mismatch: expected {}, got {}",
+                        table_ref.columns.len(),
+                        values.len()
+                    ));
+                }
+
+                Ok(full_row)
+            })
+            .collect::<Result<Vec<Vec<Value>>, String>>()?
     };
+
+    for values in &mapped_values {
+        validate_primary_keys_for_insert(&db, &table_ref.columns, values, &stmt.table)?;
+    }
 
     for values in &mapped_values {
         validate_foreign_keys_for_insert(&db, &table_ref.columns, values)?;
@@ -141,6 +172,23 @@ fn execute_insert(stmt: InsertStatement) -> Result<String, String> {
 
 fn execute_select(stmt: SelectStatement) -> Result<String, String> {
     let db = get_database();
+
+    if let Some(ref union_stmt) = stmt.union {
+        let left_stmt = SelectStatement {
+            distinct: stmt.distinct,
+            columns: stmt.columns.clone(),
+            from: stmt.from.clone(),
+            joins: stmt.joins.clone(),
+            where_clause: stmt.where_clause.clone(),
+            group_by: stmt.group_by.clone(),
+            having: stmt.having.clone(),
+            order_by: stmt.order_by.clone(),
+            limit: stmt.limit,
+            offset: stmt.offset,
+            union: None,
+        };
+        return execute_union(left_stmt, union_stmt.as_ref().clone(), &db);
+    }
 
     if !stmt.joins.is_empty() {
         return execute_select_with_joins(stmt, &db);
@@ -311,6 +359,165 @@ fn execute_select(stmt: SelectStatement) -> Result<String, String> {
     }
 
     Ok(result)
+}
+
+fn execute_union(
+    left_stmt: SelectStatement,
+    right_stmt: SelectStatement,
+    db: &Database,
+) -> Result<String, String> {
+    let mut left_stmt_internal = left_stmt;
+    left_stmt_internal.union = None;
+    let mut right_stmt_internal = right_stmt;
+    right_stmt_internal.union = None;
+
+    let left_result = execute_select_internal(left_stmt_internal, db)?;
+    let right_result = execute_select_internal(right_stmt_internal, db)?;
+
+    use std::collections::BTreeSet;
+    let mut seen: BTreeSet<Vec<Value>> = BTreeSet::new();
+    let mut combined: Vec<Vec<Value>> = Vec::new();
+
+    for row in left_result.rows {
+        if !seen.contains(&row) {
+            seen.insert(row.clone());
+            combined.push(row);
+        }
+    }
+
+    for row in right_result.rows {
+        if !seen.contains(&row) {
+            seen.insert(row.clone());
+            combined.push(row);
+        }
+    }
+
+    let mut result = String::new();
+    for (idx, header) in left_result.headers.iter().enumerate() {
+        if idx > 0 {
+            result.push('\t');
+        }
+        result.push_str(header);
+    }
+    result.push('\n');
+    result.push_str(&"-".repeat(40));
+    result.push('\n');
+
+    let offset = 0;
+    let limit = combined.len();
+
+    let mut emitted = 0usize;
+    let mut skipped = 0usize;
+    for row in combined {
+        if skipped < offset {
+            skipped += 1;
+            continue;
+        }
+        if emitted >= limit {
+            break;
+        }
+        for (idx, val) in row.iter().enumerate() {
+            if idx > 0 {
+                result.push('\t');
+            }
+            result.push_str(&format_value(val));
+        }
+        result.push('\n');
+        emitted += 1;
+    }
+
+    Ok(result)
+}
+
+struct SelectResult {
+    headers: Vec<String>,
+    rows: Vec<Vec<Value>>,
+}
+
+fn execute_select_internal(stmt: SelectStatement, db: &Database) -> Result<SelectResult, String> {
+    if !stmt.joins.is_empty() {
+        return Err("UNION with JOINs is not yet supported".to_string());
+    }
+
+    let table = db
+        .tables
+        .get(&stmt.from)
+        .ok_or_else(|| format!("Table '{}' does not exist", stmt.from))?;
+
+    let mut filtered_rows: Vec<&Vec<Value>> = Vec::new();
+    for row in &table.rows {
+        let include_row = if let Some(ref where_expr) = stmt.where_clause {
+            evaluate_expression(Some(db), where_expr, &table.columns, row)?
+        } else {
+            true
+        };
+        if include_row {
+            filtered_rows.push(row);
+        }
+    }
+
+    let headers: Vec<String> = if matches!(stmt.columns[0], Column::All) {
+        table.columns.iter().map(|c| c.name.clone()).collect()
+    } else {
+        stmt.columns
+            .iter()
+            .map(|col| match col {
+                Column::Named { name, alias } => alias.clone().unwrap_or_else(|| name.clone()),
+                Column::Function(agg) => agg
+                    .alias
+                    .clone()
+                    .unwrap_or_else(|| format!("{:?}", agg.function)),
+                _ => "<column>".to_string(),
+            })
+            .collect()
+    };
+
+    let mut rows: Vec<Vec<Value>> = Vec::new();
+    for row_ref in &filtered_rows {
+        let row = *row_ref;
+        let mut projected: Vec<Value> = Vec::new();
+
+        if matches!(stmt.columns[0], Column::All) {
+            projected = row.clone();
+        } else {
+            for col in &stmt.columns {
+                let val = match col {
+                    Column::All => unreachable!(),
+                    Column::Named { name, .. } => {
+                        let column_name = if name.contains('.') {
+                            name.split('.').next_back().unwrap_or(name)
+                        } else {
+                            name.as_str()
+                        };
+                        let idx = table
+                            .columns
+                            .iter()
+                            .position(|c| c.name == column_name)
+                            .ok_or_else(|| format!("Column '{}' not found", name))?;
+                        row[idx].clone()
+                    }
+                    Column::Function(_) => {
+                        return Err(
+                            "UNION with aggregate functions is not yet supported".to_string()
+                        );
+                    }
+                    Column::Subquery(_) => {
+                        return Err(
+                            "UNION with subqueries in SELECT is not yet supported".to_string()
+                        );
+                    }
+                    Column::Expression { expr, .. } => {
+                        evaluate_value_expression(expr, &table.columns, row)?
+                    }
+                };
+                projected.push(val);
+            }
+        }
+
+        rows.push(projected);
+    }
+
+    Ok(SelectResult { headers, rows })
 }
 
 fn execute_select_with_aggregates(
@@ -2237,6 +2444,41 @@ fn execute_alter_table(stmt: AlterTableStatement) -> Result<String, String> {
             ))
         }
     }
+}
+
+fn validate_primary_keys_for_insert(
+    db: &Database,
+    columns: &[ColumnDefinition],
+    row: &[Value],
+    table_name: &str,
+) -> Result<(), String> {
+    for (col_idx, col_def) in columns.iter().enumerate() {
+        if col_def.primary_key {
+            let pk_value = &row[col_idx];
+
+            if matches!(pk_value, Value::Null) {
+                return Err(format!(
+                    "Primary key constraint violation: Column '{}' cannot be NULL",
+                    col_def.name
+                ));
+            }
+
+            let table = db
+                .tables
+                .get(table_name)
+                .ok_or_else(|| format!("Table '{}' does not exist", table_name))?;
+
+            for existing_row in &table.rows {
+                if existing_row[col_idx] == *pk_value {
+                    return Err(format!(
+                        "Primary key constraint violation: Duplicate value for column '{}'",
+                        col_def.name
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn validate_foreign_keys_for_insert(

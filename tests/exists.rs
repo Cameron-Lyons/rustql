@@ -7,12 +7,16 @@ fn test_where_exists_true() {
         name: "users_ex1".to_string(),
         columns: vec![
             ColumnDefinition {
+                primary_key: false,
+                default_value: None,
                 foreign_key: None,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
             },
             ColumnDefinition {
+                primary_key: false,
+                default_value: None,
                 foreign_key: None,
                 name: "name".into(),
                 data_type: DataType::Text,
@@ -36,12 +40,16 @@ fn test_where_exists_true() {
         name: "orders_ex1".to_string(),
         columns: vec![
             ColumnDefinition {
+                primary_key: false,
+                default_value: None,
                 foreign_key: None,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
             },
             ColumnDefinition {
+                primary_key: false,
+                default_value: None,
                 foreign_key: None,
                 name: "amount".into(),
                 data_type: DataType::Float,
@@ -62,6 +70,7 @@ fn test_where_exists_true() {
     .unwrap();
 
     let sub = SelectStatement {
+        union: None,
         distinct: false,
         columns: vec![Column::All],
         from: "orders_ex1".into(),
@@ -79,6 +88,7 @@ fn test_where_exists_true() {
     };
 
     let stmt = Statement::Select(SelectStatement {
+        union: None,
         distinct: false,
         from: "users_ex1".into(),
         columns: vec![Column::All],
@@ -102,12 +112,16 @@ fn test_where_exists_false_filters_all() {
         name: "users_ex2".to_string(),
         columns: vec![
             ColumnDefinition {
+                primary_key: false,
+                default_value: None,
                 foreign_key: None,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
             },
             ColumnDefinition {
+                primary_key: false,
+                default_value: None,
                 foreign_key: None,
                 name: "name".into(),
                 data_type: DataType::Text,
@@ -131,12 +145,16 @@ fn test_where_exists_false_filters_all() {
         name: "orders_ex2".to_string(),
         columns: vec![
             ColumnDefinition {
+                primary_key: false,
+                default_value: None,
                 foreign_key: None,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
             },
             ColumnDefinition {
+                primary_key: false,
+                default_value: None,
                 foreign_key: None,
                 name: "amount".into(),
                 data_type: DataType::Float,
@@ -157,6 +175,7 @@ fn test_where_exists_false_filters_all() {
     .unwrap();
 
     let sub = SelectStatement {
+        union: None,
         distinct: false,
         columns: vec![Column::All],
         from: "orders_ex2".into(),
@@ -174,6 +193,7 @@ fn test_where_exists_false_filters_all() {
     };
 
     let stmt = Statement::Select(SelectStatement {
+        union: None,
         distinct: false,
         from: "users_ex2".into(),
         columns: vec![Column::All],
@@ -197,12 +217,16 @@ fn test_where_not_exists_true_filters_all() {
         name: "t_users_ne1".to_string(),
         columns: vec![
             ColumnDefinition {
+                primary_key: false,
+                default_value: None,
                 foreign_key: None,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
             },
             ColumnDefinition {
+                primary_key: false,
+                default_value: None,
                 foreign_key: None,
                 name: "name".into(),
                 data_type: DataType::Text,
@@ -226,12 +250,16 @@ fn test_where_not_exists_true_filters_all() {
         name: "t_orders_ne1".to_string(),
         columns: vec![
             ColumnDefinition {
+                primary_key: false,
+                default_value: None,
                 foreign_key: None,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
             },
             ColumnDefinition {
+                primary_key: false,
+                default_value: None,
                 foreign_key: None,
                 name: "amount".into(),
                 data_type: DataType::Float,
@@ -252,6 +280,7 @@ fn test_where_not_exists_true_filters_all() {
     .unwrap();
 
     let sub = SelectStatement {
+        union: None,
         distinct: false,
         columns: vec![Column::All],
         from: "t_orders_ne1".into(),
@@ -269,6 +298,7 @@ fn test_where_not_exists_true_filters_all() {
     };
 
     let stmt = Statement::Select(SelectStatement {
+        union: None,
         distinct: false,
         from: "t_users_ne1".into(),
         columns: vec![Column::All],
@@ -295,12 +325,16 @@ fn test_where_exists_correlated_true() {
         name: "users_corr1".to_string(),
         columns: vec![
             ColumnDefinition {
+                primary_key: false,
+                default_value: None,
                 foreign_key: None,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
             },
             ColumnDefinition {
+                primary_key: false,
+                default_value: None,
                 foreign_key: None,
                 name: "name".into(),
                 data_type: DataType::Text,
@@ -324,12 +358,16 @@ fn test_where_exists_correlated_true() {
         name: "orders_corr1".to_string(),
         columns: vec![
             ColumnDefinition {
+                primary_key: false,
+                default_value: None,
                 foreign_key: None,
                 name: "user_id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
             },
             ColumnDefinition {
+                primary_key: false,
+                default_value: None,
                 foreign_key: None,
                 name: "amount".into(),
                 data_type: DataType::Float,
@@ -350,6 +388,7 @@ fn test_where_exists_correlated_true() {
     .unwrap();
 
     let sub = SelectStatement {
+        union: None,
         distinct: false,
         columns: vec![Column::All],
         from: "orders_corr1".into(),
@@ -375,6 +414,7 @@ fn test_where_exists_correlated_true() {
     };
 
     let stmt = Statement::Select(SelectStatement {
+        union: None,
         distinct: false,
         from: "users_corr1".into(),
         columns: vec![Column::All],
@@ -398,12 +438,16 @@ fn test_where_not_exists_false() {
         name: "t_users_ne2".to_string(),
         columns: vec![
             ColumnDefinition {
+                primary_key: false,
+                default_value: None,
                 foreign_key: None,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
             },
             ColumnDefinition {
+                primary_key: false,
+                default_value: None,
                 foreign_key: None,
                 name: "name".into(),
                 data_type: DataType::Text,
@@ -427,12 +471,16 @@ fn test_where_not_exists_false() {
         name: "t_orders_ne2".to_string(),
         columns: vec![
             ColumnDefinition {
+                primary_key: false,
+                default_value: None,
                 foreign_key: None,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
             },
             ColumnDefinition {
+                primary_key: false,
+                default_value: None,
                 foreign_key: None,
                 name: "amount".into(),
                 data_type: DataType::Float,
@@ -453,6 +501,7 @@ fn test_where_not_exists_false() {
     .unwrap();
 
     let sub = SelectStatement {
+        union: None,
         distinct: false,
         columns: vec![Column::All],
         from: "t_orders_ne2".into(),
@@ -470,6 +519,7 @@ fn test_where_not_exists_false() {
     };
 
     let stmt = Statement::Select(SelectStatement {
+        union: None,
         distinct: false,
         from: "t_users_ne2".into(),
         columns: vec![Column::All],
@@ -496,12 +546,16 @@ fn test_where_exists_correlated_false() {
         name: "users_corr2".to_string(),
         columns: vec![
             ColumnDefinition {
+                primary_key: false,
+                default_value: None,
                 foreign_key: None,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
             },
             ColumnDefinition {
+                primary_key: false,
+                default_value: None,
                 foreign_key: None,
                 name: "name".into(),
                 data_type: DataType::Text,
@@ -525,12 +579,16 @@ fn test_where_exists_correlated_false() {
         name: "orders_corr2".to_string(),
         columns: vec![
             ColumnDefinition {
+                primary_key: false,
+                default_value: None,
                 foreign_key: None,
                 name: "user_id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
             },
             ColumnDefinition {
+                primary_key: false,
+                default_value: None,
                 foreign_key: None,
                 name: "amount".into(),
                 data_type: DataType::Float,
@@ -551,6 +609,7 @@ fn test_where_exists_correlated_false() {
     .unwrap();
 
     let sub = SelectStatement {
+        union: None,
         distinct: false,
         columns: vec![Column::All],
         from: "orders_corr2".into(),
@@ -576,6 +635,7 @@ fn test_where_exists_correlated_false() {
     };
 
     let stmt = Statement::Select(SelectStatement {
+        union: None,
         distinct: false,
         from: "users_corr2".into(),
         columns: vec![Column::All],
@@ -599,12 +659,16 @@ fn test_where_exists_with_join() {
         name: "users_join1".to_string(),
         columns: vec![
             ColumnDefinition {
+                primary_key: false,
+                default_value: None,
                 foreign_key: None,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
             },
             ColumnDefinition {
+                primary_key: false,
+                default_value: None,
                 foreign_key: None,
                 name: "name".into(),
                 data_type: DataType::Text,
@@ -628,12 +692,16 @@ fn test_where_exists_with_join() {
         name: "orders_join1".to_string(),
         columns: vec![
             ColumnDefinition {
+                primary_key: false,
+                default_value: None,
                 foreign_key: None,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
             },
             ColumnDefinition {
+                primary_key: false,
+                default_value: None,
                 foreign_key: None,
                 name: "user_id".into(),
                 data_type: DataType::Integer,
@@ -657,12 +725,16 @@ fn test_where_exists_with_join() {
         name: "payments_join1".to_string(),
         columns: vec![
             ColumnDefinition {
+                primary_key: false,
+                default_value: None,
                 foreign_key: None,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
             },
             ColumnDefinition {
+                primary_key: false,
+                default_value: None,
                 foreign_key: None,
                 name: "order_id".into(),
                 data_type: DataType::Integer,
@@ -680,6 +752,7 @@ fn test_where_exists_with_join() {
     .unwrap();
 
     let sub = SelectStatement {
+        union: None,
         distinct: false,
         columns: vec![Column::All],
         from: "orders_join1".into(),
@@ -705,6 +778,7 @@ fn test_where_exists_with_join() {
     };
 
     let stmt = Statement::Select(SelectStatement {
+        union: None,
         distinct: false,
         from: "users_join1".into(),
         columns: vec![Column::All],

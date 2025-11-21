@@ -162,6 +162,18 @@ impl Parser {
             None
         };
 
+        let union = if *self.current_token() == Token::Union {
+            self.advance();
+            let union_stmt = self.parse_select()?;
+            if let Statement::Select(union_stmt) = union_stmt {
+                Some(Box::new(union_stmt))
+            } else {
+                return Err("UNION must be followed by a SELECT statement".to_string());
+            }
+        } else {
+            None
+        };
+
         Ok(Statement::Select(SelectStatement {
             distinct,
             columns,
@@ -173,6 +185,7 @@ impl Parser {
             order_by,
             limit,
             offset,
+            union,
         }))
     }
 
@@ -649,6 +662,20 @@ impl Parser {
 
             let data_type = self.parse_data_type()?;
 
+            let mut primary_key = false;
+            let mut default_value = None;
+
+            if *self.current_token() == Token::Primary {
+                self.advance();
+                self.consume(Token::Key)?;
+                primary_key = true;
+            }
+
+            if *self.current_token() == Token::Default {
+                self.advance();
+                default_value = Some(self.parse_value()?);
+            }
+
             let foreign_key = if *self.current_token() == Token::Foreign {
                 self.advance();
                 if *self.current_token() == Token::Key {
@@ -723,7 +750,9 @@ impl Parser {
             columns.push(ColumnDefinition {
                 name,
                 data_type,
-                nullable: true,
+                nullable: !primary_key,
+                primary_key,
+                default_value,
                 foreign_key,
             });
 
@@ -789,6 +818,8 @@ impl Parser {
                     name,
                     data_type,
                     nullable: true,
+                    primary_key: false,
+                    default_value: None,
                     foreign_key: None,
                 })
             }

@@ -59,6 +59,9 @@ pub enum Token {
     Restrict,
     No,
     Action,
+    Union,
+    Primary,
+    Default,
 
     Identifier(String),
     Number(i64),
@@ -345,6 +348,9 @@ fn match_keyword(ident: &str) -> Token {
         "RESTRICT" => Token::Restrict,
         "NO" => Token::No,
         "ACTION" => Token::Action,
+        "UNION" => Token::Union,
+        "PRIMARY" => Token::Primary,
+        "DEFAULT" => Token::Default,
         _ => Token::Identifier(ident.to_string()),
     }
 }

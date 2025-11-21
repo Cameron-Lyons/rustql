@@ -17,12 +17,16 @@ fn test_scalar_subquery_basic() {
         name: "users_scalar1".to_string(),
         columns: vec![
             ColumnDefinition {
+                primary_key: false,
+                default_value: None,
                 foreign_key: None,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
             },
             ColumnDefinition {
+                primary_key: false,
+                default_value: None,
                 foreign_key: None,
                 name: "name".into(),
                 data_type: DataType::Text,
@@ -46,12 +50,16 @@ fn test_scalar_subquery_basic() {
         name: "orders_scalar1".to_string(),
         columns: vec![
             ColumnDefinition {
+                primary_key: false,
+                default_value: None,
                 foreign_key: None,
                 name: "user_id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
             },
             ColumnDefinition {
+                primary_key: false,
+                default_value: None,
                 foreign_key: None,
                 name: "amount".into(),
                 data_type: DataType::Float,
@@ -72,6 +80,7 @@ fn test_scalar_subquery_basic() {
     .unwrap();
 
     let stmt = Statement::Select(SelectStatement {
+        union: None,
         distinct: false,
         from: "users_scalar1".into(),
         columns: vec![
@@ -80,6 +89,7 @@ fn test_scalar_subquery_basic() {
                 alias: None,
             },
             Column::Subquery(Box::new(SelectStatement {
+                union: None,
                 distinct: false,
                 columns: vec![Column::Named {
                     name: "amount".into(),
@@ -121,12 +131,16 @@ fn test_scalar_subquery_null() {
         name: "users_scalar2".to_string(),
         columns: vec![
             ColumnDefinition {
+                primary_key: false,
+                default_value: None,
                 foreign_key: None,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
             },
             ColumnDefinition {
+                primary_key: false,
+                default_value: None,
                 foreign_key: None,
                 name: "name".into(),
                 data_type: DataType::Text,
@@ -147,12 +161,16 @@ fn test_scalar_subquery_null() {
         name: "orders_scalar2".to_string(),
         columns: vec![
             ColumnDefinition {
+                primary_key: false,
+                default_value: None,
                 foreign_key: None,
                 name: "user_id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
             },
             ColumnDefinition {
+                primary_key: false,
+                default_value: None,
                 foreign_key: None,
                 name: "amount".into(),
                 data_type: DataType::Float,
@@ -163,6 +181,7 @@ fn test_scalar_subquery_null() {
     .unwrap();
 
     let stmt = Statement::Select(SelectStatement {
+        union: None,
         distinct: false,
         from: "users_scalar2".into(),
         columns: vec![
@@ -171,6 +190,7 @@ fn test_scalar_subquery_null() {
                 alias: None,
             },
             Column::Subquery(Box::new(SelectStatement {
+                union: None,
                 distinct: false,
                 columns: vec![Column::Named {
                     name: "amount".into(),
@@ -212,12 +232,16 @@ fn test_scalar_subquery_aggregate() {
         name: "users_agg".to_string(),
         columns: vec![
             ColumnDefinition {
+                primary_key: false,
+                default_value: None,
                 foreign_key: None,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
             },
             ColumnDefinition {
+                primary_key: false,
+                default_value: None,
                 foreign_key: None,
                 name: "name".into(),
                 data_type: DataType::Text,
@@ -241,12 +265,16 @@ fn test_scalar_subquery_aggregate() {
         name: "orders_agg".to_string(),
         columns: vec![
             ColumnDefinition {
+                primary_key: false,
+                default_value: None,
                 foreign_key: None,
                 name: "user_id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
             },
             ColumnDefinition {
+                primary_key: false,
+                default_value: None,
                 foreign_key: None,
                 name: "amount".into(),
                 data_type: DataType::Float,
@@ -269,6 +297,7 @@ fn test_scalar_subquery_aggregate() {
 
     // Test COUNT aggregate in scalar subquery
     let stmt = Statement::Select(SelectStatement {
+        union: None,
         distinct: false,
         from: "users_agg".into(),
         columns: vec![
@@ -277,6 +306,7 @@ fn test_scalar_subquery_aggregate() {
                 alias: None,
             },
             Column::Subquery(Box::new(SelectStatement {
+                union: None,
                 distinct: false,
                 columns: vec![Column::Function(AggregateFunction {
                     function: AggregateFunctionType::Count,
@@ -321,12 +351,16 @@ fn test_scalar_subquery_aggregate_sum() {
         name: "users_sum".to_string(),
         columns: vec![
             ColumnDefinition {
+                primary_key: false,
+                default_value: None,
                 foreign_key: None,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
             },
             ColumnDefinition {
+                primary_key: false,
+                default_value: None,
                 foreign_key: None,
                 name: "name".into(),
                 data_type: DataType::Text,
@@ -347,12 +381,16 @@ fn test_scalar_subquery_aggregate_sum() {
         name: "orders_sum".to_string(),
         columns: vec![
             ColumnDefinition {
+                primary_key: false,
+                default_value: None,
                 foreign_key: None,
                 name: "user_id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
             },
             ColumnDefinition {
+                primary_key: false,
+                default_value: None,
                 foreign_key: None,
                 name: "amount".into(),
                 data_type: DataType::Float,
@@ -374,6 +412,7 @@ fn test_scalar_subquery_aggregate_sum() {
     .unwrap();
 
     let stmt = Statement::Select(SelectStatement {
+        union: None,
         distinct: false,
         from: "users_sum".into(),
         columns: vec![
@@ -382,6 +421,7 @@ fn test_scalar_subquery_aggregate_sum() {
                 alias: None,
             },
             Column::Subquery(Box::new(SelectStatement {
+                union: None,
                 distinct: false,
                 columns: vec![Column::Function(AggregateFunction {
                     function: AggregateFunctionType::Sum,
@@ -424,12 +464,16 @@ fn test_scalar_subquery_nested() {
         name: "users_nested".to_string(),
         columns: vec![
             ColumnDefinition {
+                primary_key: false,
+                default_value: None,
                 foreign_key: None,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
             },
             ColumnDefinition {
+                primary_key: false,
+                default_value: None,
                 foreign_key: None,
                 name: "name".into(),
                 data_type: DataType::Text,
@@ -450,12 +494,16 @@ fn test_scalar_subquery_nested() {
         name: "orders_nested".to_string(),
         columns: vec![
             ColumnDefinition {
+                primary_key: false,
+                default_value: None,
                 foreign_key: None,
                 name: "user_id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
             },
             ColumnDefinition {
+                primary_key: false,
+                default_value: None,
                 foreign_key: None,
                 name: "amount".into(),
                 data_type: DataType::Float,
@@ -476,18 +524,24 @@ fn test_scalar_subquery_nested() {
         name: "items_nested".to_string(),
         columns: vec![
             ColumnDefinition {
+                primary_key: false,
+                default_value: None,
                 foreign_key: None,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
             },
             ColumnDefinition {
+                primary_key: false,
+                default_value: None,
                 foreign_key: None,
                 name: "order_id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
             },
             ColumnDefinition {
+                primary_key: false,
+                default_value: None,
                 foreign_key: None,
                 name: "price".into(),
                 data_type: DataType::Float,
@@ -509,6 +563,7 @@ fn test_scalar_subquery_nested() {
     .unwrap();
 
     let stmt = Statement::Select(SelectStatement {
+        union: None,
         distinct: false,
         from: "users_nested".into(),
         columns: vec![
@@ -517,8 +572,10 @@ fn test_scalar_subquery_nested() {
                 alias: None,
             },
             Column::Subquery(Box::new(SelectStatement {
+                union: None,
                 distinct: false,
                 columns: vec![Column::Subquery(Box::new(SelectStatement {
+                    union: None,
                     distinct: false,
                     columns: vec![Column::Named {
                         name: "price".into(),
@@ -574,12 +631,16 @@ fn test_scalar_subquery_with_join() {
         name: "users_join".to_string(),
         columns: vec![
             ColumnDefinition {
+                primary_key: false,
+                default_value: None,
                 foreign_key: None,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
             },
             ColumnDefinition {
+                primary_key: false,
+                default_value: None,
                 foreign_key: None,
                 name: "name".into(),
                 data_type: DataType::Text,
@@ -603,18 +664,24 @@ fn test_scalar_subquery_with_join() {
         name: "orders_join".to_string(),
         columns: vec![
             ColumnDefinition {
+                primary_key: false,
+                default_value: None,
                 foreign_key: None,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
             },
             ColumnDefinition {
+                primary_key: false,
+                default_value: None,
                 foreign_key: None,
                 name: "user_id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
             },
             ColumnDefinition {
+                primary_key: false,
+                default_value: None,
                 foreign_key: None,
                 name: "amount".into(),
                 data_type: DataType::Float,
@@ -635,6 +702,7 @@ fn test_scalar_subquery_with_join() {
     .unwrap();
 
     let stmt = Statement::Select(SelectStatement {
+        union: None,
         distinct: false,
         from: "users_join".into(),
         columns: vec![
@@ -643,6 +711,7 @@ fn test_scalar_subquery_with_join() {
                 alias: None,
             },
             Column::Subquery(Box::new(SelectStatement {
+                union: None,
                 distinct: false,
                 columns: vec![Column::Named {
                     name: "amount".into(),
@@ -694,12 +763,16 @@ fn test_scalar_subquery_with_join_and_aggregate() {
         name: "users_join_agg".to_string(),
         columns: vec![
             ColumnDefinition {
+                primary_key: false,
+                default_value: None,
                 foreign_key: None,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
             },
             ColumnDefinition {
+                primary_key: false,
+                default_value: None,
                 foreign_key: None,
                 name: "name".into(),
                 data_type: DataType::Text,
@@ -723,18 +796,24 @@ fn test_scalar_subquery_with_join_and_aggregate() {
         name: "orders_join_agg".to_string(),
         columns: vec![
             ColumnDefinition {
+                primary_key: false,
+                default_value: None,
                 foreign_key: None,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
             },
             ColumnDefinition {
+                primary_key: false,
+                default_value: None,
                 foreign_key: None,
                 name: "user_id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
             },
             ColumnDefinition {
+                primary_key: false,
+                default_value: None,
                 foreign_key: None,
                 name: "amount".into(),
                 data_type: DataType::Float,
@@ -759,12 +838,16 @@ fn test_scalar_subquery_with_join_and_aggregate() {
         name: "products_join_agg".to_string(),
         columns: vec![
             ColumnDefinition {
+                primary_key: false,
+                default_value: None,
                 foreign_key: None,
                 name: "order_id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
             },
             ColumnDefinition {
+                primary_key: false,
+                default_value: None,
                 foreign_key: None,
                 name: "price".into(),
                 data_type: DataType::Float,
@@ -786,6 +869,7 @@ fn test_scalar_subquery_with_join_and_aggregate() {
     .unwrap();
 
     let stmt = Statement::Select(SelectStatement {
+        union: None,
         distinct: false,
         from: "users_join_agg".into(),
         columns: vec![
@@ -794,6 +878,7 @@ fn test_scalar_subquery_with_join_and_aggregate() {
                 alias: None,
             },
             Column::Subquery(Box::new(SelectStatement {
+                union: None,
                 distinct: false,
                 columns: vec![Column::Function(AggregateFunction {
                     function: AggregateFunctionType::Sum,

@@ -18,16 +18,20 @@ fn test_select_all() {
         name: "users".to_string(),
         columns: vec![
             ColumnDefinition {
-                foreign_key: None,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
+                primary_key: false,
+                default_value: None,
+                foreign_key: None,
             },
             ColumnDefinition {
-                foreign_key: None,
                 name: "name".into(),
                 data_type: DataType::Text,
                 nullable: false,
+                primary_key: false,
+                default_value: None,
+                foreign_key: None,
             },
         ],
     }))
@@ -44,6 +48,7 @@ fn test_select_all() {
     .unwrap();
 
     let select = Statement::Select(SelectStatement {
+        union: None,
         distinct: false,
         from: "users".into(),
         columns: vec![Column::All],
@@ -69,12 +74,16 @@ fn test_count_distinct_values() {
         name: "cities".to_string(),
         columns: vec![
             ColumnDefinition {
+                primary_key: false,
+                default_value: None,
                 foreign_key: None,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
             },
             ColumnDefinition {
+                primary_key: false,
+                default_value: None,
                 foreign_key: None,
                 name: "city".into(),
                 data_type: DataType::Text,
@@ -96,6 +105,7 @@ fn test_count_distinct_values() {
     .unwrap();
 
     let stmt = Statement::Select(SelectStatement {
+        union: None,
         distinct: false,
         from: "cities".into(),
         columns: vec![Column::Function(AggregateFunction {
@@ -125,12 +135,16 @@ fn test_sum_distinct_values() {
         name: "purchases".to_string(),
         columns: vec![
             ColumnDefinition {
+                primary_key: false,
+                default_value: None,
                 foreign_key: None,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
             },
             ColumnDefinition {
+                primary_key: false,
+                default_value: None,
                 foreign_key: None,
                 name: "amount".into(),
                 data_type: DataType::Float,
@@ -153,6 +167,7 @@ fn test_sum_distinct_values() {
     .unwrap();
 
     let stmt = Statement::Select(SelectStatement {
+        union: None,
         distinct: false,
         from: "purchases".into(),
         columns: vec![Column::Function(AggregateFunction {
@@ -182,12 +197,16 @@ fn test_min_distinct_values() {
         name: "scores".to_string(),
         columns: vec![
             ColumnDefinition {
+                primary_key: false,
+                default_value: None,
                 foreign_key: None,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
             },
             ColumnDefinition {
+                primary_key: false,
+                default_value: None,
                 foreign_key: None,
                 name: "score".into(),
                 data_type: DataType::Integer,
@@ -211,6 +230,7 @@ fn test_min_distinct_values() {
     .unwrap();
 
     let stmt = Statement::Select(SelectStatement {
+        union: None,
         distinct: false,
         from: "scores".into(),
         columns: vec![Column::Function(AggregateFunction {
@@ -241,12 +261,16 @@ fn test_max_distinct_values() {
         name: "prices".to_string(),
         columns: vec![
             ColumnDefinition {
+                primary_key: false,
+                default_value: None,
                 foreign_key: None,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
             },
             ColumnDefinition {
+                primary_key: false,
+                default_value: None,
                 foreign_key: None,
                 name: "price".into(),
                 data_type: DataType::Float,
@@ -270,6 +294,7 @@ fn test_max_distinct_values() {
     .unwrap();
 
     let stmt = Statement::Select(SelectStatement {
+        union: None,
         distinct: false,
         from: "prices".into(),
         columns: vec![Column::Function(AggregateFunction {
@@ -300,12 +325,16 @@ fn test_avg_distinct_values() {
         name: "grades".to_string(),
         columns: vec![
             ColumnDefinition {
+                primary_key: false,
+                default_value: None,
                 foreign_key: None,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
             },
             ColumnDefinition {
+                primary_key: false,
+                default_value: None,
                 foreign_key: None,
                 name: "grade".into(),
                 data_type: DataType::Float,
@@ -329,6 +358,7 @@ fn test_avg_distinct_values() {
     .unwrap();
 
     let stmt = Statement::Select(SelectStatement {
+        union: None,
         distinct: false,
         from: "grades".into(),
         columns: vec![Column::Function(AggregateFunction {

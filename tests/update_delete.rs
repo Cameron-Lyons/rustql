@@ -9,12 +9,16 @@ fn test_update_and_delete() {
         name: "users".into(),
         columns: vec![
             ColumnDefinition {
+                primary_key: false,
+                default_value: None,
                 foreign_key: None,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
             },
             ColumnDefinition {
+                primary_key: false,
+                default_value: None,
                 foreign_key: None,
                 name: "name".into(),
                 data_type: DataType::Text,

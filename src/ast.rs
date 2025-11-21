@@ -23,6 +23,7 @@ pub struct SelectStatement {
     pub order_by: Option<Vec<OrderByExpr>>,
     pub limit: Option<usize>,
     pub offset: Option<usize>,
+    pub union: Option<Box<SelectStatement>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -109,6 +110,8 @@ pub struct ColumnDefinition {
     pub name: String,
     pub data_type: DataType,
     pub nullable: bool,
+    pub primary_key: bool,
+    pub default_value: Option<Value>,
     pub foreign_key: Option<ForeignKeyConstraint>,
 }
 

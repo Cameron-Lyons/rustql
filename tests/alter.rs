@@ -8,6 +8,8 @@ fn test_alter_table_add_column() {
     execute(Statement::CreateTable(CreateTableStatement {
         name: "users".into(),
         columns: vec![ColumnDefinition {
+            primary_key: false,
+            default_value: None,
             name: "id".into(),
             data_type: DataType::Integer,
             nullable: false,
@@ -19,6 +21,8 @@ fn test_alter_table_add_column() {
     let alter = Statement::AlterTable(AlterTableStatement {
         table: "users".into(),
         operation: AlterOperation::AddColumn(ColumnDefinition {
+            primary_key: false,
+            default_value: None,
             name: "name".into(),
             data_type: DataType::Text,
             nullable: false,
