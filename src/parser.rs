@@ -162,16 +162,20 @@ impl Parser {
             None
         };
 
-        let union = if *self.current_token() == Token::Union {
+        let (union, union_all) = if *self.current_token() == Token::Union {
             self.advance();
+            let is_all = *self.current_token() == Token::All;
+            if is_all {
+                self.advance();
+            }
             let union_stmt = self.parse_select()?;
             if let Statement::Select(union_stmt) = union_stmt {
-                Some(Box::new(union_stmt))
+                (Some(Box::new(union_stmt)), is_all)
             } else {
                 return Err("UNION must be followed by a SELECT statement".to_string());
             }
         } else {
-            None
+            (None, false)
         };
 
         Ok(Statement::Select(SelectStatement {
@@ -186,6 +190,7 @@ impl Parser {
             limit,
             offset,
             union,
+            union_all,
         }))
     }
 

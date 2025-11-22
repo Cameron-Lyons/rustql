@@ -71,6 +71,7 @@ fn test_where_exists_true() {
 
     let sub = SelectStatement {
         union: None,
+        union_all: false,
         distinct: false,
         columns: vec![Column::All],
         from: "orders_ex1".into(),
@@ -89,6 +90,7 @@ fn test_where_exists_true() {
 
     let stmt = Statement::Select(SelectStatement {
         union: None,
+        union_all: false,
         distinct: false,
         from: "users_ex1".into(),
         columns: vec![Column::All],
@@ -176,6 +178,7 @@ fn test_where_exists_false_filters_all() {
 
     let sub = SelectStatement {
         union: None,
+        union_all: false,
         distinct: false,
         columns: vec![Column::All],
         from: "orders_ex2".into(),
@@ -194,6 +197,7 @@ fn test_where_exists_false_filters_all() {
 
     let stmt = Statement::Select(SelectStatement {
         union: None,
+        union_all: false,
         distinct: false,
         from: "users_ex2".into(),
         columns: vec![Column::All],
@@ -281,6 +285,7 @@ fn test_where_not_exists_true_filters_all() {
 
     let sub = SelectStatement {
         union: None,
+        union_all: false,
         distinct: false,
         columns: vec![Column::All],
         from: "t_orders_ne1".into(),
@@ -299,6 +304,7 @@ fn test_where_not_exists_true_filters_all() {
 
     let stmt = Statement::Select(SelectStatement {
         union: None,
+        union_all: false,
         distinct: false,
         from: "t_users_ne1".into(),
         columns: vec![Column::All],
@@ -389,6 +395,7 @@ fn test_where_exists_correlated_true() {
 
     let sub = SelectStatement {
         union: None,
+        union_all: false,
         distinct: false,
         columns: vec![Column::All],
         from: "orders_corr1".into(),
@@ -415,6 +422,7 @@ fn test_where_exists_correlated_true() {
 
     let stmt = Statement::Select(SelectStatement {
         union: None,
+        union_all: false,
         distinct: false,
         from: "users_corr1".into(),
         columns: vec![Column::All],
@@ -502,6 +510,7 @@ fn test_where_not_exists_false() {
 
     let sub = SelectStatement {
         union: None,
+        union_all: false,
         distinct: false,
         columns: vec![Column::All],
         from: "t_orders_ne2".into(),
@@ -520,6 +529,7 @@ fn test_where_not_exists_false() {
 
     let stmt = Statement::Select(SelectStatement {
         union: None,
+        union_all: false,
         distinct: false,
         from: "t_users_ne2".into(),
         columns: vec![Column::All],
@@ -610,6 +620,7 @@ fn test_where_exists_correlated_false() {
 
     let sub = SelectStatement {
         union: None,
+        union_all: false,
         distinct: false,
         columns: vec![Column::All],
         from: "orders_corr2".into(),
@@ -636,6 +647,7 @@ fn test_where_exists_correlated_false() {
 
     let stmt = Statement::Select(SelectStatement {
         union: None,
+        union_all: false,
         distinct: false,
         from: "users_corr2".into(),
         columns: vec![Column::All],
@@ -753,6 +765,7 @@ fn test_where_exists_with_join() {
 
     let sub = SelectStatement {
         union: None,
+        union_all: false,
         distinct: false,
         columns: vec![Column::All],
         from: "orders_join1".into(),
@@ -779,6 +792,7 @@ fn test_where_exists_with_join() {
 
     let stmt = Statement::Select(SelectStatement {
         union: None,
+        union_all: false,
         distinct: false,
         from: "users_join1".into(),
         columns: vec![Column::All],

@@ -49,6 +49,7 @@ fn test_select_all() {
 
     let select = Statement::Select(SelectStatement {
         union: None,
+        union_all: false,
         distinct: false,
         from: "users".into(),
         columns: vec![Column::All],
@@ -106,6 +107,7 @@ fn test_count_distinct_values() {
 
     let stmt = Statement::Select(SelectStatement {
         union: None,
+        union_all: false,
         distinct: false,
         from: "cities".into(),
         columns: vec![Column::Function(AggregateFunction {
@@ -168,6 +170,7 @@ fn test_sum_distinct_values() {
 
     let stmt = Statement::Select(SelectStatement {
         union: None,
+        union_all: false,
         distinct: false,
         from: "purchases".into(),
         columns: vec![Column::Function(AggregateFunction {
@@ -231,6 +234,7 @@ fn test_min_distinct_values() {
 
     let stmt = Statement::Select(SelectStatement {
         union: None,
+        union_all: false,
         distinct: false,
         from: "scores".into(),
         columns: vec![Column::Function(AggregateFunction {
@@ -295,6 +299,7 @@ fn test_max_distinct_values() {
 
     let stmt = Statement::Select(SelectStatement {
         union: None,
+        union_all: false,
         distinct: false,
         from: "prices".into(),
         columns: vec![Column::Function(AggregateFunction {
@@ -359,6 +364,7 @@ fn test_avg_distinct_values() {
 
     let stmt = Statement::Select(SelectStatement {
         union: None,
+        union_all: false,
         distinct: false,
         from: "grades".into(),
         columns: vec![Column::Function(AggregateFunction {

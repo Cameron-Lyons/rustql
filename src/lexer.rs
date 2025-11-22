@@ -60,6 +60,7 @@ pub enum Token {
     No,
     Action,
     Union,
+    All,
     Primary,
     Default,
 
@@ -349,6 +350,7 @@ fn match_keyword(ident: &str) -> Token {
         "NO" => Token::No,
         "ACTION" => Token::Action,
         "UNION" => Token::Union,
+        "ALL" => Token::All,
         "PRIMARY" => Token::Primary,
         "DEFAULT" => Token::Default,
         _ => Token::Identifier(ident.to_string()),

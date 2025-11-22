@@ -186,6 +186,7 @@ fn execute_select(stmt: SelectStatement) -> Result<String, String> {
             limit: stmt.limit,
             offset: stmt.offset,
             union: None,
+            union_all: stmt.union_all,
         };
         return execute_union(left_stmt, union_stmt.as_ref().clone(), &db);
     }
@@ -366,6 +367,9 @@ fn execute_union(
     right_stmt: SelectStatement,
     db: &Database,
 ) -> Result<String, String> {
+    // Check if this is UNION ALL (no duplicate removal) or UNION (remove duplicates)
+    let union_all = left_stmt.union_all;
+
     let mut left_stmt_internal = left_stmt;
     left_stmt_internal.union = None;
     let mut right_stmt_internal = right_stmt;
@@ -374,21 +378,29 @@ fn execute_union(
     let left_result = execute_select_internal(left_stmt_internal, db)?;
     let right_result = execute_select_internal(right_stmt_internal, db)?;
 
-    use std::collections::BTreeSet;
-    let mut seen: BTreeSet<Vec<Value>> = BTreeSet::new();
     let mut combined: Vec<Vec<Value>> = Vec::new();
 
-    for row in left_result.rows {
-        if !seen.contains(&row) {
-            seen.insert(row.clone());
-            combined.push(row);
-        }
-    }
+    if union_all {
+        // UNION ALL: just combine all rows without checking for duplicates
+        combined.extend(left_result.rows);
+        combined.extend(right_result.rows);
+    } else {
+        // UNION: remove duplicates
+        use std::collections::BTreeSet;
+        let mut seen: BTreeSet<Vec<Value>> = BTreeSet::new();
 
-    for row in right_result.rows {
-        if !seen.contains(&row) {
-            seen.insert(row.clone());
-            combined.push(row);
+        for row in left_result.rows {
+            if !seen.contains(&row) {
+                seen.insert(row.clone());
+                combined.push(row);
+            }
+        }
+
+        for row in right_result.rows {
+            if !seen.contains(&row) {
+                seen.insert(row.clone());
+                combined.push(row);
+            }
         }
     }
 
@@ -435,19 +447,28 @@ struct SelectResult {
 }
 
 fn execute_select_internal(stmt: SelectStatement, db: &Database) -> Result<SelectResult, String> {
-    if !stmt.joins.is_empty() {
-        return Err("UNION with JOINs is not yet supported".to_string());
-    }
+    // Handle JOINs
+    let (all_rows, all_columns) = if !stmt.joins.is_empty() {
+        let main_table = db
+            .tables
+            .get(&stmt.from)
+            .ok_or_else(|| format!("Table '{}' does not exist", stmt.from))?;
+        let (joined_rows, all_cols) =
+            perform_multiple_joins(db, main_table, &stmt.from, &stmt.joins)?;
+        (joined_rows, all_cols)
+    } else {
+        let table = db
+            .tables
+            .get(&stmt.from)
+            .ok_or_else(|| format!("Table '{}' does not exist", stmt.from))?;
+        (table.rows.clone(), table.columns.clone())
+    };
 
-    let table = db
-        .tables
-        .get(&stmt.from)
-        .ok_or_else(|| format!("Table '{}' does not exist", stmt.from))?;
-
+    // Apply WHERE clause
     let mut filtered_rows: Vec<&Vec<Value>> = Vec::new();
-    for row in &table.rows {
+    for row in &all_rows {
         let include_row = if let Some(ref where_expr) = stmt.where_clause {
-            evaluate_expression(Some(db), where_expr, &table.columns, row)?
+            evaluate_expression(Some(db), where_expr, &all_columns, row)?
         } else {
             true
         };
@@ -456,8 +477,76 @@ fn execute_select_internal(stmt: SelectStatement, db: &Database) -> Result<Selec
         }
     }
 
+    // Handle GROUP BY
+    if let Some(_) = stmt.group_by {
+        let temp_table = Table {
+            columns: all_columns.clone(),
+            rows: Vec::new(),
+        };
+        let row_refs: Vec<&Vec<Value>> = filtered_rows.iter().map(|r| *r).collect();
+        let grouping_result = execute_select_with_grouping(stmt.clone(), &temp_table, row_refs)?;
+        // Parse the string result to extract headers and rows
+        let lines: Vec<&str> = grouping_result.lines().collect();
+        if lines.len() < 2 {
+            return Err("Invalid grouping result".to_string());
+        }
+        let headers: Vec<String> = lines[0]
+            .split('\t')
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .collect();
+        let mut rows: Vec<Vec<Value>> = Vec::new();
+        for line in lines.iter().skip(2) {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let values: Vec<Value> = line
+                .split('\t')
+                .filter(|s| !s.is_empty())
+                .map(|s| parse_value_from_string(s))
+                .collect();
+            rows.push(values);
+        }
+        return Ok(SelectResult { headers, rows });
+    }
+
+    // Handle aggregates without GROUP BY
+    let has_aggregate = stmt
+        .columns
+        .iter()
+        .any(|col| matches!(col, Column::Function(_)));
+    if has_aggregate {
+        let temp_table = Table {
+            columns: all_columns.clone(),
+            rows: Vec::new(),
+        };
+        let row_refs: Vec<&Vec<Value>> = filtered_rows.iter().map(|r| *r).collect();
+        let agg_result = execute_select_with_aggregates(stmt.clone(), &temp_table, row_refs)?;
+        // Parse the string result
+        let lines: Vec<&str> = agg_result.lines().collect();
+        if lines.len() < 2 {
+            return Err("Invalid aggregate result".to_string());
+        }
+        let headers: Vec<String> = lines[0]
+            .split('\t')
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .collect();
+        let mut rows: Vec<Vec<Value>> = Vec::new();
+        if lines.len() > 2 {
+            let values: Vec<Value> = lines[2]
+                .split('\t')
+                .filter(|s| !s.is_empty())
+                .map(|s| parse_value_from_string(s))
+                .collect();
+            rows.push(values);
+        }
+        return Ok(SelectResult { headers, rows });
+    }
+
+    // Build headers
     let headers: Vec<String> = if matches!(stmt.columns[0], Column::All) {
-        table.columns.iter().map(|c| c.name.clone()).collect()
+        all_columns.iter().map(|c| c.name.clone()).collect()
     } else {
         stmt.columns
             .iter()
@@ -467,11 +556,16 @@ fn execute_select_internal(stmt: SelectStatement, db: &Database) -> Result<Selec
                     .alias
                     .clone()
                     .unwrap_or_else(|| format!("{:?}", agg.function)),
-                _ => "<column>".to_string(),
+                Column::Subquery(_) => "<subquery>".to_string(),
+                Column::Expression { alias, .. } => {
+                    alias.clone().unwrap_or_else(|| "<expression>".to_string())
+                }
+                Column::All => unreachable!(),
             })
             .collect()
     };
 
+    // Project columns
     let mut rows: Vec<Vec<Value>> = Vec::new();
     for row_ref in &filtered_rows {
         let row = *row_ref;
@@ -489,25 +583,20 @@ fn execute_select_internal(stmt: SelectStatement, db: &Database) -> Result<Selec
                         } else {
                             name.as_str()
                         };
-                        let idx = table
-                            .columns
+                        let idx = all_columns
                             .iter()
                             .position(|c| c.name == column_name)
                             .ok_or_else(|| format!("Column '{}' not found", name))?;
                         row[idx].clone()
                     }
                     Column::Function(_) => {
-                        return Err(
-                            "UNION with aggregate functions is not yet supported".to_string()
-                        );
+                        return Err("Aggregate functions in UNION must use GROUP BY".to_string());
                     }
-                    Column::Subquery(_) => {
-                        return Err(
-                            "UNION with subqueries in SELECT is not yet supported".to_string()
-                        );
+                    Column::Subquery(subquery) => {
+                        eval_scalar_subquery_with_outer(db, subquery, &all_columns, row)?
                     }
                     Column::Expression { expr, .. } => {
-                        evaluate_value_expression(expr, &table.columns, row)?
+                        evaluate_value_expression(expr, &all_columns, row)?
                     }
                 };
                 projected.push(val);
@@ -518,6 +607,29 @@ fn execute_select_internal(stmt: SelectStatement, db: &Database) -> Result<Selec
     }
 
     Ok(SelectResult { headers, rows })
+}
+
+fn parse_value_from_string(s: &str) -> Value {
+    let s = s.trim();
+    if s == "NULL" || s.is_empty() {
+        return Value::Null;
+    }
+    if let Ok(i) = s.parse::<i64>() {
+        return Value::Integer(i);
+    }
+    if let Ok(f) = s.parse::<f64>() {
+        return Value::Float(f);
+    }
+    if s == "true" || s == "1" {
+        return Value::Boolean(true);
+    }
+    if s == "false" || s == "0" {
+        return Value::Boolean(false);
+    }
+    if s.starts_with('\'') && s.ends_with('\'') {
+        return Value::Text(s[1..s.len() - 1].to_string());
+    }
+    Value::Text(s.to_string())
 }
 
 fn execute_select_with_aggregates(
@@ -1588,8 +1700,57 @@ fn eval_subquery_values(db: &Database, subquery: &SelectStatement) -> Result<Vec
         Column::All => Err("Subquery in IN cannot use *".to_string()),
         Column::Expression { .. } => Err("Subquery in IN cannot use expressions".to_string()),
         Column::Subquery(_) => Err("Subquery in IN cannot use nested subqueries".to_string()),
-        Column::Function(_) => Err("Subquery in IN cannot use aggregate functions".to_string()),
-        Column::Expression { .. } => Err("Subquery in IN cannot use expressions".to_string()),
+        Column::Function(agg) => {
+            // Allow aggregate functions only with GROUP BY
+            if subquery.group_by.is_none() {
+                return Err(
+                    "Subquery in IN cannot use aggregate functions without GROUP BY".to_string(),
+                );
+            }
+            // Continue to handle with GROUP BY below
+            if let Some(group_by_cols) = &subquery.group_by {
+                let group_by_indices: Vec<usize> = group_by_cols
+                    .iter()
+                    .map(|g| {
+                        table
+                            .columns
+                            .iter()
+                            .position(|c| &c.name == g)
+                            .ok_or_else(|| format!("Column '{}' not found in GROUP BY", g))
+                    })
+                    .collect::<Result<_, _>>()?;
+                let mut groups: std::collections::BTreeMap<Vec<Value>, Vec<&Vec<Value>>> =
+                    std::collections::BTreeMap::new();
+                for row in &filtered_rows {
+                    let key: Vec<Value> = group_by_indices
+                        .iter()
+                        .map(|&idx| row[idx].clone())
+                        .collect();
+                    groups.entry(key).or_default().push(*row);
+                }
+                let mut values = Vec::with_capacity(groups.len());
+                for (_k, rows) in groups {
+                    if let Some(ref having_expr) = subquery.having {
+                        if !evaluate_having(having_expr, &subquery.columns, table, &rows)? {
+                            continue;
+                        }
+                    }
+                    let v =
+                        compute_aggregate(&agg.function, &agg.expr, table, &rows, agg.distinct)?;
+                    values.push(v);
+                }
+                Ok(values)
+            } else {
+                let value = compute_aggregate(
+                    &agg.function,
+                    &agg.expr,
+                    table,
+                    &filtered_rows,
+                    agg.distinct,
+                )?;
+                Ok(vec![value])
+            }
+        }
         Column::Named { name, .. } => {
             if let Some(group_by_cols) = &subquery.group_by {
                 let group_by_indices: Vec<usize> = group_by_cols
@@ -1638,58 +1799,6 @@ fn eval_subquery_values(db: &Database, subquery: &SelectStatement) -> Result<Vec
                 }
                 Ok(values)
             }
-        }
-        Column::Function(agg) => {
-            if let Some(group_by_cols) = &subquery.group_by {
-                let group_by_indices: Vec<usize> = group_by_cols
-                    .iter()
-                    .map(|g| {
-                        table
-                            .columns
-                            .iter()
-                            .position(|c| &c.name == g)
-                            .ok_or_else(|| format!("Column '{}' not found in GROUP BY", g))
-                    })
-                    .collect::<Result<_, _>>()?;
-                let mut groups: std::collections::BTreeMap<Vec<Value>, Vec<&Vec<Value>>> =
-                    std::collections::BTreeMap::new();
-                for row in &filtered_rows {
-                    let key: Vec<Value> = group_by_indices
-                        .iter()
-                        .map(|&idx| row[idx].clone())
-                        .collect();
-                    groups.entry(key).or_default().push(*row);
-                }
-                let mut values = Vec::with_capacity(groups.len());
-                for (_k, rows) in groups {
-                    if let Some(ref having_expr) = subquery.having
-                        && !evaluate_having(having_expr, &subquery.columns, table, &rows)?
-                    {
-                        continue;
-                    }
-                    let v =
-                        compute_aggregate(&agg.function, &agg.expr, table, &rows, agg.distinct)?;
-                    values.push(v);
-                }
-                Ok(values)
-            } else {
-                let value = compute_aggregate(
-                    &agg.function,
-                    &agg.expr,
-                    table,
-                    &filtered_rows,
-                    agg.distinct,
-                )?;
-                Ok(vec![value])
-            }
-        }
-        Column::Subquery(nested) => {
-            let mut values = Vec::with_capacity(filtered_rows.len());
-            for row in filtered_rows {
-                let value = eval_scalar_subquery_with_outer(db, nested, &table.columns, row)?;
-                values.push(value);
-            }
-            Ok(values)
         }
     }
 }
@@ -1786,61 +1895,68 @@ fn perform_multiple_joins(
         let mut matched_pairs = HashSet::new();
 
         let check_join_match = |current_row: &Vec<Value>, join_row: &Vec<Value>| -> bool {
-            if let Expression::BinaryOp { left, op, right } = &join.on
-                && *op == BinaryOperator::Equal
-                && let (Expression::Column(left_col), Expression::Column(right_col)) =
-                    (left.as_ref(), right.as_ref())
-            {
-                let get_col_idx = |col_name: &str| -> Option<usize> {
-                    if col_name.contains('.') {
-                        let parts: Vec<&str> = col_name.split('.').collect();
-                        if parts.len() == 2 {
-                            let table_name = parts[0];
-                            let col_name = parts[1];
-                            if let Some(tbl_idx) = table_names.iter().position(|n| n == table_name)
-                            {
-                                let mut col_offset = 0;
-                                for (idx, &col_count) in table_column_counts.iter().enumerate() {
-                                    if idx == tbl_idx {
-                                        let table = if idx == 0 {
-                                            from_table
-                                        } else {
-                                            db.tables.get(&joins[idx - 1].table).unwrap()
-                                        };
-                                        if let Some(col_idx) =
-                                            table.columns.iter().position(|c| c.name == col_name)
+            if let Expression::BinaryOp { left, op, right } = &join.on {
+                if *op == BinaryOperator::Equal {
+                    if let (Expression::Column(left_col), Expression::Column(right_col)) =
+                        (left.as_ref(), right.as_ref())
+                    {
+                        let get_col_idx = |col_name: &str| -> Option<usize> {
+                            if col_name.contains('.') {
+                                let parts: Vec<&str> = col_name.split('.').collect();
+                                if parts.len() == 2 {
+                                    let table_name = parts[0];
+                                    let col_name = parts[1];
+                                    if let Some(tbl_idx) =
+                                        table_names.iter().position(|n| n == table_name)
+                                    {
+                                        let mut col_offset = 0;
+                                        for (idx, &col_count) in
+                                            table_column_counts.iter().enumerate()
                                         {
-                                            return Some(col_offset + col_idx);
+                                            if idx == tbl_idx {
+                                                let table = if idx == 0 {
+                                                    from_table
+                                                } else {
+                                                    db.tables.get(&joins[idx - 1].table).unwrap()
+                                                };
+                                                if let Some(col_idx) = table
+                                                    .columns
+                                                    .iter()
+                                                    .position(|c| c.name == col_name)
+                                                {
+                                                    return Some(col_offset + col_idx);
+                                                }
+                                            }
+                                            col_offset += col_count;
                                         }
                                     }
-                                    col_offset += col_count;
                                 }
                             }
+                            None
+                        };
+
+                        let left_col_idx = get_col_idx(left_col);
+                        let right_col_idx = get_col_idx(right_col);
+
+                        let left_val = left_col_idx.and_then(|idx| {
+                            if idx < current_row.len() {
+                                current_row.get(idx).cloned()
+                            } else {
+                                join_row.get(idx - current_row.len()).cloned()
+                            }
+                        });
+                        let right_val = right_col_idx.and_then(|idx| {
+                            if idx < current_row.len() {
+                                current_row.get(idx).cloned()
+                            } else {
+                                join_row.get(idx - current_row.len()).cloned()
+                            }
+                        });
+
+                        if let (Some(lv), Some(rv)) = (left_val, right_val) {
+                            return lv == rv;
                         }
                     }
-                    None
-                };
-
-                let left_col_idx = get_col_idx(left_col);
-                let right_col_idx = get_col_idx(right_col);
-
-                let left_val = left_col_idx.and_then(|idx| {
-                    if idx < current_row.len() {
-                        current_row.get(idx).cloned()
-                    } else {
-                        join_row.get(idx - current_row.len()).cloned()
-                    }
-                });
-                let right_val = right_col_idx.and_then(|idx| {
-                    if idx < current_row.len() {
-                        current_row.get(idx).cloned()
-                    } else {
-                        join_row.get(idx - current_row.len()).cloned()
-                    }
-                });
-
-                if let (Some(lv), Some(rv)) = (left_val, right_val) {
-                    return lv == rv;
                 }
             }
             false
@@ -1970,10 +2086,6 @@ fn eval_scalar_subquery_with_outer(
         return match &subquery.columns[0] {
             Column::All => Err("Scalar subquery cannot use *".to_string()),
             Column::Expression { .. } => Err("Scalar subquery cannot use expressions".to_string()),
-            Column::Function(_) => {
-                Err("Scalar subquery cannot use aggregate functions".to_string())
-            }
-            Column::Subquery(_) => Err("Scalar subquery cannot use nested subqueries".to_string()),
             Column::Named { name, .. } => {
                 let col_idx = combined_columns
                     .iter()
@@ -2036,7 +2148,6 @@ fn eval_scalar_subquery_with_outer(
                     agg.distinct,
                 )
             }
-            Column::All => Err("Scalar subquery cannot use *".to_string()),
         };
     }
 
@@ -2182,9 +2293,6 @@ fn eval_scalar_subquery_with_outer(
                         })
                         .ok_or_else(|| format!("Column '{}' not found", name))?;
                     combined_row[col_idx].clone()
-                }
-                Column::Function(_) | Column::Subquery(_) | Column::Expression { .. } => {
-                    unreachable!()
                 }
             };
             results.push(val);

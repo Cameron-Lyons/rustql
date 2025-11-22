@@ -1,6 +1,6 @@
 {
   "tables": {
-    "users1": {
+    "orders": {
       "columns": [
         {
           "name": "id",
@@ -11,8 +11,16 @@
           "foreign_key": null
         },
         {
-          "name": "name",
+          "name": "category",
           "data_type": "Text",
+          "nullable": true,
+          "primary_key": false,
+          "default_value": null,
+          "foreign_key": null
+        },
+        {
+          "name": "amount",
+          "data_type": "Float",
           "nullable": true,
           "primary_key": false,
           "default_value": null,
@@ -25,7 +33,10 @@
             "Integer": 1
           },
           {
-            "Text": "Alice"
+            "Text": "Electronics"
+          },
+          {
+            "Float": 100.0
           }
         ],
         [
@@ -33,45 +44,32 @@
             "Integer": 2
           },
           {
-            "Text": "Bob"
+            "Text": "Electronics"
+          },
+          {
+            "Float": 200.0
           }
-        ]
-      ]
-    },
-    "users2": {
-      "columns": [
-        {
-          "name": "id",
-          "data_type": "Integer",
-          "nullable": true,
-          "primary_key": false,
-          "default_value": null,
-          "foreign_key": null
-        },
-        {
-          "name": "name",
-          "data_type": "Text",
-          "nullable": true,
-          "primary_key": false,
-          "default_value": null,
-          "foreign_key": null
-        }
-      ],
-      "rows": [
+        ],
         [
           {
             "Integer": 3
           },
           {
-            "Text": "Charlie"
+            "Text": "Books"
+          },
+          {
+            "Float": 50.0
           }
         ],
         [
           {
-            "Integer": 1
+            "Integer": 4
           },
           {
-            "Text": "Alice"
+            "Text": "Books"
+          },
+          {
+            "Float": 75.0
           }
         ]
       ]

@@ -81,6 +81,7 @@ fn test_scalar_subquery_basic() {
 
     let stmt = Statement::Select(SelectStatement {
         union: None,
+        union_all: false,
         distinct: false,
         from: "users_scalar1".into(),
         columns: vec![
@@ -90,6 +91,7 @@ fn test_scalar_subquery_basic() {
             },
             Column::Subquery(Box::new(SelectStatement {
                 union: None,
+                union_all: false,
                 distinct: false,
                 columns: vec![Column::Named {
                     name: "amount".into(),
@@ -182,6 +184,7 @@ fn test_scalar_subquery_null() {
 
     let stmt = Statement::Select(SelectStatement {
         union: None,
+        union_all: false,
         distinct: false,
         from: "users_scalar2".into(),
         columns: vec![
@@ -191,6 +194,7 @@ fn test_scalar_subquery_null() {
             },
             Column::Subquery(Box::new(SelectStatement {
                 union: None,
+                union_all: false,
                 distinct: false,
                 columns: vec![Column::Named {
                     name: "amount".into(),
@@ -298,6 +302,7 @@ fn test_scalar_subquery_aggregate() {
     // Test COUNT aggregate in scalar subquery
     let stmt = Statement::Select(SelectStatement {
         union: None,
+        union_all: false,
         distinct: false,
         from: "users_agg".into(),
         columns: vec![
@@ -307,6 +312,7 @@ fn test_scalar_subquery_aggregate() {
             },
             Column::Subquery(Box::new(SelectStatement {
                 union: None,
+                union_all: false,
                 distinct: false,
                 columns: vec![Column::Function(AggregateFunction {
                     function: AggregateFunctionType::Count,
@@ -413,6 +419,7 @@ fn test_scalar_subquery_aggregate_sum() {
 
     let stmt = Statement::Select(SelectStatement {
         union: None,
+        union_all: false,
         distinct: false,
         from: "users_sum".into(),
         columns: vec![
@@ -422,6 +429,7 @@ fn test_scalar_subquery_aggregate_sum() {
             },
             Column::Subquery(Box::new(SelectStatement {
                 union: None,
+                union_all: false,
                 distinct: false,
                 columns: vec![Column::Function(AggregateFunction {
                     function: AggregateFunctionType::Sum,
@@ -564,6 +572,7 @@ fn test_scalar_subquery_nested() {
 
     let stmt = Statement::Select(SelectStatement {
         union: None,
+        union_all: false,
         distinct: false,
         from: "users_nested".into(),
         columns: vec![
@@ -573,9 +582,11 @@ fn test_scalar_subquery_nested() {
             },
             Column::Subquery(Box::new(SelectStatement {
                 union: None,
+                union_all: false,
                 distinct: false,
                 columns: vec![Column::Subquery(Box::new(SelectStatement {
                     union: None,
+                    union_all: false,
                     distinct: false,
                     columns: vec![Column::Named {
                         name: "price".into(),
@@ -703,6 +714,7 @@ fn test_scalar_subquery_with_join() {
 
     let stmt = Statement::Select(SelectStatement {
         union: None,
+        union_all: false,
         distinct: false,
         from: "users_join".into(),
         columns: vec![
@@ -712,6 +724,7 @@ fn test_scalar_subquery_with_join() {
             },
             Column::Subquery(Box::new(SelectStatement {
                 union: None,
+                union_all: false,
                 distinct: false,
                 columns: vec![Column::Named {
                     name: "amount".into(),
@@ -870,6 +883,7 @@ fn test_scalar_subquery_with_join_and_aggregate() {
 
     let stmt = Statement::Select(SelectStatement {
         union: None,
+        union_all: false,
         distinct: false,
         from: "users_join_agg".into(),
         columns: vec![
@@ -879,6 +893,7 @@ fn test_scalar_subquery_with_join_and_aggregate() {
             },
             Column::Subquery(Box::new(SelectStatement {
                 union: None,
+                union_all: false,
                 distinct: false,
                 columns: vec![Column::Function(AggregateFunction {
                     function: AggregateFunctionType::Sum,

@@ -24,6 +24,7 @@ pub struct SelectStatement {
     pub limit: Option<usize>,
     pub offset: Option<usize>,
     pub union: Option<Box<SelectStatement>>,
+    pub union_all: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
