@@ -637,23 +637,57 @@ impl Parser {
 
     fn parse_create(&mut self) -> Result<Statement, String> {
         self.consume(Token::Create)?;
-        self.consume(Token::Table)?;
 
-        let name = match self.advance() {
-            Token::Identifier(name) => name,
-            _ => return Err("Expected table name".to_string()),
-        };
+        match self.current_token() {
+            Token::Table => {
+                self.advance();
+                let name = match self.advance() {
+                    Token::Identifier(name) => name,
+                    _ => return Err("Expected table name".to_string()),
+                };
 
-        self.consume(Token::LeftParen)?;
+                self.consume(Token::LeftParen)?;
 
-        let columns = self.parse_column_definitions()?;
+                let columns = self.parse_column_definitions()?;
 
-        self.consume(Token::RightParen)?;
+                self.consume(Token::RightParen)?;
 
-        Ok(Statement::CreateTable(CreateTableStatement {
-            name,
-            columns,
-        }))
+                Ok(Statement::CreateTable(CreateTableStatement {
+                    name,
+                    columns,
+                }))
+            }
+            Token::Index => {
+                self.advance();
+                let index_name = match self.advance() {
+                    Token::Identifier(name) => name,
+                    _ => return Err("Expected index name".to_string()),
+                };
+
+                self.consume(Token::On)?;
+
+                let table = match self.advance() {
+                    Token::Identifier(name) => name,
+                    _ => return Err("Expected table name".to_string()),
+                };
+
+                self.consume(Token::LeftParen)?;
+
+                let column = match self.advance() {
+                    Token::Identifier(name) => name,
+                    _ => return Err("Expected column name".to_string()),
+                };
+
+                self.consume(Token::RightParen)?;
+
+                Ok(Statement::CreateIndex(CreateIndexStatement {
+                    name: index_name,
+                    table,
+                    column,
+                }))
+            }
+            _ => Err("Expected TABLE or INDEX after CREATE".to_string()),
+        }
     }
 
     fn parse_column_definitions(&mut self) -> Result<Vec<ColumnDefinition>, String> {
@@ -791,14 +825,28 @@ impl Parser {
 
     fn parse_drop(&mut self) -> Result<Statement, String> {
         self.consume(Token::Drop)?;
-        self.consume(Token::Table)?;
 
-        let name = match self.advance() {
-            Token::Identifier(name) => name,
-            _ => return Err("Expected table name".to_string()),
-        };
+        match self.current_token() {
+            Token::Table => {
+                self.advance();
+                let name = match self.advance() {
+                    Token::Identifier(name) => name,
+                    _ => return Err("Expected table name".to_string()),
+                };
 
-        Ok(Statement::DropTable(DropTableStatement { name }))
+                Ok(Statement::DropTable(DropTableStatement { name }))
+            }
+            Token::Index => {
+                self.advance();
+                let name = match self.advance() {
+                    Token::Identifier(name) => name,
+                    _ => return Err("Expected index name".to_string()),
+                };
+
+                Ok(Statement::DropIndex(DropIndexStatement { name }))
+            }
+            _ => Err("Expected TABLE or INDEX after DROP".to_string()),
+        }
     }
 
     fn parse_alter(&mut self) -> Result<Statement, String> {

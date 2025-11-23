@@ -11,6 +11,7 @@ A lightweight SQL database engine written in Rust. RustQL is an educational impl
   - `DROP TABLE` - Delete tables
   - `ALTER TABLE` - Add, drop, and rename columns
   - **Foreign Key Constraints** - Enforce referential integrity with ON DELETE and ON UPDATE actions
+  - **Indexes** - Create and drop indexes on table columns for improved query performance
 
 - **Data Manipulation Language (DML)**
   - `INSERT` - Insert single or multiple rows
@@ -321,16 +322,28 @@ cargo test select
 
 ## Limitations
 
-- No indexes for performance optimization
+- Indexes are created and maintained but not yet used for query optimization
 - Limited to single-file JSON storage
 - No concurrent access support
 - No transactions or rollback capabilities
+
+### Indexes
+
+```sql
+-- Create an index on a column
+CREATE INDEX idx_age ON users (age);
+
+-- Drop an index
+DROP INDEX idx_age;
+```
+
+Indexes are automatically maintained on INSERT, UPDATE, and DELETE operations.
 
 ## Future Enhancements
 
 Possible improvements for the project:
 
-- [ ] Index implementation for better performance
+- [ ] Query optimization using indexes (currently indexes are created but not used for query optimization)
 - [ ] Transaction support with rollback
 - [ ] B-tree or LSM-tree storage engine
 - [ ] Concurrency control

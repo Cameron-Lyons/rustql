@@ -32,12 +32,15 @@ pub fn execute(statement: Statement) -> Result<String, String> {
         Statement::Update(stmt) => execute_update(stmt),
         Statement::Delete(stmt) => execute_delete(stmt),
         Statement::AlterTable(stmt) => execute_alter_table(stmt),
+        Statement::CreateIndex(stmt) => execute_create_index(stmt),
+        Statement::DropIndex(stmt) => execute_drop_index(stmt),
     }
 }
 
 pub fn reset_database_state() {
     let mut db = get_database();
     db.tables.clear();
+    db.indexes.clear();
 }
 
 fn execute_create_table(stmt: CreateTableStatement) -> Result<String, String> {
@@ -158,13 +161,21 @@ fn execute_insert(stmt: InsertStatement) -> Result<String, String> {
         validate_foreign_keys_for_insert(&db, &table_ref.columns, values)?;
     }
 
-    let table = db
-        .tables
-        .get_mut(&stmt.table)
-        .ok_or_else(|| format!("Table '{}' does not exist", stmt.table))?;
     let row_count = mapped_values.len();
-    for values in mapped_values {
-        table.rows.push(values);
+    let mut inserted_rows = Vec::new();
+    {
+        let table = db
+            .tables
+            .get_mut(&stmt.table)
+            .ok_or_else(|| format!("Table '{}' does not exist", stmt.table))?;
+        for values in &mapped_values {
+            let row_idx = table.rows.len();
+            table.rows.push(values.clone());
+            inserted_rows.push((row_idx, values.clone()));
+        }
+    }
+    for (row_idx, values) in inserted_rows {
+        update_indexes_on_insert(&mut db, &stmt.table, row_idx, &values)?;
     }
     db.save()?;
     Ok(format!("{} row(s) inserted", row_count))
@@ -367,7 +378,6 @@ fn execute_union(
     right_stmt: SelectStatement,
     db: &Database,
 ) -> Result<String, String> {
-    // Check if this is UNION ALL (no duplicate removal) or UNION (remove duplicates)
     let union_all = left_stmt.union_all;
 
     let mut left_stmt_internal = left_stmt;
@@ -381,11 +391,9 @@ fn execute_union(
     let mut combined: Vec<Vec<Value>> = Vec::new();
 
     if union_all {
-        // UNION ALL: just combine all rows without checking for duplicates
         combined.extend(left_result.rows);
         combined.extend(right_result.rows);
     } else {
-        // UNION: remove duplicates
         use std::collections::BTreeSet;
         let mut seen: BTreeSet<Vec<Value>> = BTreeSet::new();
 
@@ -447,7 +455,6 @@ struct SelectResult {
 }
 
 fn execute_select_internal(stmt: SelectStatement, db: &Database) -> Result<SelectResult, String> {
-    // Handle JOINs
     let (all_rows, all_columns) = if !stmt.joins.is_empty() {
         let main_table = db
             .tables
@@ -464,7 +471,6 @@ fn execute_select_internal(stmt: SelectStatement, db: &Database) -> Result<Selec
         (table.rows.clone(), table.columns.clone())
     };
 
-    // Apply WHERE clause
     let mut filtered_rows: Vec<&Vec<Value>> = Vec::new();
     for row in &all_rows {
         let include_row = if let Some(ref where_expr) = stmt.where_clause {
@@ -477,7 +483,6 @@ fn execute_select_internal(stmt: SelectStatement, db: &Database) -> Result<Selec
         }
     }
 
-    // Handle GROUP BY
     if let Some(_) = stmt.group_by {
         let temp_table = Table {
             columns: all_columns.clone(),
@@ -485,7 +490,6 @@ fn execute_select_internal(stmt: SelectStatement, db: &Database) -> Result<Selec
         };
         let row_refs: Vec<&Vec<Value>> = filtered_rows.iter().map(|r| *r).collect();
         let grouping_result = execute_select_with_grouping(stmt.clone(), &temp_table, row_refs)?;
-        // Parse the string result to extract headers and rows
         let lines: Vec<&str> = grouping_result.lines().collect();
         if lines.len() < 2 {
             return Err("Invalid grouping result".to_string());
@@ -510,7 +514,6 @@ fn execute_select_internal(stmt: SelectStatement, db: &Database) -> Result<Selec
         return Ok(SelectResult { headers, rows });
     }
 
-    // Handle aggregates without GROUP BY
     let has_aggregate = stmt
         .columns
         .iter()
@@ -522,7 +525,6 @@ fn execute_select_internal(stmt: SelectStatement, db: &Database) -> Result<Selec
         };
         let row_refs: Vec<&Vec<Value>> = filtered_rows.iter().map(|r| *r).collect();
         let agg_result = execute_select_with_aggregates(stmt.clone(), &temp_table, row_refs)?;
-        // Parse the string result
         let lines: Vec<&str> = agg_result.lines().collect();
         if lines.len() < 2 {
             return Err("Invalid aggregate result".to_string());
@@ -544,7 +546,6 @@ fn execute_select_internal(stmt: SelectStatement, db: &Database) -> Result<Selec
         return Ok(SelectResult { headers, rows });
     }
 
-    // Build headers
     let headers: Vec<String> = if matches!(stmt.columns[0], Column::All) {
         all_columns.iter().map(|c| c.name.clone()).collect()
     } else {
@@ -565,7 +566,6 @@ fn execute_select_internal(stmt: SelectStatement, db: &Database) -> Result<Selec
             .collect()
     };
 
-    // Project columns
     let mut rows: Vec<Vec<Value>> = Vec::new();
     for row_ref in &filtered_rows {
         let row = *row_ref;
@@ -1356,13 +1356,21 @@ fn execute_update(stmt: UpdateStatement) -> Result<String, String> {
         }
     }
 
-    let table = db
-        .tables
-        .get_mut(&stmt.table)
-        .ok_or_else(|| format!("Table '{}' does not exist", stmt.table))?;
     let updated_count = rows_to_update.len();
-    for (row_idx, updated_row) in rows_to_update {
-        table.rows[row_idx] = updated_row;
+    let mut update_info = Vec::new();
+    {
+        let table = db
+            .tables
+            .get_mut(&stmt.table)
+            .ok_or_else(|| format!("Table '{}' does not exist", stmt.table))?;
+        for (row_idx, updated_row) in rows_to_update {
+            let old_row = table.rows[row_idx].clone();
+            table.rows[row_idx] = updated_row.clone();
+            update_info.push((row_idx, old_row, updated_row));
+        }
+    }
+    for (row_idx, old_row, updated_row) in update_info {
+        update_indexes_on_update(&mut db, &stmt.table, row_idx, &old_row, &updated_row)?;
     }
     db.save()?;
     Ok(format!("{} row(s) updated", updated_count))
@@ -1395,19 +1403,37 @@ fn execute_delete(stmt: DeleteStatement) -> Result<String, String> {
         handle_foreign_keys_for_delete(&mut db, &stmt.table, &columns, row_to_delete)?;
     }
 
-    let table = db
-        .tables
-        .get_mut(&stmt.table)
-        .ok_or_else(|| format!("Table '{}' does not exist", stmt.table))?;
-    let initial_count = table.rows.len();
-    if let Some(ref where_expr) = stmt.where_clause {
-        table.rows.retain(|row| {
-            !evaluate_expression(None, where_expr, &table.columns, row).unwrap_or(false)
-        });
-    } else {
-        table.rows.clear();
-    }
-    let deleted_count = initial_count - table.rows.len();
+    let (_, mut rows_to_delete_indices) = {
+        let table = db
+            .tables
+            .get_mut(&stmt.table)
+            .ok_or_else(|| format!("Table '{}' does not exist", stmt.table))?;
+        let initial_count = table.rows.len();
+
+        let mut rows_to_delete_indices = Vec::new();
+        if let Some(ref where_expr) = stmt.where_clause {
+            for (idx, row) in table.rows.iter().enumerate() {
+                if evaluate_expression(None, where_expr, &table.columns, row).unwrap_or(false) {
+                    rows_to_delete_indices.push(idx);
+                }
+            }
+        } else {
+            rows_to_delete_indices = (0..table.rows.len()).collect();
+        }
+
+        rows_to_delete_indices.sort();
+        rows_to_delete_indices.reverse();
+        for idx in &rows_to_delete_indices {
+            table.rows.remove(*idx);
+        }
+
+        (initial_count, rows_to_delete_indices)
+    };
+
+    let deleted_count = rows_to_delete_indices.len();
+    rows_to_delete_indices.reverse();
+    update_indexes_on_delete(&mut db, &stmt.table, &rows_to_delete_indices)?;
+
     db.save()?;
     Ok(format!("{} row(s) deleted", deleted_count))
 }
@@ -1701,13 +1727,11 @@ fn eval_subquery_values(db: &Database, subquery: &SelectStatement) -> Result<Vec
         Column::Expression { .. } => Err("Subquery in IN cannot use expressions".to_string()),
         Column::Subquery(_) => Err("Subquery in IN cannot use nested subqueries".to_string()),
         Column::Function(agg) => {
-            // Allow aggregate functions only with GROUP BY
             if subquery.group_by.is_none() {
                 return Err(
                     "Subquery in IN cannot use aggregate functions without GROUP BY".to_string(),
                 );
             }
-            // Continue to handle with GROUP BY below
             if let Some(group_by_cols) = &subquery.group_by {
                 let group_by_indices: Vec<usize> = group_by_cols
                     .iter()
@@ -2708,6 +2732,157 @@ fn handle_foreign_keys_for_delete(
                         }
                     }
                 }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn execute_create_index(stmt: CreateIndexStatement) -> Result<String, String> {
+    let mut db = get_database();
+
+    if db.indexes.contains_key(&stmt.name) {
+        return Err(format!("Index '{}' already exists", stmt.name));
+    }
+
+    let table = db
+        .tables
+        .get(&stmt.table)
+        .ok_or_else(|| format!("Table '{}' does not exist", stmt.table))?;
+
+    let col_idx = table
+        .columns
+        .iter()
+        .position(|col| col.name == stmt.column)
+        .ok_or_else(|| {
+            format!(
+                "Column '{}' does not exist in table '{}'",
+                stmt.column, stmt.table
+            )
+        })?;
+
+    let mut index = crate::database::Index {
+        name: stmt.name.clone(),
+        table: stmt.table.clone(),
+        column: stmt.column.clone(),
+        entries: BTreeMap::new(),
+    };
+
+    for (row_idx, row) in table.rows.iter().enumerate() {
+        let value = row.get(col_idx).cloned().unwrap_or(Value::Null);
+        index
+            .entries
+            .entry(value)
+            .or_insert_with(Vec::new)
+            .push(row_idx);
+    }
+
+    db.indexes.insert(stmt.name.clone(), index);
+    db.save()?;
+    Ok(format!(
+        "Index '{}' created on {}.{}",
+        stmt.name, stmt.table, stmt.column
+    ))
+}
+
+fn execute_drop_index(stmt: DropIndexStatement) -> Result<String, String> {
+    let mut db = get_database();
+    if db.indexes.remove(&stmt.name).is_some() {
+        db.save()?;
+        Ok(format!("Index '{}' dropped", stmt.name))
+    } else {
+        Err(format!("Index '{}' does not exist", stmt.name))
+    }
+}
+
+fn update_indexes_on_insert(
+    db: &mut Database,
+    table_name: &str,
+    row_idx: usize,
+    row: &[Value],
+) -> Result<(), String> {
+    for index in db.indexes.values_mut() {
+        if index.table == table_name {
+            let table = db
+                .tables
+                .get(table_name)
+                .ok_or_else(|| format!("Table '{}' does not exist", table_name))?;
+
+            let col_idx = table
+                .columns
+                .iter()
+                .position(|col| col.name == index.column)
+                .ok_or_else(|| format!("Column '{}' not found", index.column))?;
+
+            let value = row.get(col_idx).cloned().unwrap_or(Value::Null);
+            index
+                .entries
+                .entry(value)
+                .or_insert_with(Vec::new)
+                .push(row_idx);
+        }
+    }
+    Ok(())
+}
+
+fn update_indexes_on_delete(
+    db: &mut Database,
+    table_name: &str,
+    deleted_row_indices: &[usize],
+) -> Result<(), String> {
+    for index in db.indexes.values_mut() {
+        if index.table == table_name {
+            for entry in index.entries.values_mut() {
+                entry.retain(|&idx| !deleted_row_indices.contains(&idx));
+                for deleted_idx in deleted_row_indices.iter().rev() {
+                    for idx in entry.iter_mut() {
+                        if *idx > *deleted_idx {
+                            *idx -= 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn update_indexes_on_update(
+    db: &mut Database,
+    table_name: &str,
+    row_idx: usize,
+    old_row: &[Value],
+    new_row: &[Value],
+) -> Result<(), String> {
+    for index in db.indexes.values_mut() {
+        if index.table == table_name {
+            let table = db
+                .tables
+                .get(table_name)
+                .ok_or_else(|| format!("Table '{}' does not exist", table_name))?;
+
+            let col_idx = table
+                .columns
+                .iter()
+                .position(|col| col.name == index.column)
+                .ok_or_else(|| format!("Column '{}' not found", index.column))?;
+
+            let old_value = old_row.get(col_idx).cloned().unwrap_or(Value::Null);
+            let new_value = new_row.get(col_idx).cloned().unwrap_or(Value::Null);
+
+            if old_value != new_value {
+                if let Some(entry) = index.entries.get_mut(&old_value) {
+                    entry.retain(|&idx| idx != row_idx);
+                    if entry.is_empty() {
+                        index.entries.remove(&old_value);
+                    }
+                }
+
+                index
+                    .entries
+                    .entry(new_value)
+                    .or_insert_with(Vec::new)
+                    .push(row_idx);
             }
         }
     }

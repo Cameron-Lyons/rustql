@@ -63,6 +63,7 @@ pub enum Token {
     All,
     Primary,
     Default,
+    Index,
 
     Identifier(String),
     Number(i64),
@@ -353,6 +354,7 @@ fn match_keyword(ident: &str) -> Token {
         "ALL" => Token::All,
         "PRIMARY" => Token::Primary,
         "DEFAULT" => Token::Default,
+        "INDEX" => Token::Index,
         _ => Token::Identifier(ident.to_string()),
     }
 }

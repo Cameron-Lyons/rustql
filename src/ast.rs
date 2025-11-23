@@ -9,6 +9,8 @@ pub enum Statement {
     CreateTable(CreateTableStatement),
     DropTable(DropTableStatement),
     AlterTable(AlterTableStatement),
+    CreateIndex(CreateIndexStatement),
+    DropIndex(DropIndexStatement),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -159,6 +161,18 @@ pub enum AlterOperation {
     AddColumn(ColumnDefinition),
     DropColumn(String),
     RenameColumn { old: String, new: String },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CreateIndexStatement {
+    pub name: String,
+    pub table: String,
+    pub column: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DropIndexStatement {
+    pub name: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]

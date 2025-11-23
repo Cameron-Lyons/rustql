@@ -1,6 +1,6 @@
 {
   "tables": {
-    "orders": {
+    "users": {
       "columns": [
         {
           "name": "id",
@@ -11,7 +11,7 @@
           "foreign_key": null
         },
         {
-          "name": "category",
+          "name": "name",
           "data_type": "Text",
           "nullable": true,
           "primary_key": false,
@@ -19,8 +19,8 @@
           "foreign_key": null
         },
         {
-          "name": "amount",
-          "data_type": "Float",
+          "name": "age",
+          "data_type": "Integer",
           "nullable": true,
           "primary_key": false,
           "default_value": null,
@@ -33,46 +33,25 @@
             "Integer": 1
           },
           {
-            "Text": "Electronics"
+            "Text": "Alice"
           },
           {
-            "Float": 100.0
-          }
-        ],
-        [
-          {
-            "Integer": 2
-          },
-          {
-            "Text": "Electronics"
-          },
-          {
-            "Float": 200.0
-          }
-        ],
-        [
-          {
-            "Integer": 3
-          },
-          {
-            "Text": "Books"
-          },
-          {
-            "Float": 50.0
-          }
-        ],
-        [
-          {
-            "Integer": 4
-          },
-          {
-            "Text": "Books"
-          },
-          {
-            "Float": 75.0
+            "Integer": 26
           }
         ]
       ]
+    }
+  },
+  "indexes": {
+    "idx_age": {
+      "name": "idx_age",
+      "table": "users",
+      "column": "age",
+      "entries": {
+        "I:26": [
+          0
+        ]
+      }
     }
   }
 }
