@@ -213,7 +213,37 @@ fn execute_select(stmt: SelectStatement) -> Result<String, String> {
         .ok_or_else(|| format!("Table '{}' does not exist", stmt.from))?;
 
     let mut filtered_rows: Vec<&Vec<Value>> = Vec::new();
-    for row in &table.rows {
+
+    // Try to use index optimization if available
+    let candidate_indices: Option<HashSet<usize>> = if let Some(ref where_expr) = stmt.where_clause
+    {
+        if let Some(index_usage) = find_index_usage(db_ref, &stmt.from, where_expr) {
+            match get_indexed_rows(db_ref, table, &index_usage) {
+                Ok(indices) => Some(indices),
+                Err(_) => None,
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // If we have candidate indices from index, only check those rows
+    // Otherwise, scan all rows
+    let rows_to_check: Vec<(usize, &Vec<Value>)> =
+        if let Some(ref candidate_set) = candidate_indices {
+            table
+                .rows
+                .iter()
+                .enumerate()
+                .filter(|(idx, _)| candidate_set.contains(idx))
+                .collect()
+        } else {
+            table.rows.iter().enumerate().collect()
+        };
+
+    for (_, row) in rows_to_check {
         let include_row = if let Some(ref where_expr) = stmt.where_clause {
             evaluate_expression(Some(db_ref), where_expr, &table.columns, row)?
         } else {
@@ -1326,13 +1356,49 @@ fn evaluate_having_value(
 fn execute_update(stmt: UpdateStatement) -> Result<String, String> {
     let mut db = get_database();
 
+    // Try to use index optimization if available
+    let candidate_indices: Option<HashSet<usize>> = {
+        let table_ref_immut = db
+            .tables
+            .get(&stmt.table)
+            .ok_or_else(|| format!("Table '{}' does not exist", stmt.table))?;
+
+        if let Some(ref where_expr) = stmt.where_clause {
+            if let Some(index_usage) = find_index_usage(&db, &stmt.table, where_expr) {
+                match get_indexed_rows(&db, table_ref_immut, &index_usage) {
+                    Ok(indices) => Some(indices),
+                    Err(_) => None,
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    };
+
     let table_ref = db
         .tables
         .get(&stmt.table)
         .ok_or_else(|| format!("Table '{}' does not exist", stmt.table))?;
 
     let mut rows_to_update: Vec<(usize, Vec<Value>)> = Vec::new();
-    for (row_idx, row) in table_ref.rows.iter().enumerate() {
+
+    // If we have candidate indices from index, only check those rows
+    // Otherwise, scan all rows
+    let rows_to_check: Vec<(usize, &Vec<Value>)> =
+        if let Some(ref candidate_set) = candidate_indices {
+            table_ref
+                .rows
+                .iter()
+                .enumerate()
+                .filter(|(idx, _)| candidate_set.contains(idx))
+                .collect()
+        } else {
+            table_ref.rows.iter().enumerate().collect()
+        };
+
+    for (row_idx, row) in rows_to_check {
         let should_update = if let Some(ref where_expr) = stmt.where_clause {
             evaluate_expression(None, where_expr, &table_ref.columns, row)?
         } else {
@@ -1386,8 +1452,38 @@ fn execute_delete(stmt: DeleteStatement) -> Result<String, String> {
             .ok_or_else(|| format!("Table '{}' does not exist", stmt.table))?;
 
         let mut rows: Vec<Vec<Value>> = Vec::new();
+
+        // Try to use index optimization if available
+        let candidate_indices: Option<HashSet<usize>> =
+            if let Some(ref where_expr) = stmt.where_clause {
+                if let Some(index_usage) = find_index_usage(&db, &stmt.table, where_expr) {
+                    match get_indexed_rows(&db, table_ref, &index_usage) {
+                        Ok(indices) => Some(indices),
+                        Err(_) => None,
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
         if let Some(ref where_expr) = stmt.where_clause {
-            for row in &table_ref.rows {
+            // If we have candidate indices from index, only check those rows
+            // Otherwise, scan all rows
+            let rows_to_check: Vec<(usize, &Vec<Value>)> =
+                if let Some(ref candidate_set) = candidate_indices {
+                    table_ref
+                        .rows
+                        .iter()
+                        .enumerate()
+                        .filter(|(idx, _)| candidate_set.contains(idx))
+                        .collect()
+                } else {
+                    table_ref.rows.iter().enumerate().collect()
+                };
+
+            for (_, row) in rows_to_check {
                 if evaluate_expression(None, where_expr, &table_ref.columns, row).unwrap_or(false) {
                     rows.push(row.clone());
                 }
@@ -1403,6 +1499,27 @@ fn execute_delete(stmt: DeleteStatement) -> Result<String, String> {
         handle_foreign_keys_for_delete(&mut db, &stmt.table, &columns, row_to_delete)?;
     }
 
+    // First, get table immutably to check for index usage
+    let table_ref = db
+        .tables
+        .get(&stmt.table)
+        .ok_or_else(|| format!("Table '{}' does not exist", stmt.table))?;
+
+    // Try to use index optimization if available
+    let candidate_indices: Option<HashSet<usize>> = if let Some(ref where_expr) = stmt.where_clause
+    {
+        if let Some(index_usage) = find_index_usage(&db, &stmt.table, where_expr) {
+            match get_indexed_rows(&db, table_ref, &index_usage) {
+                Ok(indices) => Some(indices),
+                Err(_) => None,
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     let (_, mut rows_to_delete_indices) = {
         let table = db
             .tables
@@ -1412,7 +1529,21 @@ fn execute_delete(stmt: DeleteStatement) -> Result<String, String> {
 
         let mut rows_to_delete_indices = Vec::new();
         if let Some(ref where_expr) = stmt.where_clause {
-            for (idx, row) in table.rows.iter().enumerate() {
+            // If we have candidate indices from index, only check those rows
+            // Otherwise, scan all rows
+            let rows_to_check: Vec<(usize, &Vec<Value>)> =
+                if let Some(ref candidate_set) = candidate_indices {
+                    table
+                        .rows
+                        .iter()
+                        .enumerate()
+                        .filter(|(idx, _)| candidate_set.contains(idx))
+                        .collect()
+                } else {
+                    table.rows.iter().enumerate().collect()
+                };
+
+            for (idx, row) in rows_to_check {
                 if evaluate_expression(None, where_expr, &table.columns, row).unwrap_or(false) {
                     rows_to_delete_indices.push(idx);
                 }
@@ -2887,4 +3018,282 @@ fn update_indexes_on_update(
         }
     }
     Ok(())
+}
+
+// Index optimization functions
+
+/// Represents an index usage strategy for a WHERE clause
+#[derive(Debug, Clone)]
+enum IndexUsage {
+    /// Use index for equality lookup: column = value
+    Equality { index_name: String, value: Value },
+    /// Use index for IN lookup: column IN (values...)
+    In {
+        index_name: String,
+        values: Vec<Value>,
+    },
+    /// Use index for range lookup: column > value (inclusive: true means >=)
+    RangeGreater {
+        index_name: String,
+        value: Value,
+        inclusive: bool,
+    },
+    /// Use index for range lookup: column < value (inclusive: true means <=)
+    RangeLess {
+        index_name: String,
+        value: Value,
+        inclusive: bool,
+    },
+    /// Use index for BETWEEN: column BETWEEN value1 AND value2
+    RangeBetween {
+        index_name: String,
+        lower: Value,
+        upper: Value,
+    },
+}
+
+/// Analyzes a WHERE expression to find if an index can be used
+fn find_index_usage(db: &Database, table_name: &str, expr: &Expression) -> Option<IndexUsage> {
+    match expr {
+        Expression::BinaryOp { left, op, right } => {
+            match op {
+                BinaryOperator::Equal => {
+                    // Try: column = value or value = column
+                    if let (Expression::Column(col_name), Expression::Value(val)) =
+                        (&**left, &**right)
+                    {
+                        if let Some(index) = find_index_for_column(db, table_name, col_name) {
+                            return Some(IndexUsage::Equality {
+                                index_name: index.name.clone(),
+                                value: val.clone(),
+                            });
+                        }
+                    } else if let (Expression::Value(val), Expression::Column(col_name)) =
+                        (&**left, &**right)
+                    {
+                        if let Some(index) = find_index_for_column(db, table_name, col_name) {
+                            return Some(IndexUsage::Equality {
+                                index_name: index.name.clone(),
+                                value: val.clone(),
+                            });
+                        }
+                    }
+                }
+                BinaryOperator::GreaterThan => {
+                    // Try: column > value
+                    if let (Expression::Column(col_name), Expression::Value(val)) =
+                        (&**left, &**right)
+                    {
+                        if let Some(index) = find_index_for_column(db, table_name, col_name) {
+                            return Some(IndexUsage::RangeGreater {
+                                index_name: index.name.clone(),
+                                value: val.clone(),
+                                inclusive: false,
+                            });
+                        }
+                    }
+                }
+                BinaryOperator::GreaterThanOrEqual => {
+                    // Try: column >= value
+                    if let (Expression::Column(col_name), Expression::Value(val)) =
+                        (&**left, &**right)
+                    {
+                        if let Some(index) = find_index_for_column(db, table_name, col_name) {
+                            return Some(IndexUsage::RangeGreater {
+                                index_name: index.name.clone(),
+                                value: val.clone(),
+                                inclusive: true,
+                            });
+                        }
+                    }
+                }
+                BinaryOperator::LessThan => {
+                    // Try: column < value
+                    if let (Expression::Column(col_name), Expression::Value(val)) =
+                        (&**left, &**right)
+                    {
+                        if let Some(index) = find_index_for_column(db, table_name, col_name) {
+                            return Some(IndexUsage::RangeLess {
+                                index_name: index.name.clone(),
+                                value: val.clone(),
+                                inclusive: false,
+                            });
+                        }
+                    }
+                }
+                BinaryOperator::LessThanOrEqual => {
+                    // Try: column <= value
+                    if let (Expression::Column(col_name), Expression::Value(val)) =
+                        (&**left, &**right)
+                    {
+                        if let Some(index) = find_index_for_column(db, table_name, col_name) {
+                            return Some(IndexUsage::RangeLess {
+                                index_name: index.name.clone(),
+                                value: val.clone(),
+                                inclusive: true,
+                            });
+                        }
+                    }
+                }
+                BinaryOperator::Between => {
+                    // Try: column BETWEEN value1 AND value2
+                    if let Expression::Column(col_name) = &**left {
+                        if let Expression::BinaryOp {
+                            left: lb,
+                            op: lb_op,
+                            right: rb,
+                        } = &**right
+                        {
+                            if *lb_op == BinaryOperator::And {
+                                if let (Expression::Value(lower), Expression::Value(upper)) =
+                                    (&**lb, &**rb)
+                                {
+                                    if let Some(index) =
+                                        find_index_for_column(db, table_name, col_name)
+                                    {
+                                        return Some(IndexUsage::RangeBetween {
+                                            index_name: index.name.clone(),
+                                            lower: lower.clone(),
+                                            upper: upper.clone(),
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                BinaryOperator::And => {
+                    // For AND, try to find index usage in left or right
+                    if let Some(usage) = find_index_usage(db, table_name, left) {
+                        return Some(usage);
+                    }
+                    if let Some(usage) = find_index_usage(db, table_name, right) {
+                        return Some(usage);
+                    }
+                }
+                _ => {}
+            }
+        }
+        Expression::In { left, values } => {
+            // Try: column IN (value1, value2, ...)
+            if let Expression::Column(col_name) = &**left {
+                if let Some(index) = find_index_for_column(db, table_name, col_name) {
+                    return Some(IndexUsage::In {
+                        index_name: index.name.clone(),
+                        values: values.clone(),
+                    });
+                }
+            }
+        }
+        Expression::UnaryOp {
+            op: UnaryOperator::Not,
+            expr,
+        } => {
+            // For NOT, recursively check the inner expression
+            // (though we can't use index for NOT directly, we might find something useful)
+            return find_index_usage(db, table_name, expr);
+        }
+        _ => {}
+    }
+    None
+}
+
+/// Finds an index for a given column in a table
+fn find_index_for_column<'a>(
+    db: &'a Database,
+    table_name: &str,
+    column_name: &str,
+) -> Option<&'a crate::database::Index> {
+    let normalized_col = if column_name.contains('.') {
+        column_name.split('.').next_back().unwrap_or(column_name)
+    } else {
+        column_name
+    };
+
+    db.indexes
+        .values()
+        .find(|idx| idx.table == table_name && idx.column == normalized_col)
+}
+
+/// Uses an index to get candidate row indices based on the index usage strategy
+fn get_indexed_rows(
+    db: &Database,
+    table: &Table,
+    usage: &IndexUsage,
+) -> Result<HashSet<usize>, String> {
+    let index = db
+        .indexes
+        .get(match usage {
+            IndexUsage::Equality { index_name, .. } => index_name,
+            IndexUsage::In { index_name, .. } => index_name,
+            IndexUsage::RangeGreater { index_name, .. } => index_name,
+            IndexUsage::RangeLess { index_name, .. } => index_name,
+            IndexUsage::RangeBetween { index_name, .. } => index_name,
+        })
+        .ok_or_else(|| format!("Index not found"))?;
+
+    let mut row_indices = HashSet::new();
+
+    match usage {
+        IndexUsage::Equality { value, .. } => {
+            if let Some(rows) = index.entries.get(value) {
+                row_indices.extend(rows.iter().copied());
+            }
+        }
+        IndexUsage::In { values, .. } => {
+            for value in values {
+                if let Some(rows) = index.entries.get(value) {
+                    row_indices.extend(rows.iter().copied());
+                }
+            }
+        }
+        IndexUsage::RangeGreater {
+            value, inclusive, ..
+        } => {
+            // Use BTreeMap range query for efficient range scanning
+            if *inclusive {
+                for (_, rows) in index.entries.range(value..) {
+                    row_indices.extend(rows.iter().copied());
+                }
+            } else {
+                // For exclusive, we need to skip the exact match
+                // Use a range that excludes the value itself
+                use std::ops::Bound;
+                for (_, rows) in index
+                    .entries
+                    .range((Bound::Excluded(value), Bound::Unbounded))
+                {
+                    row_indices.extend(rows.iter().copied());
+                }
+            }
+        }
+        IndexUsage::RangeLess {
+            value, inclusive, ..
+        } => {
+            // Use BTreeMap range query for efficient range scanning
+            if *inclusive {
+                for (_, rows) in index.entries.range(..=value) {
+                    row_indices.extend(rows.iter().copied());
+                }
+            } else {
+                for (_, rows) in index.entries.range(..value) {
+                    row_indices.extend(rows.iter().copied());
+                }
+            }
+        }
+        IndexUsage::RangeBetween { lower, upper, .. } => {
+            // Use BTreeMap range query for BETWEEN
+            for (_, rows) in index.entries.range(lower..=upper) {
+                row_indices.extend(rows.iter().copied());
+            }
+        }
+    }
+
+    // Filter out invalid row indices
+    let valid_indices: HashSet<usize> = row_indices
+        .into_iter()
+        .filter(|&idx| idx < table.rows.len())
+        .collect();
+
+    Ok(valid_indices)
 }

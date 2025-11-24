@@ -1,5 +1,33 @@
 {
   "tables": {
+    "test": {
+      "columns": [
+        {
+          "name": "a",
+          "data_type": "Integer",
+          "nullable": true,
+          "primary_key": false,
+          "default_value": null,
+          "foreign_key": null
+        },
+        {
+          "name": "b",
+          "data_type": "Integer",
+          "nullable": true,
+          "primary_key": false,
+          "default_value": null,
+          "foreign_key": null
+        }
+      ],
+      "rows": [
+        [
+          {
+            "Integer": 1
+          },
+          "Null"
+        ]
+      ]
+    },
     "users": {
       "columns": [
         {
@@ -27,31 +55,8 @@
           "foreign_key": null
         }
       ],
-      "rows": [
-        [
-          {
-            "Integer": 1
-          },
-          {
-            "Text": "Alice"
-          },
-          {
-            "Integer": 26
-          }
-        ]
-      ]
+      "rows": []
     }
   },
-  "indexes": {
-    "idx_age": {
-      "name": "idx_age",
-      "table": "users",
-      "column": "age",
-      "entries": {
-        "I:26": [
-          0
-        ]
-      }
-    }
-  }
+  "indexes": {}
 }
