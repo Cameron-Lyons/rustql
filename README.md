@@ -322,7 +322,6 @@ cargo test select
 
 ## Limitations
 
-- Indexes are created and maintained but not yet used for query optimization
 - Limited to single-file JSON storage
 - No concurrent access support
 - No transactions or rollback capabilities
@@ -339,14 +338,16 @@ DROP INDEX idx_age;
 
 Indexes are automatically maintained on INSERT, UPDATE, and DELETE operations.
 
+**Index Optimization**: Indexes are now used to optimize query performance! When a WHERE clause contains conditions on an indexed column (equality, range comparisons, IN, BETWEEN), the database will use the index to quickly locate matching rows instead of scanning all rows. This significantly improves query performance, especially for large tables.
+
 ## Future Enhancements
 
 Possible improvements for the project:
 
-- [ ] Query optimization using indexes (currently indexes are created but not used for query optimization)
 - [ ] Transaction support with rollback
 - [ ] B-tree or LSM-tree storage engine
 - [ ] Concurrency control
+- [ ] Query planner improvements (cost-based optimization)
 
 ## Contributing
 

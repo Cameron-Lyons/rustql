@@ -1,33 +1,5 @@
 {
   "tables": {
-    "test": {
-      "columns": [
-        {
-          "name": "a",
-          "data_type": "Integer",
-          "nullable": true,
-          "primary_key": false,
-          "default_value": null,
-          "foreign_key": null
-        },
-        {
-          "name": "b",
-          "data_type": "Integer",
-          "nullable": true,
-          "primary_key": false,
-          "default_value": null,
-          "foreign_key": null
-        }
-      ],
-      "rows": [
-        [
-          {
-            "Integer": 1
-          },
-          "Null"
-        ]
-      ]
-    },
     "users": {
       "columns": [
         {
@@ -55,7 +27,41 @@
           "foreign_key": null
         }
       ],
-      "rows": []
+      "rows": [
+        [
+          {
+            "Integer": 1
+          },
+          {
+            "Text": "Alice"
+          },
+          {
+            "Integer": 25
+          }
+        ],
+        [
+          {
+            "Integer": 2
+          },
+          {
+            "Text": "Bob"
+          },
+          {
+            "Integer": 30
+          }
+        ],
+        [
+          {
+            "Integer": 3
+          },
+          {
+            "Text": "Charlie"
+          },
+          {
+            "Integer": 35
+          }
+        ]
+      ]
     }
   },
   "indexes": {}

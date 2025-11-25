@@ -86,7 +86,7 @@ impl Parser {
                 self.advance();
                 Some(JoinType::Inner)
             } else if *self.current_token() == Token::Join {
-                Some(JoinType::Inner) // Default to INNER JOIN if no type specified
+                Some(JoinType::Inner)
             } else {
                 None
             };
