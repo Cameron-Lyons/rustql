@@ -64,6 +64,10 @@ pub enum Token {
     Primary,
     Default,
     Index,
+    Begin,
+    Commit,
+    Rollback,
+    Transaction,
 
     Identifier(String),
     Number(i64),
@@ -355,6 +359,10 @@ fn match_keyword(ident: &str) -> Token {
         "PRIMARY" => Token::Primary,
         "DEFAULT" => Token::Default,
         "INDEX" => Token::Index,
+        "BEGIN" => Token::Begin,
+        "COMMIT" => Token::Commit,
+        "ROLLBACK" => Token::Rollback,
+        "TRANSACTION" => Token::Transaction,
         _ => Token::Identifier(ident.to_string()),
     }
 }

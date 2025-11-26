@@ -5,7 +5,7 @@
         {
           "name": "id",
           "data_type": "Integer",
-          "nullable": true,
+          "nullable": false,
           "primary_key": false,
           "default_value": null,
           "foreign_key": null
@@ -13,55 +13,13 @@
         {
           "name": "name",
           "data_type": "Text",
-          "nullable": true,
-          "primary_key": false,
-          "default_value": null,
-          "foreign_key": null
-        },
-        {
-          "name": "age",
-          "data_type": "Integer",
-          "nullable": true,
+          "nullable": false,
           "primary_key": false,
           "default_value": null,
           "foreign_key": null
         }
       ],
-      "rows": [
-        [
-          {
-            "Integer": 1
-          },
-          {
-            "Text": "Alice"
-          },
-          {
-            "Integer": 25
-          }
-        ],
-        [
-          {
-            "Integer": 2
-          },
-          {
-            "Text": "Bob"
-          },
-          {
-            "Integer": 30
-          }
-        ],
-        [
-          {
-            "Integer": 3
-          },
-          {
-            "Text": "Charlie"
-          },
-          {
-            "Integer": 35
-          }
-        ]
-      ]
+      "rows": []
     }
   },
   "indexes": {}

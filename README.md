@@ -52,6 +52,11 @@ A lightweight SQL database engine written in Rust. RustQL is an educational impl
   - Persistent JSON-based storage
   - Automatic database state management
 
+- **Transactions**
+  - `BEGIN TRANSACTION` - Start a new transaction
+  - `COMMIT TRANSACTION` - Commit all changes in the current transaction
+  - `ROLLBACK TRANSACTION` - Rollback all changes in the current transaction
+
 ## Installation
 
 ```bash
@@ -250,6 +255,27 @@ DELETE FROM users WHERE age < 18;
 DELETE FROM users WHERE name = 'Charlie';
 ```
 
+### Transactions
+
+```sql
+-- Begin a transaction
+BEGIN TRANSACTION;
+
+-- Perform multiple operations
+INSERT INTO users VALUES (1, 'Alice', 25);
+INSERT INTO users VALUES (2, 'Bob', 30);
+UPDATE users SET age = 26 WHERE name = 'Alice';
+
+-- Commit all changes
+COMMIT TRANSACTION;
+
+-- Or rollback to discard changes
+BEGIN TRANSACTION;
+INSERT INTO users VALUES (3, 'Charlie', 35);
+DELETE FROM users WHERE name = 'Bob';
+ROLLBACK TRANSACTION;
+```
+
 ### Foreign Key Constraints
 
 ```sql
@@ -324,7 +350,6 @@ cargo test select
 
 - Limited to single-file JSON storage
 - No concurrent access support
-- No transactions or rollback capabilities
 
 ### Indexes
 
@@ -340,11 +365,25 @@ Indexes are automatically maintained on INSERT, UPDATE, and DELETE operations.
 
 **Index Optimization**: Indexes are now used to optimize query performance! When a WHERE clause contains conditions on an indexed column (equality, range comparisons, IN, BETWEEN), the database will use the index to quickly locate matching rows instead of scanning all rows. This significantly improves query performance, especially for large tables.
 
+### Transactions
+
+```sql
+BEGIN TRANSACTION;
+INSERT INTO users VALUES (1, 'Alice');
+INSERT INTO users VALUES (2, 'Bob');
+COMMIT TRANSACTION;
+
+BEGIN TRANSACTION;
+INSERT INTO users VALUES (3, 'Charlie');
+ROLLBACK TRANSACTION;
+```
+
+Transactions allow you to group multiple operations together. All changes within a transaction are temporary until you `COMMIT`. If you `ROLLBACK`, all changes are discarded and the database returns to its state before the transaction began.
+
 ## Future Enhancements
 
 Possible improvements for the project:
 
-- [ ] Transaction support with rollback
 - [ ] B-tree or LSM-tree storage engine
 - [ ] Concurrency control
 - [ ] Query planner improvements (cost-based optimization)

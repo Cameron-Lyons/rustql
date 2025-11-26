@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::sync::{Mutex, OnceLock};
 
 static DATABASE: OnceLock<Mutex<Database>> = OnceLock::new();
+static TRANSACTION_STATE: OnceLock<Mutex<Option<Database>>> = OnceLock::new();
 
 fn get_database() -> std::sync::MutexGuard<'static, Database> {
     #[cfg(test)]
@@ -34,6 +35,9 @@ pub fn execute(statement: Statement) -> Result<String, String> {
         Statement::AlterTable(stmt) => execute_alter_table(stmt),
         Statement::CreateIndex(stmt) => execute_create_index(stmt),
         Statement::DropIndex(stmt) => execute_drop_index(stmt),
+        Statement::BeginTransaction => execute_begin_transaction(),
+        Statement::CommitTransaction => execute_commit_transaction(),
+        Statement::RollbackTransaction => execute_rollback_transaction(),
     }
 }
 
@@ -41,6 +45,79 @@ pub fn reset_database_state() {
     let mut db = get_database();
     db.tables.clear();
     db.indexes.clear();
+    TRANSACTION_STATE
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .unwrap()
+        .take();
+}
+
+fn is_in_transaction() -> bool {
+    TRANSACTION_STATE
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .unwrap()
+        .is_some()
+}
+
+fn save_if_not_in_transaction(db: &Database) -> Result<(), String> {
+    if !is_in_transaction() {
+        db.save()?;
+    }
+    Ok(())
+}
+
+fn execute_begin_transaction() -> Result<String, String> {
+    let mut transaction_state = TRANSACTION_STATE
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .unwrap();
+
+    if transaction_state.is_some() {
+        return Err("Transaction already in progress".to_string());
+    }
+
+    let db = get_database();
+    let db_json = serde_json::to_string(&*db)
+        .map_err(|e| format!("Failed to serialize database snapshot: {}", e))?;
+    let snapshot: Database = serde_json::from_str(&db_json)
+        .map_err(|e| format!("Failed to deserialize database snapshot: {}", e))?;
+
+    *transaction_state = Some(snapshot);
+    Ok("Transaction begun".to_string())
+}
+
+fn execute_commit_transaction() -> Result<String, String> {
+    let mut transaction_state = TRANSACTION_STATE
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .unwrap();
+
+    if transaction_state.is_none() {
+        return Err("No transaction in progress".to_string());
+    }
+
+    *transaction_state = None;
+
+    let db = get_database();
+    db.save()?;
+
+    Ok("Transaction committed".to_string())
+}
+
+fn execute_rollback_transaction() -> Result<String, String> {
+    let mut transaction_state = TRANSACTION_STATE
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .unwrap();
+
+    if let Some(snapshot) = transaction_state.take() {
+        let mut db = get_database();
+        *db = snapshot;
+        Ok("Transaction rolled back".to_string())
+    } else {
+        Err("No transaction in progress".to_string())
+    }
 }
 
 fn execute_create_table(stmt: CreateTableStatement) -> Result<String, String> {
@@ -55,14 +132,14 @@ fn execute_create_table(stmt: CreateTableStatement) -> Result<String, String> {
             rows: Vec::new(),
         },
     );
-    db.save()?;
+    save_if_not_in_transaction(&db)?;
     Ok(format!("Table '{}' created", stmt.name))
 }
 
 fn execute_drop_table(stmt: DropTableStatement) -> Result<String, String> {
     let mut db = get_database();
     if db.tables.remove(&stmt.name).is_some() {
-        db.save()?;
+        save_if_not_in_transaction(&db)?;
         Ok(format!("Table '{}' dropped", stmt.name))
     } else {
         Err(format!("Table '{}' does not exist", stmt.name))
@@ -177,7 +254,7 @@ fn execute_insert(stmt: InsertStatement) -> Result<String, String> {
     for (row_idx, values) in inserted_rows {
         update_indexes_on_insert(&mut db, &stmt.table, row_idx, &values)?;
     }
-    db.save()?;
+    save_if_not_in_transaction(&db)?;
     Ok(format!("{} row(s) inserted", row_count))
 }
 
@@ -1477,7 +1554,7 @@ fn execute_update(stmt: UpdateStatement) -> Result<String, String> {
     for (row_idx, old_row, updated_row) in update_info {
         update_indexes_on_update(&mut db, &stmt.table, row_idx, &old_row, &updated_row)?;
     }
-    db.save()?;
+    save_if_not_in_transaction(&db)?;
     Ok(format!("{} row(s) updated", updated_count))
 }
 
@@ -1597,7 +1674,7 @@ fn execute_delete(stmt: DeleteStatement) -> Result<String, String> {
     rows_to_delete_indices.reverse();
     update_indexes_on_delete(&mut db, &stmt.table, &rows_to_delete_indices)?;
 
-    db.save()?;
+    save_if_not_in_transaction(&db)?;
     Ok(format!("{} row(s) deleted", deleted_count))
 }
 
@@ -2738,7 +2815,7 @@ fn execute_alter_table(stmt: AlterTableStatement) -> Result<String, String> {
             for row in &mut table.rows {
                 row.push(default_value.clone());
             }
-            db.save()?;
+            save_if_not_in_transaction(&db)?;
             Ok(format!(
                 "Column '{}' added to table '{}'",
                 col_def.name, stmt.table
@@ -2756,7 +2833,7 @@ fn execute_alter_table(stmt: AlterTableStatement) -> Result<String, String> {
                     row.remove(col_index);
                 }
             }
-            db.save()?;
+            save_if_not_in_transaction(&db)?;
             Ok(format!(
                 "Column '{}' dropped from table '{}'",
                 col_name, stmt.table
@@ -2776,7 +2853,7 @@ fn execute_alter_table(stmt: AlterTableStatement) -> Result<String, String> {
                     break;
                 }
             }
-            db.save()?;
+            save_if_not_in_transaction(&db)?;
             Ok(format!(
                 "Column '{}' renamed to '{}' in table '{}'",
                 old, new, stmt.table
@@ -2985,7 +3062,7 @@ fn execute_create_index(stmt: CreateIndexStatement) -> Result<String, String> {
     }
 
     db.indexes.insert(stmt.name.clone(), index);
-    db.save()?;
+    save_if_not_in_transaction(&db)?;
     Ok(format!(
         "Index '{}' created on {}.{}",
         stmt.name, stmt.table, stmt.column
@@ -2995,7 +3072,7 @@ fn execute_create_index(stmt: CreateIndexStatement) -> Result<String, String> {
 fn execute_drop_index(stmt: DropIndexStatement) -> Result<String, String> {
     let mut db = get_database();
     if db.indexes.remove(&stmt.name).is_some() {
-        db.save()?;
+        save_if_not_in_transaction(&db)?;
         Ok(format!("Index '{}' dropped", stmt.name))
     } else {
         Err(format!("Index '{}' does not exist", stmt.name))

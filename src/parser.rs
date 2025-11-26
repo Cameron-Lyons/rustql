@@ -48,6 +48,9 @@ impl Parser {
             Token::Create => self.parse_create(),
             Token::Drop => self.parse_drop(),
             Token::Alter => self.parse_alter(),
+            Token::Begin => self.parse_begin_transaction(),
+            Token::Commit => self.parse_commit_transaction(),
+            Token::Rollback => self.parse_rollback_transaction(),
             _ => Err(format!("Unexpected token: {:?}", self.current_token())),
         }
     }
@@ -1223,6 +1226,30 @@ impl Parser {
         }
 
         Ok(order_exprs)
+    }
+
+    fn parse_begin_transaction(&mut self) -> Result<Statement, String> {
+        self.consume(Token::Begin)?;
+        if *self.current_token() == Token::Transaction {
+            self.advance();
+        }
+        Ok(Statement::BeginTransaction)
+    }
+
+    fn parse_commit_transaction(&mut self) -> Result<Statement, String> {
+        self.consume(Token::Commit)?;
+        if *self.current_token() == Token::Transaction {
+            self.advance();
+        }
+        Ok(Statement::CommitTransaction)
+    }
+
+    fn parse_rollback_transaction(&mut self) -> Result<Statement, String> {
+        self.consume(Token::Rollback)?;
+        if *self.current_token() == Token::Transaction {
+            self.advance();
+        }
+        Ok(Statement::RollbackTransaction)
     }
 }
 

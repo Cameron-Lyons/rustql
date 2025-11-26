@@ -11,6 +11,9 @@ pub enum Statement {
     AlterTable(AlterTableStatement),
     CreateIndex(CreateIndexStatement),
     DropIndex(DropIndexStatement),
+    BeginTransaction,
+    CommitTransaction,
+    RollbackTransaction,
 }
 
 #[derive(Debug, Clone, PartialEq)]
