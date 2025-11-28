@@ -6,7 +6,7 @@ use std::path::Path;
 
 const DATABASE_FILE: &str = "rustql_data.json";
 
-#[derive(Serialize, Deserialize, Default)]
+#[derive(Serialize, Deserialize, Default, Clone)]
 pub struct Database {
     pub tables: HashMap<String, Table>,
     pub indexes: HashMap<String, Index>,
@@ -103,7 +103,7 @@ mod index_entries {
     }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct Table {
     pub columns: Vec<ColumnDefinition>,
     pub rows: Vec<Vec<Value>>,

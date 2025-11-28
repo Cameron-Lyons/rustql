@@ -24,6 +24,10 @@ fn get_database() -> std::sync::MutexGuard<'static, Database> {
     }
 }
 
+pub fn get_database_for_testing() -> Database {
+    (*get_database()).clone()
+}
+
 pub fn execute(statement: Statement) -> Result<String, String> {
     match statement {
         Statement::CreateTable(stmt) => execute_create_table(stmt),

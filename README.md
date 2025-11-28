@@ -380,13 +380,24 @@ ROLLBACK TRANSACTION;
 
 Transactions allow you to group multiple operations together. All changes within a transaction are temporary until you `COMMIT`. If you `ROLLBACK`, all changes are discarded and the database returns to its state before the transaction began.
 
+## Query Planner
+
+RustQL now includes a cost-based query planner that optimizes query execution:
+
+- **Cost Estimation**: Estimates the cost of different query execution strategies
+- **Index Selection**: Automatically chooses between sequential scans and index scans based on cost
+- **Join Optimization**: Optimizes join order and selects between hash joins and nested loop joins
+- **Statistics Collection**: Collects table and column statistics for better cost estimation
+
+The planner analyzes queries and generates optimized execution plans. While the planner is integrated into the system, you can access it programmatically for query plan analysis.
+
 ## Future Enhancements
 
 Possible improvements for the project:
 
 - [ ] B-tree or LSM-tree storage engine
 - [ ] Concurrency control
-- [ ] Query planner improvements (cost-based optimization)
+- [ ] EXPLAIN command for viewing query plans
 
 ## Contributing
 
