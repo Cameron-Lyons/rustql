@@ -1,5 +1,6 @@
 use crate::ast::*;
 use crate::database::{Database, Table};
+use crate::planner;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashSet};
 use std::sync::{Mutex, OnceLock};
@@ -42,6 +43,7 @@ pub fn execute(statement: Statement) -> Result<String, String> {
         Statement::BeginTransaction => execute_begin_transaction(),
         Statement::CommitTransaction => execute_commit_transaction(),
         Statement::RollbackTransaction => execute_rollback_transaction(),
+        Statement::Explain(stmt) => execute_explain(stmt),
     }
 }
 
@@ -122,6 +124,11 @@ fn execute_rollback_transaction() -> Result<String, String> {
     } else {
         Err("No transaction in progress".to_string())
     }
+}
+
+fn execute_explain(stmt: SelectStatement) -> Result<String, String> {
+    let db = get_database();
+    planner::explain_query(&*db, &stmt)
 }
 
 fn execute_create_table(stmt: CreateTableStatement) -> Result<String, String> {

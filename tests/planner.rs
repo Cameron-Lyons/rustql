@@ -79,3 +79,57 @@ fn test_query_planner_join() {
         );
     }
 }
+
+#[test]
+fn test_explain_command() {
+    let _guard = setup_test();
+
+    // Create a table
+    process_query("CREATE TABLE users (id INTEGER, name TEXT, age INTEGER)").unwrap();
+
+    // Insert some data
+    process_query("INSERT INTO users VALUES (1, 'Alice', 25)").unwrap();
+    process_query("INSERT INTO users VALUES (2, 'Bob', 30)").unwrap();
+
+    // Create an index
+    process_query("CREATE INDEX idx_age ON users (age)").unwrap();
+
+    // Test EXPLAIN command
+    let result = process_query("EXPLAIN SELECT * FROM users WHERE age > 25");
+    assert!(result.is_ok());
+    let plan_str = result.unwrap();
+
+    // Verify plan contains expected elements
+    assert!(plan_str.contains("Query Plan"));
+    assert!(plan_str.contains("users"));
+    // Should use index scan or seq scan
+    assert!(plan_str.contains("Index Scan") || plan_str.contains("Seq Scan"));
+}
+
+#[test]
+fn test_explain_with_join() {
+    let _guard = setup_test();
+
+    // Create tables
+    process_query("CREATE TABLE users (id INTEGER, name TEXT)").unwrap();
+    process_query("CREATE TABLE orders (id INTEGER, user_id INTEGER, amount FLOAT)").unwrap();
+
+    // Insert data
+    process_query("INSERT INTO users VALUES (1, 'Alice')").unwrap();
+    process_query("INSERT INTO orders VALUES (1, 1, 100.0)").unwrap();
+
+    // Test EXPLAIN with JOIN
+    let result = process_query(
+        "EXPLAIN SELECT users.name, orders.amount FROM users JOIN orders ON users.id = orders.user_id",
+    );
+    assert!(result.is_ok());
+    let plan_str = result.unwrap();
+
+    // Should contain join information
+    assert!(plan_str.contains("Query Plan"));
+    assert!(
+        plan_str.contains("Join")
+            || plan_str.contains("Hash Join")
+            || plan_str.contains("Nested Loop")
+    );
+}

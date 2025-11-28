@@ -389,7 +389,32 @@ RustQL now includes a cost-based query planner that optimizes query execution:
 - **Join Optimization**: Optimizes join order and selects between hash joins and nested loop joins
 - **Statistics Collection**: Collects table and column statistics for better cost estimation
 
-The planner analyzes queries and generates optimized execution plans. While the planner is integrated into the system, you can access it programmatically for query plan analysis.
+The planner analyzes queries and generates optimized execution plans. You can view the execution plan for any SELECT query using the `EXPLAIN` command (see EXPLAIN Command section below).
+
+## EXPLAIN Command
+
+The `EXPLAIN` command allows you to view the query execution plan for a SELECT statement. This helps you understand how the database will execute your query and can be useful for query optimization.
+
+```sql
+-- Explain a simple query
+EXPLAIN SELECT * FROM users WHERE age > 25;
+
+-- Explain a query with joins
+EXPLAIN SELECT users.name, orders.amount 
+FROM users 
+JOIN orders ON users.id = orders.user_id;
+
+-- Explain a query with indexes
+CREATE INDEX idx_age ON users (age);
+EXPLAIN SELECT * FROM users WHERE age = 30;
+```
+
+The EXPLAIN output shows:
+- The execution plan tree
+- Cost estimates for each operation
+- Estimated number of rows
+- Whether indexes are being used
+- Join algorithms (Hash Join, Nested Loop Join)
 
 ## Future Enhancements
 
@@ -397,7 +422,6 @@ Possible improvements for the project:
 
 - [ ] B-tree or LSM-tree storage engine
 - [ ] Concurrency control
-- [ ] EXPLAIN command for viewing query plans
 
 ## Contributing
 

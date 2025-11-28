@@ -14,6 +14,7 @@ pub enum Statement {
     BeginTransaction,
     CommitTransaction,
     RollbackTransaction,
+    Explain(SelectStatement),
 }
 
 #[derive(Debug, Clone, PartialEq)]

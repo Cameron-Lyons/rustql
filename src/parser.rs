@@ -41,6 +41,7 @@ impl Parser {
 
     fn parse_statement(&mut self) -> Result<Statement, String> {
         match self.current_token() {
+            Token::Explain => self.parse_explain(),
             Token::Select => self.parse_select(),
             Token::Insert => self.parse_insert(),
             Token::Update => self.parse_update(),
@@ -1250,6 +1251,16 @@ impl Parser {
             self.advance();
         }
         Ok(Statement::RollbackTransaction)
+    }
+
+    fn parse_explain(&mut self) -> Result<Statement, String> {
+        self.consume(Token::Explain)?;
+        let select_stmt = self.parse_select()?;
+        if let Statement::Select(select_stmt) = select_stmt {
+            Ok(Statement::Explain(select_stmt))
+        } else {
+            Err("EXPLAIN must be followed by a SELECT statement".to_string())
+        }
     }
 }
 

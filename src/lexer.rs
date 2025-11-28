@@ -68,6 +68,7 @@ pub enum Token {
     Commit,
     Rollback,
     Transaction,
+    Explain,
 
     Identifier(String),
     Number(i64),
@@ -363,6 +364,7 @@ fn match_keyword(ident: &str) -> Token {
         "COMMIT" => Token::Commit,
         "ROLLBACK" => Token::Rollback,
         "TRANSACTION" => Token::Transaction,
+        "EXPLAIN" => Token::Explain,
         _ => Token::Identifier(ident.to_string()),
     }
 }
