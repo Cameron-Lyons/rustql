@@ -150,7 +150,7 @@ fn test_sum_distinct_values() {
                 foreign_key: None,
                 name: "amount".into(),
                 data_type: DataType::Float,
-                nullable: false,
+                nullable: true,
             },
         ],
     }))
@@ -213,7 +213,7 @@ fn test_min_distinct_values() {
                 foreign_key: None,
                 name: "score".into(),
                 data_type: DataType::Integer,
-                nullable: false,
+                nullable: true,
             },
         ],
     }))
@@ -278,7 +278,7 @@ fn test_max_distinct_values() {
                 foreign_key: None,
                 name: "price".into(),
                 data_type: DataType::Float,
-                nullable: false,
+                nullable: true,
             },
         ],
     }))
@@ -343,7 +343,7 @@ fn test_avg_distinct_values() {
                 foreign_key: None,
                 name: "grade".into(),
                 data_type: DataType::Float,
-                nullable: false,
+                nullable: true,
             },
         ],
     }))

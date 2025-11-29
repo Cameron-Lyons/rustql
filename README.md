@@ -10,8 +10,11 @@ A lightweight SQL database engine written in Rust. RustQL is an educational impl
   - `CREATE TABLE` - Create tables with column definitions
   - `DROP TABLE` - Delete tables
   - `ALTER TABLE` - Add, drop, and rename columns
+  - **NOT NULL Constraints** - Enforce non-nullable columns
   - **Foreign Key Constraints** - Enforce referential integrity with ON DELETE and ON UPDATE actions
   - **Indexes** - Create and drop indexes on table columns for improved query performance
+  - `DESCRIBE table_name` - Show table schema
+  - `SHOW TABLES` - List all tables in the database
 
 - **Data Manipulation Language (DML)**
   - `INSERT` - Insert single or multiple rows
@@ -33,6 +36,7 @@ A lightweight SQL database engine written in Rust. RustQL is an educational impl
   - Aggregate functions: COUNT, SUM, AVG, MIN, MAX (with DISTINCT support: `COUNT(DISTINCT column)`)
   - GROUP BY with HAVING clause
   - **JOIN operations** (INNER, LEFT, RIGHT, FULL) - All join types now supported!
+  - **UNION / UNION ALL** - Combine results from multiple SELECT statements
   - **Subqueries**: 
     - `IN (SELECT single_column FROM table [WHERE ...])` - Subquery in WHERE clause
     - `WHERE EXISTS (SELECT ...)` - EXISTS subquery (supports correlated subqueries)
@@ -96,6 +100,7 @@ echo "SELECT * FROM users" | ./target/release/rustql
 ### Creating Tables
 
 ```sql
+-- Basic table creation
 CREATE TABLE users (
     id INTEGER,
     name TEXT,
@@ -103,6 +108,22 @@ CREATE TABLE users (
     email TEXT
 );
 
+-- With NOT NULL constraints
+CREATE TABLE users (
+    id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    age INTEGER,
+    email TEXT
+);
+
+-- With primary key (automatically NOT NULL)
+CREATE TABLE users (
+    id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL,
+    age INTEGER
+);
+
+-- With foreign keys
 CREATE TABLE orders (
     id INTEGER,
     user_id INTEGER,
@@ -213,6 +234,20 @@ JOIN orders ON users.id = orders.user_id
 WHERE orders.amount > 100;
 ```
 
+### UNION Operations
+
+```sql
+-- UNION (removes duplicates)
+SELECT name FROM users WHERE age < 30
+UNION
+SELECT name FROM users WHERE age > 50;
+
+-- UNION ALL (keeps duplicates)
+SELECT name FROM users WHERE age < 30
+UNION ALL
+SELECT name FROM users WHERE age > 50;
+```
+
 ### Subqueries
 
 ```sql
@@ -320,6 +355,17 @@ ALTER TABLE users DROP COLUMN city;
 ```sql
 DROP TABLE users;
 DROP TABLE orders;
+```
+
+### Inspecting Database Schema
+
+```sql
+-- Show all tables
+SHOW TABLES;
+
+-- Describe a specific table
+DESCRIBE users;
+DESCRIBE orders;
 ```
 
 ## Architecture

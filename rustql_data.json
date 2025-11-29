@@ -5,7 +5,7 @@
         {
           "name": "id",
           "data_type": "Integer",
-          "nullable": true,
+          "nullable": false,
           "primary_key": false,
           "default_value": null,
           "foreign_key": null
@@ -13,63 +13,13 @@
         {
           "name": "name",
           "data_type": "Text",
-          "nullable": true,
+          "nullable": false,
           "primary_key": false,
           "default_value": null,
           "foreign_key": null
         }
       ],
-      "rows": [
-        [
-          {
-            "Integer": 1
-          },
-          {
-            "Text": "Alice"
-          }
-        ]
-      ]
-    },
-    "orders": {
-      "columns": [
-        {
-          "name": "id",
-          "data_type": "Integer",
-          "nullable": true,
-          "primary_key": false,
-          "default_value": null,
-          "foreign_key": null
-        },
-        {
-          "name": "user_id",
-          "data_type": "Integer",
-          "nullable": true,
-          "primary_key": false,
-          "default_value": null,
-          "foreign_key": null
-        },
-        {
-          "name": "amount",
-          "data_type": "Float",
-          "nullable": true,
-          "primary_key": false,
-          "default_value": null,
-          "foreign_key": null
-        }
-      ],
-      "rows": [
-        [
-          {
-            "Integer": 1
-          },
-          {
-            "Integer": 1
-          },
-          {
-            "Float": 100.0
-          }
-        ]
-      ]
+      "rows": []
     }
   },
   "indexes": {}

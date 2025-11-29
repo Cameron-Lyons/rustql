@@ -52,6 +52,8 @@ impl Parser {
             Token::Begin => self.parse_begin_transaction(),
             Token::Commit => self.parse_commit_transaction(),
             Token::Rollback => self.parse_rollback_transaction(),
+            Token::Describe => self.parse_describe(),
+            Token::Show => self.parse_show(),
             _ => Err(format!("Unexpected token: {:?}", self.current_token())),
         }
     }
@@ -707,11 +709,19 @@ impl Parser {
 
             let mut primary_key = false;
             let mut default_value = None;
+            let mut nullable = true;
 
             if *self.current_token() == Token::Primary {
                 self.advance();
                 self.consume(Token::Key)?;
                 primary_key = true;
+                nullable = false;
+            }
+
+            if *self.current_token() == Token::Not {
+                self.advance();
+                self.consume(Token::Null)?;
+                nullable = false;
             }
 
             if *self.current_token() == Token::Default {
@@ -793,7 +803,7 @@ impl Parser {
             columns.push(ColumnDefinition {
                 name,
                 data_type,
-                nullable: !primary_key,
+                nullable,
                 primary_key,
                 default_value,
                 foreign_key,
@@ -1260,6 +1270,25 @@ impl Parser {
             Ok(Statement::Explain(select_stmt))
         } else {
             Err("EXPLAIN must be followed by a SELECT statement".to_string())
+        }
+    }
+
+    fn parse_describe(&mut self) -> Result<Statement, String> {
+        self.consume(Token::Describe)?;
+        let table_name = match self.advance() {
+            Token::Identifier(name) => name,
+            _ => return Err("Expected table name after DESCRIBE".to_string()),
+        };
+        Ok(Statement::Describe(table_name))
+    }
+
+    fn parse_show(&mut self) -> Result<Statement, String> {
+        self.consume(Token::Show)?;
+        if *self.current_token() == Token::Tables {
+            self.advance();
+            Ok(Statement::ShowTables)
+        } else {
+            Err("SHOW must be followed by TABLES".to_string())
         }
     }
 }

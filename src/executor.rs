@@ -44,6 +44,8 @@ pub fn execute(statement: Statement) -> Result<String, String> {
         Statement::CommitTransaction => execute_commit_transaction(),
         Statement::RollbackTransaction => execute_rollback_transaction(),
         Statement::Explain(stmt) => execute_explain(stmt),
+        Statement::Describe(table_name) => execute_describe(table_name),
+        Statement::ShowTables => execute_show_tables(),
     }
 }
 
@@ -129,6 +131,64 @@ fn execute_rollback_transaction() -> Result<String, String> {
 fn execute_explain(stmt: SelectStatement) -> Result<String, String> {
     let db = get_database();
     planner::explain_query(&*db, &stmt)
+}
+
+fn execute_describe(table_name: String) -> Result<String, String> {
+    let db = get_database();
+    let table = db
+        .tables
+        .get(&table_name)
+        .ok_or_else(|| format!("Table '{}' does not exist", table_name))?;
+
+    let mut result = String::new();
+    result.push_str("Column\tType\tNullable\tPrimary Key\tDefault\n");
+    result.push_str(&"-".repeat(60));
+    result.push('\n');
+
+    for col in &table.columns {
+        let type_str = match col.data_type {
+            DataType::Integer => "INTEGER",
+            DataType::Float => "FLOAT",
+            DataType::Text => "TEXT",
+            DataType::Boolean => "BOOLEAN",
+            DataType::Date => "DATE",
+            DataType::Time => "TIME",
+            DataType::DateTime => "DATETIME",
+        };
+
+        let nullable_str = if col.nullable { "YES" } else { "NO" };
+        let pk_str = if col.primary_key { "YES" } else { "NO" };
+        let default_str = if let Some(ref default) = col.default_value {
+            format_value(default)
+        } else {
+            "NULL".to_string()
+        };
+
+        result.push_str(&format!(
+            "{}\t{}\t{}\t{}\t{}\n",
+            col.name, type_str, nullable_str, pk_str, default_str
+        ));
+    }
+
+    Ok(result)
+}
+
+fn execute_show_tables() -> Result<String, String> {
+    let db = get_database();
+    let mut result = String::new();
+    result.push_str("Tables\n");
+    result.push_str(&"-".repeat(40));
+    result.push('\n');
+
+    let mut table_names: Vec<&String> = db.tables.keys().collect();
+    table_names.sort();
+
+    for table_name in table_names {
+        result.push_str(table_name);
+        result.push('\n');
+    }
+
+    Ok(result)
 }
 
 fn execute_create_table(stmt: CreateTableStatement) -> Result<String, String> {
@@ -240,6 +300,10 @@ fn execute_insert(stmt: InsertStatement) -> Result<String, String> {
             })
             .collect::<Result<Vec<Vec<Value>>, String>>()?
     };
+
+    for values in &mapped_values {
+        validate_not_null_constraints(&table_ref.columns, values)?;
+    }
 
     for values in &mapped_values {
         validate_primary_keys_for_insert(&db, &table_ref.columns, values, &stmt.table)?;
@@ -1544,6 +1608,7 @@ fn execute_update(stmt: UpdateStatement) -> Result<String, String> {
                     return Err(format!("Column '{}' not found", assignment.column));
                 }
             }
+            validate_not_null_constraints(&table_ref.columns, &updated_row)?;
             validate_foreign_keys_for_update(&db, &table_ref.columns, &updated_row)?;
             rows_to_update.push((row_idx, updated_row));
         }
@@ -2871,6 +2936,23 @@ fn execute_alter_table(stmt: AlterTableStatement) -> Result<String, String> {
             ))
         }
     }
+}
+
+fn validate_not_null_constraints(
+    columns: &[ColumnDefinition],
+    row: &[Value],
+) -> Result<(), String> {
+    for (col_idx, col_def) in columns.iter().enumerate() {
+        if !col_def.nullable && col_idx < row.len() {
+            if matches!(row[col_idx], Value::Null) {
+                return Err(format!(
+                    "NOT NULL constraint violation: Column '{}' cannot be NULL",
+                    col_def.name
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn validate_primary_keys_for_insert(
