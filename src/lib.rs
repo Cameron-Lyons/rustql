@@ -3,6 +3,7 @@ pub mod database;
 pub mod executor;
 pub mod lexer;
 pub mod parser;
+pub mod plan_executor;
 pub mod planner;
 
 use std::fs;
