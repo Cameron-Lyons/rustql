@@ -888,65 +888,166 @@ impl<'a> PlanExecutor<'a> {
         rows: &[Vec<Value>],
         columns: &[String],
     ) -> Result<Value, String> {
-        let col_idx = if let Expression::Column(col) = agg.expr.as_ref() {
-            columns.iter().position(|c| c == col).unwrap_or(0)
-        } else {
-            0
-        };
+        use std::collections::BTreeSet;
 
-        let values: Vec<Value> = rows
+        // Build column definitions so we can reuse expression evaluation logic
+        let column_defs: Vec<ColumnDefinition> = columns
             .iter()
-            .filter_map(|row| row.get(col_idx).cloned())
+            .map(|name| ColumnDefinition {
+                name: name.clone(),
+                data_type: DataType::Text,
+                nullable: true,
+                primary_key: false,
+                default_value: None,
+                foreign_key: None,
+            })
             .collect();
 
+        // Helper to evaluate the aggregate expression for a single row
+        let eval_expr_for_row = |row: &Vec<Value>| -> Result<Value, String> {
+            self.evaluate_value_expression(&agg.expr, &column_defs, row)
+        };
+
+        // DISTINCT handling uses a set of seen values
+        let mut seen: BTreeSet<Value> = BTreeSet::new();
+
         match agg.function {
-            AggregateFunctionType::Count => Ok(Value::Integer(values.len() as i64)),
+            AggregateFunctionType::Count => {
+                // COUNT(*)
+                if let Expression::Column(name) = agg.expr.as_ref() {
+                    if name == "*" {
+                        if agg.distinct {
+                            return Err("COUNT(DISTINCT *) is not supported".to_string());
+                        }
+                        return Ok(Value::Integer(rows.len() as i64));
+                    }
+                }
+
+                let mut count = 0i64;
+                for row in rows {
+                    let val = eval_expr_for_row(row)?;
+                    if matches!(val, Value::Null) {
+                        continue;
+                    }
+                    if agg.distinct && !seen.insert(val) {
+                        continue;
+                    }
+                    count += 1;
+                }
+                Ok(Value::Integer(count))
+            }
             AggregateFunctionType::Sum => {
-                let sum: f64 = values
-                    .iter()
-                    .filter_map(|v| match v {
-                        Value::Integer(i) => Some(*i as f64),
-                        Value::Float(f) => Some(*f),
-                        _ => None,
-                    })
-                    .sum();
-                Ok(Value::Float(sum))
+                let mut sum = 0.0f64;
+                let mut has_value = false;
+
+                for row in rows {
+                    let val = eval_expr_for_row(row)?;
+                    if matches!(val, Value::Null) {
+                        continue;
+                    }
+                    if agg.distinct && !seen.insert(val.clone()) {
+                        continue;
+                    }
+                    match val {
+                        Value::Integer(i) => {
+                            sum += i as f64;
+                            has_value = true;
+                        }
+                        Value::Float(f) => {
+                            sum += f;
+                            has_value = true;
+                        }
+                        _ => return Err("SUM requires numeric values".to_string()),
+                    }
+                }
+
+                if has_value {
+                    Ok(Value::Float(sum))
+                } else {
+                    Ok(Value::Null)
+                }
             }
             AggregateFunctionType::Avg => {
-                let sum: f64 = values
-                    .iter()
-                    .filter_map(|v| match v {
-                        Value::Integer(i) => Some(*i as f64),
-                        Value::Float(f) => Some(*f),
-                        _ => None,
-                    })
-                    .sum();
-                Ok(Value::Float(if values.is_empty() {
-                    0.0
+                let mut sum = 0.0f64;
+                let mut count = 0i64;
+
+                for row in rows {
+                    let val = eval_expr_for_row(row)?;
+                    if matches!(val, Value::Null) {
+                        continue;
+                    }
+                    if agg.distinct && !seen.insert(val.clone()) {
+                        continue;
+                    }
+                    match val {
+                        Value::Integer(i) => {
+                            sum += i as f64;
+                            count += 1;
+                        }
+                        Value::Float(f) => {
+                            sum += f;
+                            count += 1;
+                        }
+                        _ => return Err("AVG requires numeric values".to_string()),
+                    }
+                }
+
+                if count > 0 {
+                    Ok(Value::Float(sum / count as f64))
                 } else {
-                    sum / values.len() as f64
-                }))
+                    Ok(Value::Null)
+                }
             }
-            AggregateFunctionType::Min => Ok(values
-                .into_iter()
-                .reduce(|a, b| {
-                    if self.compare_values(&a, &b) == Ordering::Less {
-                        a
-                    } else {
-                        b
+            AggregateFunctionType::Min => {
+                let mut min_val: Option<Value> = None;
+
+                for row in rows {
+                    let val = eval_expr_for_row(row)?;
+                    if matches!(val, Value::Null) {
+                        continue;
                     }
-                })
-                .unwrap_or(Value::Null)),
-            AggregateFunctionType::Max => Ok(values
-                .into_iter()
-                .reduce(|a, b| {
-                    if self.compare_values(&a, &b) == Ordering::Greater {
-                        a
-                    } else {
-                        b
+                    if agg.distinct && !seen.insert(val.clone()) {
+                        continue;
                     }
-                })
-                .unwrap_or(Value::Null)),
+                    min_val = Some(match min_val {
+                        None => val,
+                        Some(current) => {
+                            if self.compare_values(&val, &current) == Ordering::Less {
+                                val
+                            } else {
+                                current
+                            }
+                        }
+                    });
+                }
+
+                Ok(min_val.unwrap_or(Value::Null))
+            }
+            AggregateFunctionType::Max => {
+                let mut max_val: Option<Value> = None;
+
+                for row in rows {
+                    let val = eval_expr_for_row(row)?;
+                    if matches!(val, Value::Null) {
+                        continue;
+                    }
+                    if agg.distinct && !seen.insert(val.clone()) {
+                        continue;
+                    }
+                    max_val = Some(match max_val {
+                        None => val,
+                        Some(current) => {
+                            if self.compare_values(&val, &current) == Ordering::Greater {
+                                val
+                            } else {
+                                current
+                            }
+                        }
+                    });
+                }
+
+                Ok(max_val.unwrap_or(Value::Null))
+            }
         }
     }
 
