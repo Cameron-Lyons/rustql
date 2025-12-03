@@ -1,10 +1,6 @@
 use crate::ast::*;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
-use std::fs;
-use std::path::Path;
-
-const DATABASE_FILE: &str = "rustql_data.json";
 
 #[derive(Serialize, Deserialize, Default, Clone)]
 pub struct Database {
@@ -115,19 +111,12 @@ impl Database {
     }
 
     pub fn load() -> Self {
-        if Path::new(DATABASE_FILE).exists() {
-            let data = fs::read_to_string(DATABASE_FILE).unwrap_or_default();
-            serde_json::from_str(&data).unwrap_or_default()
-        } else {
-            Self::default()
-        }
+        // Delegate persistence to the configured storage engine.
+        crate::storage::storage_engine().load()
     }
 
     pub fn save(&self) -> Result<(), String> {
-        let data = serde_json::to_string_pretty(self)
-            .map_err(|e| format!("Failed to serialize database: {}", e))?;
-        fs::write(DATABASE_FILE, data)
-            .map_err(|e| format!("Failed to write database file: {}", e))?;
-        Ok(())
+        // Delegate persistence to the configured storage engine.
+        crate::storage::storage_engine().save(self)
     }
 }

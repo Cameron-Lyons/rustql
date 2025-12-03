@@ -5,6 +5,7 @@ pub mod lexer;
 pub mod parser;
 pub mod plan_executor;
 pub mod planner;
+pub mod storage;
 
 use std::fs;
 use std::path::Path;
