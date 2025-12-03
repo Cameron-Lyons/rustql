@@ -89,14 +89,8 @@ impl BTreeStorageEngine {
 #[allow(dead_code)]
 impl StorageEngine for BTreeStorageEngine {
     fn load(&self) -> Database {
-        // First-cut implementation: if the file does not exist, return a new DB.
-        // If it exists but is empty or invalid, also fall back to a new DB.
-        //
-        // Future work: interpret the file as a sequence of fixed-size pages,
-        // starting with a meta page that contains root pointers for each table
-        // and index B-tree.
         match BTreeFile::open(&self.data_path) {
-            Ok(mut file) => match file.read_database() {
+            Ok(mut file) => match file.read_database_via_pages() {
                 Ok(db) => db,
                 Err(_) => Database::new(),
             },
@@ -104,13 +98,14 @@ impl StorageEngine for BTreeStorageEngine {
         }
     }
 
-    fn save(&self, _db: &Database) -> Result<(), String> {
-        // First-cut implementation: delegate to a very simple paged file that
-        // currently just writes the entire Database as a single blob behind a
-        // small header. This keeps the on-disk format independent from the
-        // JsonStorageEngine while we experiment with page layout.
+    fn save(&self, db: &Database) -> Result<(), String> {
+        // Persist the database using a minimal page-based format:
+        // - Page 0 (Meta): points to the logical root page for the database.
+        // - Page 1 (Leaf): stores the entire Database as a JSON blob inside a
+        //   single entry's key. This uses the page + entry machinery end-to-end
+        //   while keeping the mapping logic simple for now.
         let mut file = BTreeFile::create(&self.data_path)?;
-        file.write_database(_db)
+        file.write_database_via_pages(db)
     }
 }
 
@@ -154,7 +149,7 @@ impl BTreeFile {
         Ok(BTreeFile { file })
     }
 
-    fn read_database(&mut self) -> Result<Database, String> {
+    fn read_database_legacy(&mut self) -> Result<Database, String> {
         let mut header = [0u8; 16];
         let bytes_read = self
             .file
@@ -182,7 +177,52 @@ impl BTreeFile {
             .map_err(|e| format!("Failed to decode BTree storage payload: {}", e))
     }
 
-    fn write_database(&mut self, db: &Database) -> Result<(), String> {
+    /// New page-based representation for the database:
+    /// - Global file header (magic + version) at offset 0.
+    /// - Page 0: Meta page, whose first entry points to the root page (page 1).
+    /// - Page 1: Leaf page containing a single entry whose key holds the
+    ///   entire Database encoded as JSON text.
+    fn read_database_via_pages(&mut self) -> Result<Database, String> {
+        // Read and validate file header.
+        let mut header = [0u8; 16];
+        let bytes_read = self
+            .file
+            .read(&mut header)
+            .map_err(|e| format!("Failed to read BTree storage header: {}", e))?;
+
+        if bytes_read < header.len() || header[0..8] != Self::MAGIC {
+            // If header is missing/invalid, try legacy format; otherwise start fresh.
+            return self.read_database_legacy().or_else(|_| Ok(Database::new()));
+        }
+
+        let _version = u32::from_le_bytes([header[8], header[9], header[10], header[11]]);
+        // Reserved bytes [12..16] currently ignored.
+
+        // Read meta page (page 0) and determine root page id.
+        let meta_page = self.read_page(0)?;
+        let root_page_id = meta_page
+            .entries
+            .get(0)
+            .map(|e| e.pointer)
+            .unwrap_or(1);
+
+        // Read root page and extract JSON-encoded Database from the first entry.
+        let root_page = self.read_page(root_page_id)?;
+        let json_entry = root_page
+            .entries
+            .get(0)
+            .ok_or_else(|| "Root BTree page has no entries".to_string())?;
+
+        let json_str = match &json_entry.key {
+            Value::Text(s) => s.clone(),
+            _ => return Err("Root BTree entry does not contain JSON text".to_string()),
+        };
+
+        serde_json::from_str(&json_str)
+            .map_err(|e| format!("Failed to decode Database from BTree root page: {}", e))
+    }
+
+    fn write_database_via_pages(&mut self, db: &Database) -> Result<(), String> {
         self.file
             .seek(SeekFrom::Start(0))
             .map_err(|e| format!("Failed to seek BTree storage file: {}", e))?;
@@ -196,12 +236,28 @@ impl BTreeFile {
             .write_all(&header)
             .map_err(|e| format!("Failed to write BTree storage header: {}", e))?;
 
-        let payload = serde_json::to_vec(db)
-            .map_err(|e| format!("Failed to encode database for BTree storage: {}", e))?;
+        // Encode Database as a JSON string stored in the first entry of the
+        // root leaf page.
+        let json = serde_json::to_string(db)
+            .map_err(|e| format!("Failed to encode database for BTree root page: {}", e))?;
 
-        self.file
-            .write_all(&payload)
-            .map_err(|e| format!("Failed to write BTree storage payload: {}", e))?;
+        // Root leaf page (page 1).
+        let mut root_page = BTreePage::new(1, PageKind::Leaf);
+        root_page
+            .entries
+            .push(BTreeEntry::new(Value::Text(json), 0));
+        root_page.header.entry_count = root_page.entries.len() as u16;
+
+        // Meta page (page 0) points to root page id 1.
+        let mut meta_page = BTreePage::new(0, PageKind::Meta);
+        meta_page
+            .entries
+            .push(BTreeEntry::new(Value::Text("root".to_string()), 1));
+        meta_page.header.entry_count = meta_page.entries.len() as u16;
+
+        // Write pages.
+        self.write_page(&meta_page)?;
+        self.write_page(&root_page)?;
 
         self.file
             .flush()
