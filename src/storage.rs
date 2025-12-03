@@ -1,4 +1,5 @@
 use crate::database::Database;
+use crate::ast::Value;
 use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -208,6 +209,121 @@ impl BTreeFile {
             .map_err(|e| format!("Failed to flush BTree storage file: {}", e))
     }
 }
+
+// ============================================================
+// B-tree page and node layout (not yet wired into BTreeFile)
+// ============================================================
+
+/// Fixed page size to target for on-disk B-tree pages.
+///
+/// This is a reasonable default that keeps pages aligned with typical
+/// filesystem blocks while staying small enough for experimentation.
+pub const BTREE_PAGE_SIZE: usize = 4096;
+
+/// Logical type of a page in the B-tree file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PageKind {
+    Meta,
+    Internal,
+    Leaf,
+}
+
+/// On-disk page header describing the contents of a single page.
+#[derive(Debug, Clone)]
+pub struct PageHeader {
+    /// Logical page identifier (0 is typically the meta page).
+    pub page_id: u64,
+    /// Type of this page (meta / internal / leaf).
+    pub kind: PageKind,
+    /// Number of key/value entries currently stored in the page.
+    pub entry_count: u16,
+    /// Reserved for future use (split pointers, sibling links, etc.).
+    pub reserved: u16,
+}
+
+impl PageHeader {
+    pub fn new(page_id: u64, kind: PageKind) -> Self {
+        PageHeader {
+            page_id,
+            kind,
+            entry_count: 0,
+            reserved: 0,
+        }
+    }
+}
+
+/// Single B-tree page in memory.
+///
+/// For now we expose a unified representation; in a more advanced design
+/// you might use distinct structs for meta / internal / leaf pages.
+#[derive(Debug, Clone)]
+pub struct BTreePage {
+    pub header: PageHeader,
+    /// For internal pages, `entries` hold (key, child_page_id) pairs.
+    /// For leaf pages, `entries` hold (key, row_pointer) pairs where
+    /// `row_pointer` could later be a physical offset.
+    pub entries: Vec<BTreeEntry>,
+}
+
+impl BTreePage {
+    pub fn new(page_id: u64, kind: PageKind) -> Self {
+        BTreePage {
+            header: PageHeader::new(page_id, kind),
+            entries: Vec::new(),
+        }
+    }
+
+    /// Estimate whether another entry would fit in this page, given the
+    /// target on-disk page size. This is deliberately approximate: once
+    /// the format stabilises we can tighten the calculation.
+    pub fn can_accept_entry(&self, entry: &BTreeEntry) -> bool {
+        let current_size = self.estimated_size();
+        let added = entry.estimated_size();
+        current_size + added <= BTREE_PAGE_SIZE
+    }
+
+    /// Rough size estimate for this page when serialised.
+    fn estimated_size(&self) -> usize {
+        // Header: 8 (page_id) + 1 (kind) + 2 (entry_count) + 2 (reserved) ~= 16 bytes
+        let header_size = 16usize;
+        let entries_size: usize = self.entries.iter().map(|e| e.estimated_size()).sum();
+        header_size + entries_size
+    }
+}
+
+/// Single key/value entry inside a B-tree page.
+#[derive(Debug, Clone)]
+pub struct BTreeEntry {
+    /// Logical key stored in this node.
+    pub key: Value,
+    /// For internal nodes: child page id.
+    /// For leaf nodes: offset or logical row id. For now we store it as
+    /// a simple 64-bit integer to keep the layout flexible.
+    pub pointer: u64,
+}
+
+impl BTreeEntry {
+    pub fn new(key: Value, pointer: u64) -> Self {
+        BTreeEntry { key, pointer }
+    }
+
+    /// Very rough size estimate used by `BTreePage::can_accept_entry`.
+    fn estimated_size(&self) -> usize {
+        // Pointer is always 8 bytes.
+        let pointer_size = 8usize;
+        let key_size = match &self.key {
+            Value::Null => 1,
+            Value::Integer(_) => 9, // tag + i64
+            Value::Float(_) => 9,   // tag + f64
+            Value::Boolean(_) => 2,
+            Value::Text(s) | Value::Date(s) | Value::Time(s) | Value::DateTime(s) => {
+                1 + s.len()
+            }
+        };
+        pointer_size + key_size
+    }
+}
+
 
 
 
