@@ -394,9 +394,7 @@ impl<'a> PlanExecutor<'a> {
                 result_row.push(agg_value);
             }
 
-            // Apply HAVING clause filter
             if let Some(having_expr) = having {
-                // Create column definitions for the result row (group by columns + aggregates)
                 let mut result_columns: Vec<String> = group_by.to_vec();
                 for agg in aggregates {
                     result_columns.push(format!("{:?}", agg.function));
@@ -413,7 +411,6 @@ impl<'a> PlanExecutor<'a> {
                     })
                     .collect();
 
-                // Create column definitions for the input (for evaluating aggregates in HAVING)
                 let input_column_defs: Vec<ColumnDefinition> = input
                     .columns
                     .iter()
@@ -427,7 +424,6 @@ impl<'a> PlanExecutor<'a> {
                     })
                     .collect();
 
-                // Evaluate HAVING clause - it can reference group by columns and aggregates
                 let include = self.evaluate_having(
                     having_expr,
                     &result_column_defs,
@@ -797,7 +793,6 @@ impl<'a> PlanExecutor<'a> {
         left_row: &[Value],
         right_row: &[Value],
     ) -> Result<bool, String> {
-        // Combine columns and rows for evaluation
         let mut combined_columns: Vec<ColumnDefinition> = left
             .columns
             .iter()
@@ -890,7 +885,6 @@ impl<'a> PlanExecutor<'a> {
     ) -> Result<Value, String> {
         use std::collections::BTreeSet;
 
-        // Build column definitions so we can reuse expression evaluation logic
         let column_defs: Vec<ColumnDefinition> = columns
             .iter()
             .map(|name| ColumnDefinition {
@@ -903,17 +897,14 @@ impl<'a> PlanExecutor<'a> {
             })
             .collect();
 
-        // Helper to evaluate the aggregate expression for a single row
         let eval_expr_for_row = |row: &Vec<Value>| -> Result<Value, String> {
             self.evaluate_value_expression(&agg.expr, &column_defs, row)
         };
 
-        // DISTINCT handling uses a set of seen values
         let mut seen: BTreeSet<Value> = BTreeSet::new();
 
         match agg.function {
             AggregateFunctionType::Count => {
-                // COUNT(*)
                 if let Expression::Column(name) = agg.expr.as_ref() {
                     if name == "*" {
                         if agg.distinct {
@@ -1140,15 +1131,13 @@ impl<'a> PlanExecutor<'a> {
     ) -> Result<Value, String> {
         match expr {
             Expression::Function(agg) => {
-                // Evaluate aggregate function over the group
                 let group_rows_vec: Vec<Vec<Value>> = group_rows.iter().cloned().collect();
-                // Use input_columns for aggregate computation (they represent the original table columns)
+
                 let col_names: Vec<String> = input_columns.iter().map(|c| c.name.clone()).collect();
                 self.compute_aggregate(agg, &group_rows_vec, &col_names)
             }
             Expression::Value(val) => Ok(val.clone()),
             Expression::Column(name) => {
-                // Look up in result columns (group by or aggregate result)
                 let col_name = if name.contains('.') {
                     name.split('.').next_back().unwrap_or(name)
                 } else {
@@ -1201,7 +1190,6 @@ impl<'a> PlanExecutor<'a> {
         result: &ExecutionResult,
         select_stmt: &SelectStatement,
     ) -> Result<ExecutionResult, String> {
-        // Convert column names to ColumnDefinition for evaluation
         let column_defs: Vec<ColumnDefinition> = result
             .columns
             .iter()
@@ -1215,7 +1203,6 @@ impl<'a> PlanExecutor<'a> {
             })
             .collect();
 
-        // Determine which columns to project
         let column_specs: Vec<(String, Column)> =
             if matches!(select_stmt.columns.get(0), Some(Column::All)) {
                 result

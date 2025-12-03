@@ -111,12 +111,10 @@ impl Database {
     }
 
     pub fn load() -> Self {
-        // Delegate persistence to the configured storage engine.
         crate::storage::storage_engine().load()
     }
 
     pub fn save(&self) -> Result<(), String> {
-        // Delegate persistence to the configured storage engine.
         crate::storage::storage_engine().save(self)
     }
 }

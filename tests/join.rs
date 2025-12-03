@@ -234,7 +234,6 @@ fn test_right_join() {
 
     let result = process_query("SELECT customers.name, orders.product FROM customers RIGHT JOIN orders ON customers.id = orders.customer_id").unwrap();
 
-    // Should include all orders
     assert!(result.contains("Alice"));
     assert!(result.contains("Bob"));
     assert!(result.contains("Laptop"));

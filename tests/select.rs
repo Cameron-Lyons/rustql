@@ -253,7 +253,7 @@ fn test_min_distinct_values() {
     });
 
     let output = execute(stmt).unwrap();
-    // MIN(DISTINCT score) should be 50 (ignoring duplicates of 100 and 75)
+
     assert!(output.contains("50"));
 }
 
@@ -318,7 +318,7 @@ fn test_max_distinct_values() {
     });
 
     let output = execute(stmt).unwrap();
-    // MAX(DISTINCT price) should be 50.0 (ignoring duplicates of 25.5 and 30.0)
+
     assert!(output.contains("50"));
 }
 
@@ -383,6 +383,6 @@ fn test_avg_distinct_values() {
     });
 
     let output = execute(stmt).unwrap();
-    // AVG(DISTINCT grade) should be (85.0 + 90.0 + 95.0) / 3 = 90.0 (ignoring duplicate 85.0 and NULL)
+
     assert!(output.contains("90"));
 }

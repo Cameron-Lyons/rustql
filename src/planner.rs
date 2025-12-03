@@ -3,17 +3,15 @@ use crate::database::{Database, Index, Table};
 use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 
-/// Query plan node representing a single operation in the execution plan
 #[derive(Debug, Clone)]
 pub enum PlanNode {
-    /// Sequential scan of a table
     SeqScan {
         table: String,
         filter: Option<Expression>,
         cost: f64,
         rows: usize,
     },
-    /// Index scan using an index
+
     IndexScan {
         table: String,
         index: String,
@@ -21,7 +19,7 @@ pub enum PlanNode {
         cost: f64,
         rows: usize,
     },
-    /// Nested loop join
+
     NestedLoopJoin {
         left: Box<PlanNode>,
         right: Box<PlanNode>,
@@ -29,7 +27,7 @@ pub enum PlanNode {
         cost: f64,
         rows: usize,
     },
-    /// Hash join (for equality joins)
+
     HashJoin {
         left: Box<PlanNode>,
         right: Box<PlanNode>,
@@ -37,21 +35,21 @@ pub enum PlanNode {
         cost: f64,
         rows: usize,
     },
-    /// Filter operation
+
     Filter {
         input: Box<PlanNode>,
         condition: Expression,
         cost: f64,
         rows: usize,
     },
-    /// Sort operation
+
     Sort {
         input: Box<PlanNode>,
         order_by: Vec<OrderByExpr>,
         cost: f64,
         rows: usize,
     },
-    /// Limit operation
+
     Limit {
         input: Box<PlanNode>,
         limit: usize,
@@ -59,7 +57,7 @@ pub enum PlanNode {
         cost: f64,
         rows: usize,
     },
-    /// Aggregate operation
+
     Aggregate {
         input: Box<PlanNode>,
         group_by: Vec<String>,
@@ -70,7 +68,6 @@ pub enum PlanNode {
     },
 }
 
-/// Statistics about a table for cost estimation
 #[derive(Debug, Clone)]
 pub struct TableStats {
     pub row_count: usize,
@@ -86,13 +83,10 @@ pub struct ColumnStats {
     pub max_value: Option<Value>,
 }
 
-/// Query planner that generates optimized execution plans
 pub struct QueryPlanner {
     db: *const Database,
 }
 
-// SAFETY: The QueryPlanner only holds a pointer to Database for analysis.
-// It doesn't mutate the database and is only used during planning phase.
 unsafe impl Send for QueryPlanner {}
 unsafe impl Sync for QueryPlanner {}
 
@@ -101,11 +95,9 @@ impl QueryPlanner {
         QueryPlanner { db }
     }
 
-    /// Generate an optimized query plan for a SELECT statement
     pub fn plan_select(&self, stmt: &SelectStatement) -> Result<PlanNode, String> {
         let db = unsafe { &*self.db };
 
-        // Start with the base table
         let base_table = db
             .tables
             .get(&stmt.from)
@@ -120,19 +112,16 @@ impl QueryPlanner {
             db,
         )?;
 
-        // Plan joins
         if !stmt.joins.is_empty() {
             plan = self.plan_joins(plan, stmt, db)?;
         }
 
-        // Apply WHERE clause filter if not already applied
         if let Some(ref where_expr) = stmt.where_clause {
             if !self.is_filter_applied(&plan, where_expr) {
                 plan = self.plan_filter(plan, where_expr.clone());
             }
         }
 
-        // Plan GROUP BY
         if let Some(ref group_by) = stmt.group_by {
             let aggregates: Vec<AggregateFunction> = stmt
                 .columns
@@ -149,12 +138,10 @@ impl QueryPlanner {
             plan = self.plan_aggregate(plan, group_by.clone(), aggregates, stmt.having.clone());
         }
 
-        // Plan ORDER BY
         if let Some(ref order_by) = stmt.order_by {
             plan = self.plan_sort(plan, order_by.clone());
         }
 
-        // Plan LIMIT/OFFSET
         let limit = stmt.limit.unwrap_or(usize::MAX);
         let offset = stmt.offset.unwrap_or(0);
         if limit != usize::MAX || offset != 0 {
@@ -164,7 +151,6 @@ impl QueryPlanner {
         Ok(plan)
     }
 
-    /// Plan table access (choose between seq scan and index scan)
     fn plan_table_access(
         &self,
         table_name: &str,
@@ -173,7 +159,6 @@ impl QueryPlanner {
         where_clause: Option<&Expression>,
         db: &Database,
     ) -> Result<PlanNode, String> {
-        // Check if we can use an index
         if let Some(ref where_expr) = where_clause {
             if let Some(index_usage) = self.find_best_index(table_name, where_expr, db) {
                 let index = db.indexes.get(&index_usage.index_name).unwrap();
@@ -190,7 +175,6 @@ impl QueryPlanner {
             }
         }
 
-        // Fall back to sequential scan
         let cost = self.estimate_seq_scan_cost(stats.row_count);
         let rows = stats.row_count;
 
@@ -202,7 +186,6 @@ impl QueryPlanner {
         })
     }
 
-    /// Plan joins with optimal ordering
     fn plan_joins(
         &self,
         left_plan: PlanNode,
@@ -212,7 +195,6 @@ impl QueryPlanner {
         let mut current_plan = left_plan;
         let mut remaining_joins = stmt.joins.clone();
 
-        // Simple greedy join ordering: join smaller tables first
         remaining_joins.sort_by(|a, b| {
             let a_size = db.tables.get(&a.table).map(|t| t.rows.len()).unwrap_or(0);
             let b_size = db.tables.get(&b.table).map(|t| t.rows.len()).unwrap_or(0);
@@ -229,12 +211,9 @@ impl QueryPlanner {
             let right_plan =
                 self.plan_table_access(&join.table, right_table, &right_stats, None, db)?;
 
-            // Choose join algorithm based on join condition
             let join_plan = if self.is_equality_join(&join.on) {
-                // Use hash join for equality joins
                 self.plan_hash_join(current_plan, right_plan, join.on.clone())
             } else {
-                // Use nested loop join for other joins
                 self.plan_nested_loop_join(current_plan, right_plan, join.on.clone())
             };
 
@@ -244,7 +223,6 @@ impl QueryPlanner {
         Ok(current_plan)
     }
 
-    /// Plan a hash join
     fn plan_hash_join(&self, left: PlanNode, right: PlanNode, condition: Expression) -> PlanNode {
         let left_rows = self.estimate_rows(&left);
         let right_rows = self.estimate_rows(&right);
@@ -260,7 +238,6 @@ impl QueryPlanner {
         }
     }
 
-    /// Plan a nested loop join
     fn plan_nested_loop_join(
         &self,
         left: PlanNode,
@@ -281,7 +258,6 @@ impl QueryPlanner {
         }
     }
 
-    /// Plan a filter operation
     fn plan_filter(&self, input: PlanNode, condition: Expression) -> PlanNode {
         let input_rows = self.estimate_rows(&input);
         let input_cost = self.estimate_cost(&input);
@@ -297,7 +273,6 @@ impl QueryPlanner {
         }
     }
 
-    /// Plan a sort operation
     fn plan_sort(&self, input: PlanNode, order_by: Vec<OrderByExpr>) -> PlanNode {
         let input_rows = self.estimate_rows(&input);
         let base_cost = self.estimate_cost(&input);
@@ -311,7 +286,6 @@ impl QueryPlanner {
         }
     }
 
-    /// Plan a limit operation
     fn plan_limit(&self, input: PlanNode, limit: usize, offset: usize) -> PlanNode {
         let input_rows = self.estimate_rows(&input);
         let output_rows = (input_rows.saturating_sub(offset)).min(limit);
@@ -326,7 +300,6 @@ impl QueryPlanner {
         }
     }
 
-    /// Plan an aggregate operation
     fn plan_aggregate(
         &self,
         input: PlanNode,
@@ -336,8 +309,7 @@ impl QueryPlanner {
     ) -> PlanNode {
         let input_rows = self.estimate_rows(&input);
         let base_cost = self.estimate_cost(&input);
-        // Estimate output rows based on distinct values in group by columns
-        // Simplified: assume 10% reduction for grouping
+
         let output_rows = (input_rows as f64 * 0.1).max(1.0) as usize;
         let cost = self.estimate_aggregate_cost(input_rows, group_by.len(), aggregates.len());
 
@@ -350,8 +322,6 @@ impl QueryPlanner {
             rows: output_rows,
         }
     }
-
-    // Cost estimation functions
 
     fn estimate_cost(&self, plan: &PlanNode) -> f64 {
         match plan {
@@ -380,12 +350,10 @@ impl QueryPlanner {
     }
 
     fn estimate_seq_scan_cost(&self, row_count: usize) -> f64 {
-        // Sequential scan cost: linear in number of rows
         row_count as f64 * 1.0
     }
 
     fn estimate_index_scan_cost(&self, total_rows: usize, selected_rows: usize) -> f64 {
-        // Index scan cost: log(n) for index lookup + selected rows
         (total_rows as f64).ln() * 2.0 + selected_rows as f64 * 0.5
     }
 
@@ -395,7 +363,6 @@ impl QueryPlanner {
         let left_cost = self.estimate_cost(left);
         let right_cost = self.estimate_cost(right);
 
-        // Hash join: build hash table from smaller relation, probe with larger
         let build_cost = left_rows.min(right_rows) as f64 * 1.5;
         let probe_cost = left_rows.max(right_rows) as f64 * 0.5;
 
@@ -408,12 +375,10 @@ impl QueryPlanner {
         let left_cost = self.estimate_cost(left);
         let right_cost = self.estimate_cost(right);
 
-        // Nested loop join: for each row in left, scan right
         left_cost + right_cost + (left_rows * right_rows) as f64
     }
 
     fn estimate_sort_cost(&self, row_count: usize) -> f64 {
-        // Sort cost: O(n log n)
         row_count as f64 * (row_count as f64).ln() * 0.5
     }
 
@@ -423,13 +388,10 @@ impl QueryPlanner {
         group_by_cols: usize,
         agg_count: usize,
     ) -> f64 {
-        // Aggregate cost: need to process all rows
         input_rows as f64 * (1.0 + (group_by_cols + agg_count) as f64 * 0.1)
     }
 
     fn estimate_selectivity(&self, condition: &Expression, total_rows: usize) -> f64 {
-        // Simplified selectivity estimation
-        // In a real system, this would use statistics
         match condition {
             Expression::BinaryOp { op, .. } => {
                 match op {
@@ -445,7 +407,6 @@ impl QueryPlanner {
                 }
             }
             Expression::In { values, .. } => {
-                // Assume selectivity based on number of values
                 (values.len() as f64 / total_rows.max(1) as f64).min(1.0)
             }
             Expression::IsNull { .. } => 0.1,
@@ -459,8 +420,6 @@ impl QueryPlanner {
         right_rows: usize,
         condition: &Expression,
     ) -> usize {
-        // Simplified join cardinality estimation
-        // Assume join selectivity of 10% for equality joins
         if self.is_equality_join(condition) {
             ((left_rows * right_rows) as f64 * 0.1) as usize
         } else {
@@ -474,31 +433,19 @@ impl QueryPlanner {
         index: &Index,
         stats: &TableStats,
     ) -> usize {
-        // Estimate rows returned by index scan
         match &index_usage.operation {
-            IndexOperation::Equality(_) => {
-                // Equality: typically 1 or a few rows
-                index
-                    .entries
-                    .get(&index_usage.value.clone().unwrap())
-                    .map(|v| v.len())
-                    .unwrap_or(0)
-            }
-            IndexOperation::Range { .. } => {
-                // Range: estimate based on range size
-                (stats.row_count as f64 * 0.1) as usize
-            }
-            IndexOperation::In(values) => {
-                // IN: sum of rows for each value
-                values
-                    .iter()
-                    .map(|v| index.entries.get(v).map(|rows| rows.len()).unwrap_or(0))
-                    .sum()
-            }
+            IndexOperation::Equality(_) => index
+                .entries
+                .get(&index_usage.value.clone().unwrap())
+                .map(|v| v.len())
+                .unwrap_or(0),
+            IndexOperation::Range { .. } => (stats.row_count as f64 * 0.1) as usize,
+            IndexOperation::In(values) => values
+                .iter()
+                .map(|v| index.entries.get(v).map(|rows| rows.len()).unwrap_or(0))
+                .sum(),
         }
     }
-
-    // Helper functions
 
     fn is_equality_join(&self, condition: &Expression) -> bool {
         if let Expression::BinaryOp { op, .. } = condition {
@@ -522,10 +469,8 @@ impl QueryPlanner {
         let row_count = table.rows.len();
         let mut column_stats = HashMap::new();
 
-        // Check if table has indexes
         let has_index = db.indexes.values().any(|idx| idx.table == table_name);
 
-        // Collect basic column statistics
         for (col_idx, col_def) in table.columns.iter().enumerate() {
             if !table.rows.is_empty() {
                 let mut distinct_values = BTreeSet::new();
@@ -591,8 +536,6 @@ impl QueryPlanner {
         where_expr: &Expression,
         db: &Database,
     ) -> Option<IndexUsage> {
-        // Find the best index for the WHERE clause
-        // This is a simplified version - in practice, you'd evaluate multiple indexes
         self.find_index_usage_in_expression(table_name, where_expr, db)
     }
 
@@ -612,7 +555,6 @@ impl QueryPlanner {
                     };
 
                     if let Some(value) = self.extract_value(right) {
-                        // Check if there's an index on this column
                         for (idx_name, idx) in db.indexes.iter() {
                             if idx.table == table_name && idx.column == normalized_col {
                                 return Some(IndexUsage {
@@ -790,7 +732,6 @@ impl PlanNode {
     }
 }
 
-/// Explain a SELECT query and return the query plan
 pub fn explain_query(db: &Database, stmt: &SelectStatement) -> Result<String, String> {
     let planner = QueryPlanner::new(db);
     let plan = planner.plan_select(stmt)?;

@@ -299,7 +299,6 @@ fn test_scalar_subquery_aggregate() {
     }))
     .unwrap();
 
-    // Test COUNT aggregate in scalar subquery
     let stmt = Statement::Select(SelectStatement {
         union: None,
         union_all: false,
