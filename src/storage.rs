@@ -1,5 +1,6 @@
-use crate::database::Database;
 use crate::ast::Value;
+use crate::database::Database;
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -44,8 +45,7 @@ impl StorageEngine for JsonStorageEngine {
     fn save(&self, db: &Database) -> Result<(), String> {
         let data = serde_json::to_string_pretty(db)
             .map_err(|e| format!("Failed to serialize database: {}", e))?;
-        fs::write(&self.path, data)
-            .map_err(|e| format!("Failed to write database file: {}", e))?;
+        fs::write(&self.path, data).map_err(|e| format!("Failed to write database file: {}", e))?;
         Ok(())
     }
 }
@@ -167,8 +167,7 @@ impl BTreeFile {
         }
 
         // In the future we may branch on version; for now we just ensure it's non-zero.
-        let _version =
-            u32::from_le_bytes([header[8], header[9], header[10], header[11]]);
+        let _version = u32::from_le_bytes([header[8], header[9], header[10], header[11]]);
 
         let mut buf = Vec::new();
         self.file
@@ -221,7 +220,7 @@ impl BTreeFile {
 pub const BTREE_PAGE_SIZE: usize = 4096;
 
 /// Logical type of a page in the B-tree file.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PageKind {
     Meta,
     Internal,
@@ -229,7 +228,7 @@ pub enum PageKind {
 }
 
 /// On-disk page header describing the contents of a single page.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PageHeader {
     /// Logical page identifier (0 is typically the meta page).
     pub page_id: u64,
@@ -256,7 +255,7 @@ impl PageHeader {
 ///
 /// For now we expose a unified representation; in a more advanced design
 /// you might use distinct structs for meta / internal / leaf pages.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BTreePage {
     pub header: PageHeader,
     /// For internal pages, `entries` hold (key, child_page_id) pairs.
@@ -292,7 +291,7 @@ impl BTreePage {
 }
 
 /// Single key/value entry inside a B-tree page.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BTreeEntry {
     /// Logical key stored in this node.
     pub key: Value,
@@ -316,14 +315,130 @@ impl BTreeEntry {
             Value::Integer(_) => 9, // tag + i64
             Value::Float(_) => 9,   // tag + f64
             Value::Boolean(_) => 2,
-            Value::Text(s) | Value::Date(s) | Value::Time(s) | Value::DateTime(s) => {
-                1 + s.len()
-            }
+            Value::Text(s) | Value::Date(s) | Value::Time(s) | Value::DateTime(s) => 1 + s.len(),
         };
         pointer_size + key_size
     }
 }
 
+// ---------------- Page <-> bytes helpers ----------------
 
+impl BTreePage {
+    /// Serialise this page into a fixed-size byte buffer suitable for writing
+    /// to disk. Fails if the estimated encoded size would exceed
+    /// `BTREE_PAGE_SIZE`.
+    pub fn to_bytes(&self) -> Result<[u8; BTREE_PAGE_SIZE], String> {
+        let mut buf = [0u8; BTREE_PAGE_SIZE];
 
+        // Encode header using a simple fixed layout.
+        let kind_byte = match self.header.kind {
+            PageKind::Meta => 0u8,
+            PageKind::Internal => 1u8,
+            PageKind::Leaf => 2u8,
+        };
 
+        buf[0..8].copy_from_slice(&self.header.page_id.to_le_bytes());
+        buf[8] = kind_byte;
+        buf[9..11].copy_from_slice(&self.header.entry_count.to_le_bytes());
+        buf[11..13].copy_from_slice(&self.header.reserved.to_le_bytes());
+        // bytes 13..16 reserved/padding (left as zero)
+
+        // Encode entries as a compact JSON blob for now.
+        let entries_json = serde_json::to_vec(&self.entries)
+            .map_err(|e| format!("Failed to encode BTree entries: {}", e))?;
+
+        let header_size = 16usize;
+        if header_size + entries_json.len() > BTREE_PAGE_SIZE {
+            return Err("BTreePage too large to fit in fixed page size".to_string());
+        }
+
+        buf[header_size..header_size + entries_json.len()].copy_from_slice(&entries_json);
+        Ok(buf)
+    }
+
+    /// Deserialize a `BTreePage` from a fixed-size page buffer.
+    pub fn from_bytes(buf: &[u8; BTREE_PAGE_SIZE]) -> Result<Self, String> {
+        let page_id = u64::from_le_bytes([
+            buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7],
+        ]);
+        let kind = match buf[8] {
+            0 => PageKind::Meta,
+            1 => PageKind::Internal,
+            2 => PageKind::Leaf,
+            other => {
+                return Err(format!("Unknown BTree page kind byte: {}", other));
+            }
+        };
+        let entry_count = u16::from_le_bytes([buf[9], buf[10]]);
+        let reserved = u16::from_le_bytes([buf[11], buf[12]]);
+
+        let header = PageHeader {
+            page_id,
+            kind,
+            entry_count,
+            reserved,
+        };
+
+        // Remaining bytes contain the JSON-encoded entries; trim trailing zeros
+        // before decoding to avoid parse errors on unwritten space.
+        let header_size = 16usize;
+        let mut payload = &buf[header_size..];
+        // Find last non-zero byte.
+        if let Some(last) = payload.iter().rposition(|b| *b != 0) {
+            payload = &payload[..=last];
+        } else {
+            payload = &[];
+        }
+
+        let entries: Vec<BTreeEntry> = if payload.is_empty() {
+            Vec::new()
+        } else {
+            serde_json::from_slice(payload)
+                .map_err(|e| format!("Failed to decode BTree entries: {}", e))?
+        };
+
+        Ok(BTreePage { header, entries })
+    }
+}
+
+impl BTreeFile {
+    /// Read a single page at the given `page_id` from disk.
+    ///
+    /// This uses the current simple header+payload layout and does not yet
+    /// integrate with `read_database` / `write_database`.
+    pub fn read_page(&mut self, page_id: u64) -> Result<BTreePage, String> {
+        let header_size = 16u64;
+        let offset = header_size + page_id * BTREE_PAGE_SIZE as u64;
+
+        self.file
+            .seek(SeekFrom::Start(offset))
+            .map_err(|e| format!("Failed to seek to BTree page: {}", e))?;
+
+        let mut buf = [0u8; BTREE_PAGE_SIZE];
+        self.file
+            .read_exact(&mut buf)
+            .map_err(|e| format!("Failed to read BTree page: {}", e))?;
+
+        BTreePage::from_bytes(&buf)
+    }
+
+    /// Write a single page to disk at its `header.page_id`.
+    pub fn write_page(&mut self, page: &BTreePage) -> Result<(), String> {
+        let header_size = 16u64;
+        let offset = header_size + page.header.page_id * BTREE_PAGE_SIZE as u64;
+
+        let buf = page.to_bytes()?;
+
+        self.file
+            .seek(SeekFrom::Start(offset))
+            .map_err(|e| format!("Failed to seek to BTree page for write: {}", e))?;
+
+        self.file
+            .write_all(&buf)
+            .map_err(|e| format!("Failed to write BTree page: {}", e))?;
+
+        self.file
+            .flush()
+            .map_err(|e| format!("Failed to flush BTree page: {}", e))
+    }
+}
