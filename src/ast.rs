@@ -120,6 +120,7 @@ pub struct ColumnDefinition {
     pub data_type: DataType,
     pub nullable: bool,
     pub primary_key: bool,
+    pub unique: bool,
     pub default_value: Option<Value>,
     pub foreign_key: Option<ForeignKeyConstraint>,
 }

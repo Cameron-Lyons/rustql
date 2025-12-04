@@ -708,6 +708,7 @@ impl Parser {
             let data_type = self.parse_data_type()?;
 
             let mut primary_key = false;
+            let mut unique = false;
             let mut default_value = None;
             let mut nullable = true;
 
@@ -722,6 +723,11 @@ impl Parser {
                 self.advance();
                 self.consume(Token::Null)?;
                 nullable = false;
+            }
+
+            if *self.current_token() == Token::Unique {
+                self.advance();
+                unique = true;
             }
 
             if *self.current_token() == Token::Default {
@@ -805,6 +811,7 @@ impl Parser {
                 data_type,
                 nullable,
                 primary_key,
+                unique,
                 default_value,
                 foreign_key,
             });
@@ -886,6 +893,7 @@ impl Parser {
                     data_type,
                     nullable: true,
                     primary_key: false,
+                    unique: false,
                     default_value: None,
                     foreign_key: None,
                 })

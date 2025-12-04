@@ -9,6 +9,7 @@ fn test_alter_table_add_column() {
         name: "users".into(),
         columns: vec![ColumnDefinition {
             primary_key: false,
+            unique: false,
             default_value: None,
             name: "id".into(),
             data_type: DataType::Integer,
@@ -22,6 +23,7 @@ fn test_alter_table_add_column() {
         table: "users".into(),
         operation: AlterOperation::AddColumn(ColumnDefinition {
             primary_key: false,
+            unique: false,
             default_value: None,
             name: "name".into(),
             data_type: DataType::Text,

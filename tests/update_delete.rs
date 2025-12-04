@@ -10,6 +10,7 @@ fn test_update_and_delete() {
         columns: vec![
             ColumnDefinition {
                 primary_key: false,
+                unique: false,
                 default_value: None,
                 foreign_key: None,
                 name: "id".into(),
@@ -18,6 +19,7 @@ fn test_update_and_delete() {
             },
             ColumnDefinition {
                 primary_key: false,
+                unique: false,
                 default_value: None,
                 foreign_key: None,
                 name: "name".into(),

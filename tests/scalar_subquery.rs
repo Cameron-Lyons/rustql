@@ -18,6 +18,7 @@ fn test_scalar_subquery_basic() {
         columns: vec![
             ColumnDefinition {
                 primary_key: false,
+                unique: false,
                 default_value: None,
                 foreign_key: None,
                 name: "id".into(),
@@ -26,6 +27,7 @@ fn test_scalar_subquery_basic() {
             },
             ColumnDefinition {
                 primary_key: false,
+                unique: false,
                 default_value: None,
                 foreign_key: None,
                 name: "name".into(),
@@ -51,6 +53,7 @@ fn test_scalar_subquery_basic() {
         columns: vec![
             ColumnDefinition {
                 primary_key: false,
+                unique: false,
                 default_value: None,
                 foreign_key: None,
                 name: "user_id".into(),
@@ -59,6 +62,7 @@ fn test_scalar_subquery_basic() {
             },
             ColumnDefinition {
                 primary_key: false,
+                unique: false,
                 default_value: None,
                 foreign_key: None,
                 name: "amount".into(),
@@ -134,6 +138,7 @@ fn test_scalar_subquery_null() {
         columns: vec![
             ColumnDefinition {
                 primary_key: false,
+                unique: false,
                 default_value: None,
                 foreign_key: None,
                 name: "id".into(),
@@ -142,6 +147,7 @@ fn test_scalar_subquery_null() {
             },
             ColumnDefinition {
                 primary_key: false,
+                unique: false,
                 default_value: None,
                 foreign_key: None,
                 name: "name".into(),
@@ -164,6 +170,7 @@ fn test_scalar_subquery_null() {
         columns: vec![
             ColumnDefinition {
                 primary_key: false,
+                unique: false,
                 default_value: None,
                 foreign_key: None,
                 name: "user_id".into(),
@@ -172,6 +179,7 @@ fn test_scalar_subquery_null() {
             },
             ColumnDefinition {
                 primary_key: false,
+                unique: false,
                 default_value: None,
                 foreign_key: None,
                 name: "amount".into(),
@@ -237,6 +245,7 @@ fn test_scalar_subquery_aggregate() {
         columns: vec![
             ColumnDefinition {
                 primary_key: false,
+                unique: false,
                 default_value: None,
                 foreign_key: None,
                 name: "id".into(),
@@ -245,6 +254,7 @@ fn test_scalar_subquery_aggregate() {
             },
             ColumnDefinition {
                 primary_key: false,
+                unique: false,
                 default_value: None,
                 foreign_key: None,
                 name: "name".into(),
@@ -270,6 +280,7 @@ fn test_scalar_subquery_aggregate() {
         columns: vec![
             ColumnDefinition {
                 primary_key: false,
+                unique: false,
                 default_value: None,
                 foreign_key: None,
                 name: "user_id".into(),
@@ -278,6 +289,7 @@ fn test_scalar_subquery_aggregate() {
             },
             ColumnDefinition {
                 primary_key: false,
+                unique: false,
                 default_value: None,
                 foreign_key: None,
                 name: "amount".into(),
@@ -357,6 +369,7 @@ fn test_scalar_subquery_aggregate_sum() {
         columns: vec![
             ColumnDefinition {
                 primary_key: false,
+                unique: false,
                 default_value: None,
                 foreign_key: None,
                 name: "id".into(),
@@ -365,6 +378,7 @@ fn test_scalar_subquery_aggregate_sum() {
             },
             ColumnDefinition {
                 primary_key: false,
+                unique: false,
                 default_value: None,
                 foreign_key: None,
                 name: "name".into(),
@@ -387,6 +401,7 @@ fn test_scalar_subquery_aggregate_sum() {
         columns: vec![
             ColumnDefinition {
                 primary_key: false,
+                unique: false,
                 default_value: None,
                 foreign_key: None,
                 name: "user_id".into(),
@@ -395,6 +410,7 @@ fn test_scalar_subquery_aggregate_sum() {
             },
             ColumnDefinition {
                 primary_key: false,
+                unique: false,
                 default_value: None,
                 foreign_key: None,
                 name: "amount".into(),
@@ -472,6 +488,7 @@ fn test_scalar_subquery_nested() {
         columns: vec![
             ColumnDefinition {
                 primary_key: false,
+                unique: false,
                 default_value: None,
                 foreign_key: None,
                 name: "id".into(),
@@ -480,6 +497,7 @@ fn test_scalar_subquery_nested() {
             },
             ColumnDefinition {
                 primary_key: false,
+                unique: false,
                 default_value: None,
                 foreign_key: None,
                 name: "name".into(),
@@ -502,6 +520,7 @@ fn test_scalar_subquery_nested() {
         columns: vec![
             ColumnDefinition {
                 primary_key: false,
+                unique: false,
                 default_value: None,
                 foreign_key: None,
                 name: "user_id".into(),
@@ -510,6 +529,7 @@ fn test_scalar_subquery_nested() {
             },
             ColumnDefinition {
                 primary_key: false,
+                unique: false,
                 default_value: None,
                 foreign_key: None,
                 name: "amount".into(),
@@ -532,6 +552,7 @@ fn test_scalar_subquery_nested() {
         columns: vec![
             ColumnDefinition {
                 primary_key: false,
+                unique: false,
                 default_value: None,
                 foreign_key: None,
                 name: "id".into(),
@@ -540,6 +561,7 @@ fn test_scalar_subquery_nested() {
             },
             ColumnDefinition {
                 primary_key: false,
+                unique: false,
                 default_value: None,
                 foreign_key: None,
                 name: "order_id".into(),
@@ -548,6 +570,7 @@ fn test_scalar_subquery_nested() {
             },
             ColumnDefinition {
                 primary_key: false,
+                unique: false,
                 default_value: None,
                 foreign_key: None,
                 name: "price".into(),
@@ -642,6 +665,7 @@ fn test_scalar_subquery_with_join() {
         columns: vec![
             ColumnDefinition {
                 primary_key: false,
+                unique: false,
                 default_value: None,
                 foreign_key: None,
                 name: "id".into(),
@@ -650,6 +674,7 @@ fn test_scalar_subquery_with_join() {
             },
             ColumnDefinition {
                 primary_key: false,
+                unique: false,
                 default_value: None,
                 foreign_key: None,
                 name: "name".into(),
@@ -675,6 +700,7 @@ fn test_scalar_subquery_with_join() {
         columns: vec![
             ColumnDefinition {
                 primary_key: false,
+                unique: false,
                 default_value: None,
                 foreign_key: None,
                 name: "id".into(),
@@ -683,6 +709,7 @@ fn test_scalar_subquery_with_join() {
             },
             ColumnDefinition {
                 primary_key: false,
+                unique: false,
                 default_value: None,
                 foreign_key: None,
                 name: "user_id".into(),
@@ -691,6 +718,7 @@ fn test_scalar_subquery_with_join() {
             },
             ColumnDefinition {
                 primary_key: false,
+                unique: false,
                 default_value: None,
                 foreign_key: None,
                 name: "amount".into(),
@@ -776,6 +804,7 @@ fn test_scalar_subquery_with_join_and_aggregate() {
         columns: vec![
             ColumnDefinition {
                 primary_key: false,
+                unique: false,
                 default_value: None,
                 foreign_key: None,
                 name: "id".into(),
@@ -784,6 +813,7 @@ fn test_scalar_subquery_with_join_and_aggregate() {
             },
             ColumnDefinition {
                 primary_key: false,
+                unique: false,
                 default_value: None,
                 foreign_key: None,
                 name: "name".into(),
@@ -809,6 +839,7 @@ fn test_scalar_subquery_with_join_and_aggregate() {
         columns: vec![
             ColumnDefinition {
                 primary_key: false,
+                unique: false,
                 default_value: None,
                 foreign_key: None,
                 name: "id".into(),
@@ -817,6 +848,7 @@ fn test_scalar_subquery_with_join_and_aggregate() {
             },
             ColumnDefinition {
                 primary_key: false,
+                unique: false,
                 default_value: None,
                 foreign_key: None,
                 name: "user_id".into(),
@@ -825,6 +857,7 @@ fn test_scalar_subquery_with_join_and_aggregate() {
             },
             ColumnDefinition {
                 primary_key: false,
+                unique: false,
                 default_value: None,
                 foreign_key: None,
                 name: "amount".into(),
@@ -851,6 +884,7 @@ fn test_scalar_subquery_with_join_and_aggregate() {
         columns: vec![
             ColumnDefinition {
                 primary_key: false,
+                unique: false,
                 default_value: None,
                 foreign_key: None,
                 name: "order_id".into(),
@@ -859,6 +893,7 @@ fn test_scalar_subquery_with_join_and_aggregate() {
             },
             ColumnDefinition {
                 primary_key: false,
+                unique: false,
                 default_value: None,
                 foreign_key: None,
                 name: "price".into(),

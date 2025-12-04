@@ -141,8 +141,8 @@ fn execute_describe(table_name: String) -> Result<String, String> {
         .ok_or_else(|| format!("Table '{}' does not exist", table_name))?;
 
     let mut result = String::new();
-    result.push_str("Column\tType\tNullable\tPrimary Key\tDefault\n");
-    result.push_str(&"-".repeat(60));
+    result.push_str("Column\tType\tNullable\tPrimary Key\tUnique\tDefault\n");
+    result.push_str(&"-".repeat(70));
     result.push('\n');
 
     for col in &table.columns {
@@ -158,6 +158,7 @@ fn execute_describe(table_name: String) -> Result<String, String> {
 
         let nullable_str = if col.nullable { "YES" } else { "NO" };
         let pk_str = if col.primary_key { "YES" } else { "NO" };
+        let unique_str = if col.unique { "YES" } else { "NO" };
         let default_str = if let Some(ref default) = col.default_value {
             format_value(default)
         } else {
@@ -165,8 +166,8 @@ fn execute_describe(table_name: String) -> Result<String, String> {
         };
 
         result.push_str(&format!(
-            "{}\t{}\t{}\t{}\t{}\n",
-            col.name, type_str, nullable_str, pk_str, default_str
+            "{}\t{}\t{}\t{}\t{}\t{}\n",
+            col.name, type_str, nullable_str, pk_str, unique_str, default_str
         ));
     }
 
@@ -307,6 +308,10 @@ fn execute_insert(stmt: InsertStatement) -> Result<String, String> {
 
     for values in &mapped_values {
         validate_primary_keys_for_insert(&db, &table_ref.columns, values, &stmt.table)?;
+    }
+
+    for values in &mapped_values {
+        validate_unique_constraints_for_insert(&db, &table_ref.columns, values, &stmt.table, None)?;
     }
 
     for values in &mapped_values {
@@ -1609,6 +1614,13 @@ fn execute_update(stmt: UpdateStatement) -> Result<String, String> {
                 }
             }
             validate_not_null_constraints(&table_ref.columns, &updated_row)?;
+            validate_unique_constraints_for_insert(
+                &db,
+                &table_ref.columns,
+                &updated_row,
+                &stmt.table,
+                Some(row_idx),
+            )?;
             validate_foreign_keys_for_update(&db, &table_ref.columns, &updated_row)?;
             rows_to_update.push((row_idx, updated_row));
         }
@@ -2981,6 +2993,46 @@ fn validate_primary_keys_for_insert(
                 if existing_row[col_idx] == *pk_value {
                     return Err(format!(
                         "Primary key constraint violation: Duplicate value for column '{}'",
+                        col_def.name
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_unique_constraints_for_insert(
+    db: &Database,
+    columns: &[ColumnDefinition],
+    row: &[Value],
+    table_name: &str,
+    exclude_row_idx: Option<usize>,
+) -> Result<(), String> {
+    for (col_idx, col_def) in columns.iter().enumerate() {
+        if col_def.unique {
+            let unique_value = &row[col_idx];
+
+            // UNIQUE allows NULL values (unlike PRIMARY KEY)
+            if matches!(unique_value, Value::Null) {
+                continue;
+            }
+
+            let table = db
+                .tables
+                .get(table_name)
+                .ok_or_else(|| format!("Table '{}' does not exist", table_name))?;
+
+            for (row_idx, existing_row) in table.rows.iter().enumerate() {
+                // Skip the row being updated if this is an update operation
+                if let Some(exclude_idx) = exclude_row_idx {
+                    if row_idx == exclude_idx {
+                        continue;
+                    }
+                }
+                if existing_row[col_idx] == *unique_value {
+                    return Err(format!(
+                        "Unique constraint violation: Duplicate value for column '{}'",
                         col_def.name
                     ));
                 }

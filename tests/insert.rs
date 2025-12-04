@@ -10,6 +10,7 @@ fn test_insert() {
         columns: vec![
             ColumnDefinition {
                 primary_key: false,
+                unique: false,
                 default_value: None,
                 name: "id".to_string(),
                 data_type: DataType::Integer,
@@ -18,6 +19,7 @@ fn test_insert() {
             },
             ColumnDefinition {
                 primary_key: false,
+                unique: false,
                 default_value: None,
                 name: "name".to_string(),
                 data_type: DataType::Text,

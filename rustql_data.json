@@ -7,6 +7,7 @@
           "data_type": "Integer",
           "nullable": false,
           "primary_key": false,
+          "unique": false,
           "default_value": null,
           "foreign_key": null
         },
@@ -15,6 +16,7 @@
           "data_type": "Text",
           "nullable": false,
           "primary_key": false,
+          "unique": false,
           "default_value": null,
           "foreign_key": null
         }

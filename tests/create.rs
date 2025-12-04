@@ -10,6 +10,7 @@ fn test_create_and_drop_table() {
         columns: vec![
             ColumnDefinition {
                 primary_key: false,
+                unique: false,
                 default_value: None,
                 foreign_key: None,
                 name: "id".to_string(),
@@ -18,6 +19,7 @@ fn test_create_and_drop_table() {
             },
             ColumnDefinition {
                 primary_key: false,
+                unique: false,
                 default_value: None,
                 foreign_key: None,
                 name: "name".to_string(),

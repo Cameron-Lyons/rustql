@@ -15,6 +15,7 @@ fn test_create_table() {
         columns: vec![
             ColumnDefinition {
                 primary_key: false,
+                unique: false,
                 default_value: None,
                 foreign_key: None,
                 name: "id".into(),
@@ -23,6 +24,7 @@ fn test_create_table() {
             },
             ColumnDefinition {
                 primary_key: false,
+                unique: false,
                 default_value: None,
                 foreign_key: None,
                 name: "name".into(),

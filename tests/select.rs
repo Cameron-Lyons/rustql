@@ -22,6 +22,7 @@ fn test_select_all() {
                 data_type: DataType::Integer,
                 nullable: false,
                 primary_key: false,
+                unique: false,
                 default_value: None,
                 foreign_key: None,
             },
@@ -30,6 +31,7 @@ fn test_select_all() {
                 data_type: DataType::Text,
                 nullable: false,
                 primary_key: false,
+                unique: false,
                 default_value: None,
                 foreign_key: None,
             },
@@ -76,6 +78,7 @@ fn test_count_distinct_values() {
         columns: vec![
             ColumnDefinition {
                 primary_key: false,
+                unique: false,
                 default_value: None,
                 foreign_key: None,
                 name: "id".into(),
@@ -84,6 +87,7 @@ fn test_count_distinct_values() {
             },
             ColumnDefinition {
                 primary_key: false,
+                unique: false,
                 default_value: None,
                 foreign_key: None,
                 name: "city".into(),
@@ -138,6 +142,7 @@ fn test_sum_distinct_values() {
         columns: vec![
             ColumnDefinition {
                 primary_key: false,
+                unique: false,
                 default_value: None,
                 foreign_key: None,
                 name: "id".into(),
@@ -146,6 +151,7 @@ fn test_sum_distinct_values() {
             },
             ColumnDefinition {
                 primary_key: false,
+                unique: false,
                 default_value: None,
                 foreign_key: None,
                 name: "amount".into(),
@@ -201,6 +207,7 @@ fn test_min_distinct_values() {
         columns: vec![
             ColumnDefinition {
                 primary_key: false,
+                unique: false,
                 default_value: None,
                 foreign_key: None,
                 name: "id".into(),
@@ -209,6 +216,7 @@ fn test_min_distinct_values() {
             },
             ColumnDefinition {
                 primary_key: false,
+                unique: false,
                 default_value: None,
                 foreign_key: None,
                 name: "score".into(),
@@ -266,6 +274,7 @@ fn test_max_distinct_values() {
         columns: vec![
             ColumnDefinition {
                 primary_key: false,
+                unique: false,
                 default_value: None,
                 foreign_key: None,
                 name: "id".into(),
@@ -274,6 +283,7 @@ fn test_max_distinct_values() {
             },
             ColumnDefinition {
                 primary_key: false,
+                unique: false,
                 default_value: None,
                 foreign_key: None,
                 name: "price".into(),
@@ -331,6 +341,7 @@ fn test_avg_distinct_values() {
         columns: vec![
             ColumnDefinition {
                 primary_key: false,
+                unique: false,
                 default_value: None,
                 foreign_key: None,
                 name: "id".into(),
@@ -339,6 +350,7 @@ fn test_avg_distinct_values() {
             },
             ColumnDefinition {
                 primary_key: false,
+                unique: false,
                 default_value: None,
                 foreign_key: None,
                 name: "grade".into(),

@@ -215,6 +215,7 @@ impl<'a> PlanExecutor<'a> {
                     data_type: DataType::Text,
                     nullable: true,
                     primary_key: false,
+                    unique: false,
                     default_value: None,
                     foreign_key: None,
                 })
@@ -406,6 +407,7 @@ impl<'a> PlanExecutor<'a> {
                         data_type: DataType::Text,
                         nullable: true,
                         primary_key: false,
+                        unique: false,
                         default_value: None,
                         foreign_key: None,
                     })
@@ -419,6 +421,7 @@ impl<'a> PlanExecutor<'a> {
                         data_type: DataType::Text,
                         nullable: true,
                         primary_key: false,
+                        unique: false,
                         default_value: None,
                         foreign_key: None,
                     })
@@ -801,6 +804,7 @@ impl<'a> PlanExecutor<'a> {
                 data_type: DataType::Text,
                 nullable: true,
                 primary_key: false,
+                unique: false,
                 default_value: None,
                 foreign_key: None,
             })
@@ -810,6 +814,7 @@ impl<'a> PlanExecutor<'a> {
             data_type: DataType::Text,
             nullable: true,
             primary_key: false,
+            unique: false,
             default_value: None,
             foreign_key: None,
         }));
@@ -892,6 +897,7 @@ impl<'a> PlanExecutor<'a> {
                 data_type: DataType::Text,
                 nullable: true,
                 primary_key: false,
+                unique: false,
                 default_value: None,
                 foreign_key: None,
             })
@@ -1198,6 +1204,7 @@ impl<'a> PlanExecutor<'a> {
                 data_type: DataType::Text,
                 nullable: true,
                 primary_key: false,
+                unique: false,
                 default_value: None,
                 foreign_key: None,
             })
