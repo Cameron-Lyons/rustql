@@ -11,6 +11,9 @@ A lightweight SQL database engine written in Rust. RustQL is an educational impl
   - `DROP TABLE` - Delete tables
   - `ALTER TABLE` - Add, drop, and rename columns
   - **NOT NULL Constraints** - Enforce non-nullable columns
+  - **PRIMARY KEY Constraints** - Enforce unique, non-null primary keys
+  - **UNIQUE Constraints** - Enforce unique values (allows NULL values)
+  - **DEFAULT Values** - Set default values for columns
   - **Foreign Key Constraints** - Enforce referential integrity with ON DELETE and ON UPDATE actions
   - **Indexes** - Create and drop indexes on table columns for improved query performance
   - `DESCRIBE table_name` - Show table schema
@@ -24,6 +27,7 @@ A lightweight SQL database engine written in Rust. RustQL is an educational impl
 
 - **SELECT Features**
   - Column selection (SELECT *)
+  - **Arithmetic Expressions**: `SELECT price * quantity AS total FROM products` - Perform calculations in SELECT (+, -, *, /)
   - **SELECT DISTINCT**: `SELECT DISTINCT column FROM table` - Remove duplicate rows
   - WHERE clause with comparison operators (=, !=, <, <=, >, >=)
   - Logical operators (AND, OR, NOT)
@@ -123,6 +127,35 @@ CREATE TABLE users (
     age INTEGER
 );
 
+-- With DEFAULT values
+CREATE TABLE users (
+    id INTEGER,
+    name TEXT DEFAULT 'Unknown',
+    age INTEGER DEFAULT 0,
+    email TEXT
+);
+
+-- With primary key and DEFAULT values
+CREATE TABLE users (
+    id INTEGER PRIMARY KEY,
+    name TEXT DEFAULT 'User',
+    age INTEGER DEFAULT 0
+);
+
+-- With UNIQUE constraint
+CREATE TABLE users (
+    id INTEGER,
+    email TEXT UNIQUE,
+    name TEXT
+);
+
+-- With UNIQUE and NOT NULL
+CREATE TABLE users (
+    id INTEGER,
+    email TEXT UNIQUE NOT NULL,
+    name TEXT
+);
+
 -- With foreign keys
 CREATE TABLE orders (
     id INTEGER,
@@ -137,6 +170,22 @@ CREATE TABLE orders (
 ```sql
 INSERT INTO users VALUES (1, 'Alice', 25, 'alice@example.com');
 INSERT INTO users VALUES (2, 'Bob', 30, 'bob@example.com'), (3, 'Charlie', 35, 'charlie@example.com');
+
+-- Insert with column names (columns not specified will use DEFAULT values)
+INSERT INTO users (id, name) VALUES (4, 'David');
+-- If age has DEFAULT 0, David will have age = 0
+
+-- Insert with DEFAULT values
+INSERT INTO users (id) VALUES (5);
+-- If name has DEFAULT 'Unknown' and age has DEFAULT 0, this will insert (5, 'Unknown', 0)
+
+-- UNIQUE constraint examples
+INSERT INTO users VALUES (1, 'alice@example.com', 'Alice');
+INSERT INTO users VALUES (2, 'bob@example.com', 'Bob');
+-- This will fail: INSERT INTO users VALUES (3, 'alice@example.com', 'Charlie');
+-- UNIQUE allows multiple NULL values
+INSERT INTO users VALUES (4, NULL, 'David');
+INSERT INTO users VALUES (5, NULL, 'Eve');  -- This is allowed
 ```
 
 ### Querying Data
@@ -183,6 +232,12 @@ SELECT * FROM users OFFSET 2 LIMIT 3;
 -- SELECT DISTINCT
 SELECT DISTINCT age FROM users;
 SELECT DISTINCT name, email FROM users;
+
+-- Arithmetic expressions in SELECT
+SELECT id, price * quantity AS total FROM products;
+SELECT id, price - discount AS final_price FROM products;
+SELECT id, price / quantity AS unit_price FROM products;
+SELECT id, price + tax AS total_cost FROM products;
 ```
 
 ### Aggregate Functions

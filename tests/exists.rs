@@ -8,6 +8,7 @@ fn test_where_exists_true() {
         columns: vec![
             ColumnDefinition {
                 primary_key: false,
+                unique: false,
                 default_value: None,
                 foreign_key: None,
                 name: "id".into(),
@@ -16,6 +17,7 @@ fn test_where_exists_true() {
             },
             ColumnDefinition {
                 primary_key: false,
+                unique: false,
                 default_value: None,
                 foreign_key: None,
                 name: "name".into(),
@@ -41,6 +43,7 @@ fn test_where_exists_true() {
         columns: vec![
             ColumnDefinition {
                 primary_key: false,
+                unique: false,
                 default_value: None,
                 foreign_key: None,
                 name: "id".into(),
@@ -49,6 +52,7 @@ fn test_where_exists_true() {
             },
             ColumnDefinition {
                 primary_key: false,
+                unique: false,
                 default_value: None,
                 foreign_key: None,
                 name: "amount".into(),
@@ -115,6 +119,7 @@ fn test_where_exists_false_filters_all() {
         columns: vec![
             ColumnDefinition {
                 primary_key: false,
+                unique: false,
                 default_value: None,
                 foreign_key: None,
                 name: "id".into(),
@@ -123,6 +128,7 @@ fn test_where_exists_false_filters_all() {
             },
             ColumnDefinition {
                 primary_key: false,
+                unique: false,
                 default_value: None,
                 foreign_key: None,
                 name: "name".into(),
@@ -148,6 +154,7 @@ fn test_where_exists_false_filters_all() {
         columns: vec![
             ColumnDefinition {
                 primary_key: false,
+                unique: false,
                 default_value: None,
                 foreign_key: None,
                 name: "id".into(),
@@ -156,6 +163,7 @@ fn test_where_exists_false_filters_all() {
             },
             ColumnDefinition {
                 primary_key: false,
+                unique: false,
                 default_value: None,
                 foreign_key: None,
                 name: "amount".into(),
@@ -222,6 +230,7 @@ fn test_where_not_exists_true_filters_all() {
         columns: vec![
             ColumnDefinition {
                 primary_key: false,
+                unique: false,
                 default_value: None,
                 foreign_key: None,
                 name: "id".into(),
@@ -230,6 +239,7 @@ fn test_where_not_exists_true_filters_all() {
             },
             ColumnDefinition {
                 primary_key: false,
+                unique: false,
                 default_value: None,
                 foreign_key: None,
                 name: "name".into(),
@@ -255,6 +265,7 @@ fn test_where_not_exists_true_filters_all() {
         columns: vec![
             ColumnDefinition {
                 primary_key: false,
+                unique: false,
                 default_value: None,
                 foreign_key: None,
                 name: "id".into(),
@@ -263,6 +274,7 @@ fn test_where_not_exists_true_filters_all() {
             },
             ColumnDefinition {
                 primary_key: false,
+                unique: false,
                 default_value: None,
                 foreign_key: None,
                 name: "amount".into(),
@@ -332,6 +344,7 @@ fn test_where_exists_correlated_true() {
         columns: vec![
             ColumnDefinition {
                 primary_key: false,
+                unique: false,
                 default_value: None,
                 foreign_key: None,
                 name: "id".into(),
@@ -340,6 +353,7 @@ fn test_where_exists_correlated_true() {
             },
             ColumnDefinition {
                 primary_key: false,
+                unique: false,
                 default_value: None,
                 foreign_key: None,
                 name: "name".into(),
@@ -365,6 +379,7 @@ fn test_where_exists_correlated_true() {
         columns: vec![
             ColumnDefinition {
                 primary_key: false,
+                unique: false,
                 default_value: None,
                 foreign_key: None,
                 name: "user_id".into(),
@@ -373,6 +388,7 @@ fn test_where_exists_correlated_true() {
             },
             ColumnDefinition {
                 primary_key: false,
+                unique: false,
                 default_value: None,
                 foreign_key: None,
                 name: "amount".into(),
@@ -447,6 +463,7 @@ fn test_where_not_exists_false() {
         columns: vec![
             ColumnDefinition {
                 primary_key: false,
+                unique: false,
                 default_value: None,
                 foreign_key: None,
                 name: "id".into(),
@@ -455,6 +472,7 @@ fn test_where_not_exists_false() {
             },
             ColumnDefinition {
                 primary_key: false,
+                unique: false,
                 default_value: None,
                 foreign_key: None,
                 name: "name".into(),
@@ -480,6 +498,7 @@ fn test_where_not_exists_false() {
         columns: vec![
             ColumnDefinition {
                 primary_key: false,
+                unique: false,
                 default_value: None,
                 foreign_key: None,
                 name: "id".into(),
@@ -488,6 +507,7 @@ fn test_where_not_exists_false() {
             },
             ColumnDefinition {
                 primary_key: false,
+                unique: false,
                 default_value: None,
                 foreign_key: None,
                 name: "amount".into(),
@@ -557,6 +577,7 @@ fn test_where_exists_correlated_false() {
         columns: vec![
             ColumnDefinition {
                 primary_key: false,
+                unique: false,
                 default_value: None,
                 foreign_key: None,
                 name: "id".into(),
@@ -565,6 +586,7 @@ fn test_where_exists_correlated_false() {
             },
             ColumnDefinition {
                 primary_key: false,
+                unique: false,
                 default_value: None,
                 foreign_key: None,
                 name: "name".into(),
@@ -590,6 +612,7 @@ fn test_where_exists_correlated_false() {
         columns: vec![
             ColumnDefinition {
                 primary_key: false,
+                unique: false,
                 default_value: None,
                 foreign_key: None,
                 name: "user_id".into(),
@@ -598,6 +621,7 @@ fn test_where_exists_correlated_false() {
             },
             ColumnDefinition {
                 primary_key: false,
+                unique: false,
                 default_value: None,
                 foreign_key: None,
                 name: "amount".into(),
@@ -672,6 +696,7 @@ fn test_where_exists_with_join() {
         columns: vec![
             ColumnDefinition {
                 primary_key: false,
+                unique: false,
                 default_value: None,
                 foreign_key: None,
                 name: "id".into(),
@@ -680,6 +705,7 @@ fn test_where_exists_with_join() {
             },
             ColumnDefinition {
                 primary_key: false,
+                unique: false,
                 default_value: None,
                 foreign_key: None,
                 name: "name".into(),
@@ -705,6 +731,7 @@ fn test_where_exists_with_join() {
         columns: vec![
             ColumnDefinition {
                 primary_key: false,
+                unique: false,
                 default_value: None,
                 foreign_key: None,
                 name: "id".into(),
@@ -713,6 +740,7 @@ fn test_where_exists_with_join() {
             },
             ColumnDefinition {
                 primary_key: false,
+                unique: false,
                 default_value: None,
                 foreign_key: None,
                 name: "user_id".into(),
@@ -738,6 +766,7 @@ fn test_where_exists_with_join() {
         columns: vec![
             ColumnDefinition {
                 primary_key: false,
+                unique: false,
                 default_value: None,
                 foreign_key: None,
                 name: "id".into(),
@@ -746,6 +775,7 @@ fn test_where_exists_with_join() {
             },
             ColumnDefinition {
                 primary_key: false,
+                unique: false,
                 default_value: None,
                 foreign_key: None,
                 name: "order_id".into(),
