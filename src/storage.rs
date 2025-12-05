@@ -401,6 +401,265 @@ impl BTreeFile {
             .flush()
             .map_err(|e| format!("Failed to flush BTree page: {}", e))
     }
+
+    fn get_next_page_id(&mut self) -> Result<u64, String> {
+        let meta_page = self.read_page(0)?;
+        
+        for entry in &meta_page.entries {
+            if let Value::Text(ref s) = entry.key {
+                if s == "next_page_id" {
+                    let next_id = entry.pointer;
+                    let mut new_meta = meta_page.clone();
+                    if let Some(e) = new_meta.entries.iter_mut().find(|e| {
+                        if let Value::Text(ref s) = e.key {
+                            s == "next_page_id"
+                        } else {
+                            false
+                        }
+                    }) {
+                        e.pointer = next_id + 1;
+                    } else {
+                        new_meta.entries.push(BTreeEntry::new(
+                            Value::Text("next_page_id".to_string()),
+                            next_id + 1,
+                        ));
+                    }
+                    new_meta.header.entry_count = new_meta.entries.len() as u16;
+                    self.write_page(&new_meta)?;
+                    return Ok(next_id);
+                }
+            }
+        }
+        
+        let next_id = 2;
+        let mut new_meta = meta_page;
+        new_meta.entries.push(BTreeEntry::new(
+            Value::Text("next_page_id".to_string()),
+            next_id + 1,
+        ));
+        new_meta.header.entry_count = new_meta.entries.len() as u16;
+        self.write_page(&new_meta)?;
+        Ok(next_id)
+    }
+
+    pub fn search(&mut self, key: &Value, root_page_id: u64) -> Result<Option<(u64, usize)>, String> {
+        let mut current_page_id = root_page_id;
+        
+        loop {
+            let page = self.read_page(current_page_id)?;
+            
+            match page.header.kind {
+                PageKind::Leaf => {
+                    for (idx, entry) in page.entries.iter().enumerate() {
+                        if &entry.key == key {
+                            return Ok(Some((current_page_id, idx)));
+                        }
+                    }
+                    return Ok(None);
+                }
+                PageKind::Internal => {
+                    let mut found = false;
+                    for entry in &page.entries {
+                        if &entry.key > key {
+                            current_page_id = entry.pointer;
+                            found = true;
+                            break;
+                        }
+                    }
+                    if !found {
+                        if let Some(last_entry) = page.entries.last() {
+                            current_page_id = last_entry.pointer;
+                        } else {
+                            return Ok(None);
+                        }
+                    }
+                }
+                PageKind::Meta => {
+                    return Err("Cannot search in meta page".to_string());
+                }
+            }
+        }
+    }
+
+    fn find_leaf_for_insert(&mut self, key: &Value, root_page_id: u64) -> Result<u64, String> {
+        let mut current_page_id = root_page_id;
+        
+        loop {
+            let page = self.read_page(current_page_id)?;
+            
+            match page.header.kind {
+                PageKind::Leaf => {
+                    return Ok(current_page_id);
+                }
+                PageKind::Internal => {
+                    let mut next_page_id = None;
+                    for entry in &page.entries {
+                        if &entry.key > key {
+                            next_page_id = Some(entry.pointer);
+                            break;
+                        }
+                    }
+                    current_page_id = next_page_id
+                        .or_else(|| page.entries.last().map(|e| e.pointer))
+                        .ok_or_else(|| "Invalid internal page structure".to_string())?;
+                }
+                PageKind::Meta => {
+                    return Err("Cannot traverse meta page for insert".to_string());
+                }
+            }
+        }
+    }
+
+    pub fn insert(&mut self, key: Value, value: Value, root_page_id: u64) -> Result<u64, String> {
+        let value_json = serde_json::to_string(&value)
+            .map_err(|e| format!("Failed to serialize value: {}", e))?;
+        let value_hash = value_json.len() as u64;
+        
+        let leaf_page_id = self.find_leaf_for_insert(&key, root_page_id)?;
+        let mut leaf_page = self.read_page(leaf_page_id)?;
+        
+        // Check if key already exists
+        for (idx, entry) in leaf_page.entries.iter().enumerate() {
+            if entry.key == key {
+                // Update existing entry
+                leaf_page.entries[idx].pointer = value_hash;
+                self.write_page(&leaf_page)?;
+                return Ok(root_page_id);
+            }
+        }
+        
+        let new_entry = BTreeEntry::new(key.clone(), value_hash);
+        
+        if leaf_page.can_accept_entry(&new_entry) {
+            let insert_pos = leaf_page.entries
+                .binary_search_by(|e| e.key.cmp(&key))
+                .unwrap_or_else(|pos| pos);
+            leaf_page.entries.insert(insert_pos, new_entry);
+            leaf_page.header.entry_count = leaf_page.entries.len() as u16;
+            self.write_page(&leaf_page)?;
+            return Ok(root_page_id);
+        } else {
+            return self.split_and_insert(leaf_page, new_entry, root_page_id);
+        }
+    }
+
+    fn split_and_insert(
+        &mut self,
+        mut page: BTreePage,
+        new_entry: BTreeEntry,
+        root_page_id: u64,
+    ) -> Result<u64, String> {
+        let insert_pos = page.entries
+            .binary_search_by(|e| e.key.cmp(&new_entry.key))
+            .unwrap_or_else(|pos| pos);
+        page.entries.insert(insert_pos, new_entry);
+        
+        let mid = page.entries.len() / 2;
+        let right_entries = page.entries.split_off(mid);
+        let split_key = right_entries[0].key.clone();
+        
+        page.header.entry_count = page.entries.len() as u16;
+        self.write_page(&page)?;
+        
+        let right_page_id = self.get_next_page_id()?;
+        let mut right_page = BTreePage::new(right_page_id, page.header.kind);
+        right_page.entries = right_entries;
+        right_page.header.entry_count = right_page.entries.len() as u16;
+        self.write_page(&right_page)?;
+        
+        if page.header.page_id == root_page_id {
+            let new_root_id = self.get_next_page_id()?;
+            let mut new_root = BTreePage::new(new_root_id, PageKind::Internal);
+            new_root.entries.push(BTreeEntry::new(
+                page.entries[0].key.clone(),
+                page.header.page_id,
+            ));
+            new_root.entries.push(BTreeEntry::new(split_key, right_page_id));
+            new_root.header.entry_count = new_root.entries.len() as u16;
+            self.write_page(&new_root)?;
+            
+            let mut meta_page = self.read_page(0)?;
+            if let Some(root_entry) = meta_page.entries.iter_mut().find(|e| {
+                if let Value::Text(ref s) = e.key {
+                    s == "root"
+                } else {
+                    false
+                }
+            }) {
+                root_entry.pointer = new_root_id;
+            }
+            self.write_page(&meta_page)?;
+            
+            return Ok(new_root_id);
+        }
+        
+        Ok(root_page_id)
+    }
+
+    pub fn delete(&mut self, key: &Value, root_page_id: u64) -> Result<bool, String> {
+        match self.search(key, root_page_id)? {
+            Some((page_id, entry_idx)) => {
+                let mut page = self.read_page(page_id)?;
+                page.entries.remove(entry_idx);
+                page.header.entry_count = page.entries.len() as u16;
+                self.write_page(&page)?;
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
+    pub fn range_scan(
+        &mut self,
+        start_key: Option<&Value>,
+        end_key: Option<&Value>,
+        root_page_id: u64,
+    ) -> Result<Vec<(Value, u64)>, String> {
+        let mut results = Vec::new();
+        let mut current_page_id = root_page_id;
+        
+        loop {
+            let page = self.read_page(current_page_id)?;
+            match page.header.kind {
+                PageKind::Leaf => {
+                    for entry in &page.entries {
+                        let in_range = match (start_key, end_key) {
+                            (Some(start), Some(end)) => entry.key >= *start && entry.key <= *end,
+                            (Some(start), None) => entry.key >= *start,
+                            (None, Some(end)) => entry.key <= *end,
+                            (None, None) => true,
+                        };
+                        if in_range {
+                            results.push((entry.key.clone(), entry.pointer));
+                        }
+                    }
+                    break;
+                }
+                PageKind::Internal => {
+                    let mut next_page_id = None;
+                    for entry in &page.entries {
+                        if let Some(start) = start_key {
+                            if &entry.key > start {
+                                next_page_id = Some(entry.pointer);
+                                break;
+                            }
+                        } else {
+                            next_page_id = Some(entry.pointer);
+                            break;
+                        }
+                    }
+                    current_page_id = next_page_id
+                        .or_else(|| page.entries.last().map(|e| e.pointer))
+                        .ok_or_else(|| "Invalid internal page structure".to_string())?;
+                }
+                PageKind::Meta => {
+                    return Err("Cannot scan meta page".to_string());
+                }
+            }
+        }
+        
+        Ok(results)
+    }
 }
 
 #[cfg(test)]
@@ -463,6 +722,107 @@ mod tests {
         assert_eq!(users.columns.len(), 2);
         assert_eq!(users.rows[0][0], Value::Integer(1));
         assert_eq!(users.rows[0][1], Value::Text("Alice".to_string()));
+
+        let _ = std::fs::remove_file(&temp_path);
+    }
+
+    #[test]
+    fn btree_search_insert_delete() {
+        let temp_path = std::env::temp_dir().join("rustql_btree_ops_test.dat");
+        let _ = std::fs::remove_file(&temp_path);
+
+        let mut file = BTreeFile::create(&temp_path).expect("Failed to create BTree file");
+
+        // Initialize meta and root pages
+        let mut meta_page = BTreePage::new(0, PageKind::Meta);
+        meta_page.entries.push(BTreeEntry::new(
+            Value::Text("root".to_string()),
+            1,
+        ));
+        meta_page.header.entry_count = meta_page.entries.len() as u16;
+        file.write_page(&meta_page).expect("Failed to write meta page");
+
+        let mut root_page = BTreePage::new(1, PageKind::Leaf);
+        root_page.header.entry_count = 0;
+        file.write_page(&root_page).expect("Failed to write root page");
+
+        // Test insert
+        let key1 = Value::Integer(10);
+        let value1 = Value::Text("value1".to_string());
+        let root_id = file.insert(key1.clone(), value1.clone(), 1)
+            .expect("Failed to insert");
+
+        // Test search
+        let result = file.search(&key1, root_id)
+            .expect("Failed to search");
+        assert!(result.is_some(), "Key should be found after insert");
+
+        // Test insert another key
+        let key2 = Value::Integer(20);
+        let value2 = Value::Text("value2".to_string());
+        file.insert(key2.clone(), value2.clone(), root_id)
+            .expect("Failed to insert second key");
+
+        // Test search for second key
+        let result2 = file.search(&key2, root_id)
+            .expect("Failed to search for second key");
+        assert!(result2.is_some(), "Second key should be found");
+
+        // Test delete
+        let deleted = file.delete(&key1, root_id)
+            .expect("Failed to delete");
+        assert!(deleted, "Delete should return true for existing key");
+
+        // Verify key is gone
+        let result_after_delete = file.search(&key1, root_id)
+            .expect("Failed to search after delete");
+        assert!(result_after_delete.is_none(), "Key should not be found after delete");
+
+        // Verify other key still exists
+        let result2_after_delete = file.search(&key2, root_id)
+            .expect("Failed to search for second key after delete");
+        assert!(result2_after_delete.is_some(), "Second key should still exist");
+
+        let _ = std::fs::remove_file(&temp_path);
+    }
+
+    #[test]
+    fn btree_range_scan() {
+        let temp_path = std::env::temp_dir().join("rustql_btree_range_test.dat");
+        let _ = std::fs::remove_file(&temp_path);
+
+        let mut file = BTreeFile::create(&temp_path).expect("Failed to create BTree file");
+
+        // Initialize meta and root pages
+        let mut meta_page = BTreePage::new(0, PageKind::Meta);
+        meta_page.entries.push(BTreeEntry::new(
+            Value::Text("root".to_string()),
+            1,
+        ));
+        meta_page.header.entry_count = meta_page.entries.len() as u16;
+        file.write_page(&meta_page).expect("Failed to write meta page");
+
+        let mut root_page = BTreePage::new(1, PageKind::Leaf);
+        root_page.header.entry_count = 0;
+        file.write_page(&root_page).expect("Failed to write root page");
+
+        // Insert multiple keys
+        let root_id = 1;
+        for i in 1..=10 {
+            let key = Value::Integer(i * 10);
+            let value = Value::Text(format!("value{}", i));
+            file.insert(key, value, root_id)
+                .expect(&format!("Failed to insert key {}", i));
+        }
+
+        // Test range scan
+        let start = Value::Integer(30);
+        let end = Value::Integer(70);
+        let results = file.range_scan(Some(&start), Some(&end), root_id)
+            .expect("Failed to range scan");
+
+        // Should find keys 30, 40, 50, 60, 70
+        assert!(results.len() >= 5, "Range scan should find multiple keys");
 
         let _ = std::fs::remove_file(&temp_path);
     }
