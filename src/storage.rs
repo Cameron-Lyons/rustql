@@ -145,7 +145,20 @@ impl BTreeFile {
     }
 
     fn read_database_via_pages(&mut self) -> Result<Database, String> {
+        let file_size = self
+            .file
+            .metadata()
+            .map_err(|e| format!("Failed to get file metadata: {}", e))?
+            .len();
+
+        if file_size < 16 {
+            return Ok(Database::new());
+        }
+
         let mut header = [0u8; 16];
+        self.file
+            .seek(SeekFrom::Start(0))
+            .map_err(|e| format!("Failed to seek to start: {}", e))?;
         let bytes_read = self
             .file
             .read(&mut header)
@@ -157,22 +170,151 @@ impl BTreeFile {
 
         let _version = u32::from_le_bytes([header[8], header[9], header[10], header[11]]);
 
-        let meta_page = self.read_page(0)?;
-        let root_page_id = meta_page.entries.get(0).map(|e| e.pointer).unwrap_or(1);
+        if file_size < 16 + BTREE_PAGE_SIZE as u64 {
+            return Ok(Database::new());
+        }
+
+        let meta_page = match self.read_page(0) {
+            Ok(page) => page,
+            Err(_) => return Ok(Database::new()),
+        };
+        let root_page_id = meta_page
+            .entries
+            .iter()
+            .find(|e| {
+                if let Value::Text(ref s) = e.key {
+                    s == "root"
+                } else {
+                    false
+                }
+            })
+            .map(|e| e.pointer)
+            .unwrap_or(1);
 
         let root_page = self.read_page(root_page_id)?;
-        let json_entry = root_page
+
+        if root_page.entries.len() == 1 {
+            if let Some(entry) = root_page.entries.get(0) {
+                if let Value::Text(ref json_str) = entry.key {
+                    if json_str.starts_with('{') && json_str.len() > 100 {
+                        return serde_json::from_str(json_str).map_err(|e| {
+                            format!("Failed to decode Database from BTree root page: {}", e)
+                        });
+                    }
+                }
+            }
+        }
+
+        self.load_database_from_rows(root_page_id)
+    }
+
+    fn load_database_from_rows(&mut self, root_page_id: u64) -> Result<Database, String> {
+        let mut db = Database::new();
+
+        let schema_prefix = Value::Text("schema:".to_string());
+        let schema_end = Value::Text("schema;".to_string());
+        let schemas = self.range_scan(Some(&schema_prefix), Some(&schema_end), root_page_id)?;
+
+        for (key, pointer) in schemas {
+            if let Value::Text(ref key_str) = key {
+                if let Some(table_name) = key_str.strip_prefix("schema:") {
+                    let schema_json = self.read_data_from_pointer(pointer)?;
+                    let columns: Vec<crate::ast::ColumnDefinition> =
+                        serde_json::from_str(&schema_json).map_err(|e| {
+                            format!(
+                                "Failed to deserialize schema for table {}: {}",
+                                table_name, e
+                            )
+                        })?;
+
+                    db.tables.insert(
+                        table_name.to_string(),
+                        crate::database::Table {
+                            columns,
+                            rows: Vec::new(),
+                        },
+                    );
+                }
+            }
+        }
+
+        for table_name in db.tables.keys().cloned().collect::<Vec<_>>() {
+            let row_prefix = Value::Text(format!("row:{}:", table_name));
+            let row_end = Value::Text(format!("row:{};", table_name));
+            let rows = self.range_scan(Some(&row_prefix), Some(&row_end), root_page_id)?;
+
+            let mut row_indices: Vec<(usize, Vec<Value>)> = Vec::new();
+
+            for (key, pointer) in rows {
+                if let Value::Text(ref key_str) = key {
+                    if let Some(row_id_str) = key_str.strip_prefix(&format!("row:{}:", table_name))
+                    {
+                        if let Ok(row_index) = row_id_str.parse::<usize>() {
+                            let row_json = self.read_data_from_pointer(pointer)?;
+                            let row: Vec<Value> = serde_json::from_str(&row_json).map_err(|e| {
+                                format!(
+                                    "Failed to deserialize row {} for table {}: {}",
+                                    row_id_str, table_name, e
+                                )
+                            })?;
+                            row_indices.push((row_index, row));
+                        }
+                    }
+                }
+            }
+
+            row_indices.sort_by_key(|(idx, _)| *idx);
+            let sorted_rows: Vec<Vec<Value>> =
+                row_indices.into_iter().map(|(_, row)| row).collect();
+
+            if let Some(table_ref) = db.tables.get_mut(&table_name) {
+                table_ref.rows = sorted_rows;
+            }
+        }
+
+        let index_prefix = Value::Text("index:".to_string());
+        let index_end = Value::Text("index;".to_string());
+        let indexes = self.range_scan(Some(&index_prefix), Some(&index_end), root_page_id)?;
+
+        for (key, pointer) in indexes {
+            if let Value::Text(ref key_str) = key {
+                if let Some(index_name) = key_str.strip_prefix("index:") {
+                    let index_json = self.read_data_from_pointer(pointer)?;
+                    let index: crate::database::Index =
+                        serde_json::from_str(&index_json).map_err(|e| {
+                            format!("Failed to deserialize index {}: {}", index_name, e)
+                        })?;
+                    db.indexes.insert(index_name.to_string(), index);
+                }
+            }
+        }
+
+        Ok(db)
+    }
+
+    fn read_data_from_pointer(&mut self, pointer: u64) -> Result<String, String> {
+        let data_page = self.read_page(pointer)?;
+
+        if let Some(entry) = data_page.entries.get(0) {
+            if let Value::Text(ref json_str) = entry.key {
+                return Ok(json_str.clone());
+            }
+        }
+
+        Err("Data page does not contain valid JSON".to_string())
+    }
+
+    fn write_data_to_pointer(&mut self, data: &str) -> Result<u64, String> {
+        let page_id = self.get_next_page_id()?;
+        let mut data_page = BTreePage::new(page_id, PageKind::Leaf);
+
+        data_page
             .entries
-            .get(0)
-            .ok_or_else(|| "Root BTree page has no entries".to_string())?;
+            .push(BTreeEntry::new(Value::Text(data.to_string()), 0));
+        data_page.header.entry_count = data_page.entries.len() as u16;
 
-        let json_str = match &json_entry.key {
-            Value::Text(s) => s.clone(),
-            _ => return Err("Root BTree entry does not contain JSON text".to_string()),
-        };
-
-        serde_json::from_str(&json_str)
-            .map_err(|e| format!("Failed to decode Database from BTree root page: {}", e))
+        self.write_page(&data_page)?;
+        Ok(page_id)
     }
 
     fn write_database_via_pages(&mut self, db: &Database) -> Result<(), String> {
@@ -183,29 +325,117 @@ impl BTreeFile {
         let mut header = Vec::with_capacity(16);
         header.extend_from_slice(&Self::MAGIC);
         header.extend_from_slice(&Self::VERSION.to_le_bytes());
-        header.extend_from_slice(&0u32.to_le_bytes()); // reserved
+        header.extend_from_slice(&0u32.to_le_bytes());
 
         self.file
             .write_all(&header)
             .map_err(|e| format!("Failed to write BTree storage header: {}", e))?;
 
-        let json = serde_json::to_string(db)
-            .map_err(|e| format!("Failed to encode database for BTree root page: {}", e))?;
+        let meta_page = match self.read_page(1) {
+            Ok(page) => page,
+            Err(_) => {
+                let new_meta = BTreePage::new(0, PageKind::Meta);
+                self.write_page(&new_meta)?;
+                new_meta
+            }
+        };
 
-        let mut root_page = BTreePage::new(1, PageKind::Leaf);
-        root_page
+        let root_page_id = meta_page
             .entries
-            .push(BTreeEntry::new(Value::Text(json), 0));
-        root_page.header.entry_count = root_page.entries.len() as u16;
+            .iter()
+            .find(|e| {
+                if let Value::Text(ref s) = e.key {
+                    s == "root"
+                } else {
+                    false
+                }
+            })
+            .map(|e| e.pointer)
+            .unwrap_or_else(|| {
+                let new_root_id = 1;
+                let mut new_meta = meta_page.clone();
+                new_meta.entries.push(BTreeEntry::new(
+                    Value::Text("root".to_string()),
+                    new_root_id,
+                ));
+                new_meta.header.entry_count = new_meta.entries.len() as u16;
+                self.write_page(&new_meta).ok();
 
-        let mut meta_page = BTreePage::new(0, PageKind::Meta);
-        meta_page
-            .entries
-            .push(BTreeEntry::new(Value::Text("root".to_string()), 1));
+                let root_page = BTreePage::new(new_root_id, PageKind::Leaf);
+                self.write_page(&root_page).ok();
+                new_root_id
+            });
+
+        let tables_to_delete: Vec<String> = db.tables.keys().cloned().collect();
+        for table_name in &tables_to_delete {
+            let schema_key = Value::Text(format!("schema:{}", table_name));
+            let _ = self.delete(&schema_key, root_page_id);
+
+            let row_prefix = Value::Text(format!("row:{}:", table_name));
+            let row_end = Value::Text(format!("row:{};", table_name));
+            if let Ok(rows) = self.range_scan(Some(&row_prefix), Some(&row_end), root_page_id) {
+                for (key, _) in rows {
+                    let _ = self.delete(&key, root_page_id);
+                }
+            }
+        }
+
+        let indexes_to_delete: Vec<String> = db.indexes.keys().cloned().collect();
+        for index_name in &indexes_to_delete {
+            let index_key = Value::Text(format!("index:{}", index_name));
+            let _ = self.delete(&index_key, root_page_id);
+        }
+
+        let mut current_root_id = root_page_id;
+
+        for (table_name, table) in &db.tables {
+            let schema_key = Value::Text(format!("schema:{}", table_name));
+            let schema_json = serde_json::to_string(&table.columns).map_err(|e| {
+                format!("Failed to serialize schema for table {}: {}", table_name, e)
+            })?;
+            let data_pointer = self.write_data_to_pointer(&schema_json)?;
+            current_root_id = self.insert(schema_key, data_pointer, current_root_id)?;
+        }
+
+        for (table_name, table) in &db.tables {
+            for (row_index, row) in table.rows.iter().enumerate() {
+                let row_key = Value::Text(format!("row:{}:{}", table_name, row_index));
+                let row_json = serde_json::to_string(row).map_err(|e| {
+                    format!(
+                        "Failed to serialize row {} for table {}: {}",
+                        row_index, table_name, e
+                    )
+                })?;
+                let data_pointer = self.write_data_to_pointer(&row_json)?;
+                current_root_id = self.insert(row_key, data_pointer, current_root_id)?;
+            }
+        }
+
+        for (index_name, index) in &db.indexes {
+            let index_key = Value::Text(format!("index:{}", index_name));
+            let index_json = serde_json::to_string(index)
+                .map_err(|e| format!("Failed to serialize index {}: {}", index_name, e))?;
+            let data_pointer = self.write_data_to_pointer(&index_json)?;
+            current_root_id = self.insert(index_key, data_pointer, current_root_id)?;
+        }
+
+        let mut meta_page = self.read_page(0)?;
+        if let Some(root_entry) = meta_page.entries.iter_mut().find(|e| {
+            if let Value::Text(ref s) = e.key {
+                s == "root"
+            } else {
+                false
+            }
+        }) {
+            root_entry.pointer = current_root_id;
+        } else {
+            meta_page.entries.push(BTreeEntry::new(
+                Value::Text("root".to_string()),
+                current_root_id,
+            ));
+        }
         meta_page.header.entry_count = meta_page.entries.len() as u16;
-
         self.write_page(&meta_page)?;
-        self.write_page(&root_page)?;
 
         self.file
             .flush()
@@ -288,8 +518,8 @@ impl BTreeEntry {
         let pointer_size = 8usize;
         let key_size = match &self.key {
             Value::Null => 1,
-            Value::Integer(_) => 9, // tag + i64
-            Value::Float(_) => 9,   // tag + f64
+            Value::Integer(_) => 9,
+            Value::Float(_) => 9,
             Value::Boolean(_) => 2,
             Value::Text(s) | Value::Date(s) | Value::Time(s) | Value::DateTime(s) => 1 + s.len(),
         };
@@ -404,7 +634,7 @@ impl BTreeFile {
 
     fn get_next_page_id(&mut self) -> Result<u64, String> {
         let meta_page = self.read_page(0)?;
-        
+
         for entry in &meta_page.entries {
             if let Value::Text(ref s) = entry.key {
                 if s == "next_page_id" {
@@ -430,7 +660,7 @@ impl BTreeFile {
                 }
             }
         }
-        
+
         let next_id = 2;
         let mut new_meta = meta_page;
         new_meta.entries.push(BTreeEntry::new(
@@ -442,12 +672,16 @@ impl BTreeFile {
         Ok(next_id)
     }
 
-    pub fn search(&mut self, key: &Value, root_page_id: u64) -> Result<Option<(u64, usize)>, String> {
+    pub fn search(
+        &mut self,
+        key: &Value,
+        root_page_id: u64,
+    ) -> Result<Option<(u64, usize)>, String> {
         let mut current_page_id = root_page_id;
-        
+
         loop {
             let page = self.read_page(current_page_id)?;
-            
+
             match page.header.kind {
                 PageKind::Leaf => {
                     for (idx, entry) in page.entries.iter().enumerate() {
@@ -483,10 +717,10 @@ impl BTreeFile {
 
     fn find_leaf_for_insert(&mut self, key: &Value, root_page_id: u64) -> Result<u64, String> {
         let mut current_page_id = root_page_id;
-        
+
         loop {
             let page = self.read_page(current_page_id)?;
-            
+
             match page.header.kind {
                 PageKind::Leaf => {
                     return Ok(current_page_id);
@@ -510,28 +744,28 @@ impl BTreeFile {
         }
     }
 
-    pub fn insert(&mut self, key: Value, value: Value, root_page_id: u64) -> Result<u64, String> {
-        let value_json = serde_json::to_string(&value)
-            .map_err(|e| format!("Failed to serialize value: {}", e))?;
-        let value_hash = value_json.len() as u64;
-        
+    pub fn insert(
+        &mut self,
+        key: Value,
+        data_pointer: u64,
+        root_page_id: u64,
+    ) -> Result<u64, String> {
         let leaf_page_id = self.find_leaf_for_insert(&key, root_page_id)?;
         let mut leaf_page = self.read_page(leaf_page_id)?;
-        
-        // Check if key already exists
+
         for (idx, entry) in leaf_page.entries.iter().enumerate() {
             if entry.key == key {
-                // Update existing entry
-                leaf_page.entries[idx].pointer = value_hash;
+                leaf_page.entries[idx].pointer = data_pointer;
                 self.write_page(&leaf_page)?;
                 return Ok(root_page_id);
             }
         }
-        
-        let new_entry = BTreeEntry::new(key.clone(), value_hash);
-        
+
+        let new_entry = BTreeEntry::new(key.clone(), data_pointer);
+
         if leaf_page.can_accept_entry(&new_entry) {
-            let insert_pos = leaf_page.entries
+            let insert_pos = leaf_page
+                .entries
                 .binary_search_by(|e| e.key.cmp(&key))
                 .unwrap_or_else(|pos| pos);
             leaf_page.entries.insert(insert_pos, new_entry);
@@ -549,24 +783,25 @@ impl BTreeFile {
         new_entry: BTreeEntry,
         root_page_id: u64,
     ) -> Result<u64, String> {
-        let insert_pos = page.entries
+        let insert_pos = page
+            .entries
             .binary_search_by(|e| e.key.cmp(&new_entry.key))
             .unwrap_or_else(|pos| pos);
         page.entries.insert(insert_pos, new_entry);
-        
+
         let mid = page.entries.len() / 2;
         let right_entries = page.entries.split_off(mid);
         let split_key = right_entries[0].key.clone();
-        
+
         page.header.entry_count = page.entries.len() as u16;
         self.write_page(&page)?;
-        
+
         let right_page_id = self.get_next_page_id()?;
         let mut right_page = BTreePage::new(right_page_id, page.header.kind);
         right_page.entries = right_entries;
         right_page.header.entry_count = right_page.entries.len() as u16;
         self.write_page(&right_page)?;
-        
+
         if page.header.page_id == root_page_id {
             let new_root_id = self.get_next_page_id()?;
             let mut new_root = BTreePage::new(new_root_id, PageKind::Internal);
@@ -574,10 +809,12 @@ impl BTreeFile {
                 page.entries[0].key.clone(),
                 page.header.page_id,
             ));
-            new_root.entries.push(BTreeEntry::new(split_key, right_page_id));
+            new_root
+                .entries
+                .push(BTreeEntry::new(split_key, right_page_id));
             new_root.header.entry_count = new_root.entries.len() as u16;
             self.write_page(&new_root)?;
-            
+
             let mut meta_page = self.read_page(0)?;
             if let Some(root_entry) = meta_page.entries.iter_mut().find(|e| {
                 if let Value::Text(ref s) = e.key {
@@ -589,10 +826,10 @@ impl BTreeFile {
                 root_entry.pointer = new_root_id;
             }
             self.write_page(&meta_page)?;
-            
+
             return Ok(new_root_id);
         }
-        
+
         Ok(root_page_id)
     }
 
@@ -616,10 +853,12 @@ impl BTreeFile {
         root_page_id: u64,
     ) -> Result<Vec<(Value, u64)>, String> {
         let mut results = Vec::new();
-        let mut current_page_id = root_page_id;
-        
+
+        let current_page_id = self.find_starting_leaf(start_key, root_page_id)?;
+
         loop {
             let page = self.read_page(current_page_id)?;
+
             match page.header.kind {
                 PageKind::Leaf => {
                     for entry in &page.entries {
@@ -629,36 +868,58 @@ impl BTreeFile {
                             (None, Some(end)) => entry.key <= *end,
                             (None, None) => true,
                         };
+
                         if in_range {
                             results.push((entry.key.clone(), entry.pointer));
+                        } else if end_key.is_some() && &entry.key > end_key.unwrap() {
+                            return Ok(results);
                         }
                     }
+
                     break;
+                }
+                _ => {
+                    return Err("Expected leaf page in range scan".to_string());
+                }
+            }
+        }
+
+        Ok(results)
+    }
+
+    fn find_starting_leaf(
+        &mut self,
+        start_key: Option<&Value>,
+        root_page_id: u64,
+    ) -> Result<u64, String> {
+        let mut current_page_id = root_page_id;
+
+        loop {
+            let page = self.read_page(current_page_id)?;
+
+            match page.header.kind {
+                PageKind::Leaf => {
+                    return Ok(current_page_id);
                 }
                 PageKind::Internal => {
                     let mut next_page_id = None;
-                    for entry in &page.entries {
-                        if let Some(start) = start_key {
+                    if let Some(start) = start_key {
+                        for entry in &page.entries {
                             if &entry.key > start {
                                 next_page_id = Some(entry.pointer);
                                 break;
                             }
-                        } else {
-                            next_page_id = Some(entry.pointer);
-                            break;
                         }
                     }
                     current_page_id = next_page_id
-                        .or_else(|| page.entries.last().map(|e| e.pointer))
+                        .or_else(|| page.entries.first().map(|e| e.pointer))
                         .ok_or_else(|| "Invalid internal page structure".to_string())?;
                 }
                 PageKind::Meta => {
-                    return Err("Cannot scan meta page".to_string());
+                    return Err("Cannot find leaf in meta page".to_string());
                 }
             }
         }
-        
-        Ok(results)
     }
 }
 
@@ -733,55 +994,62 @@ mod tests {
 
         let mut file = BTreeFile::create(&temp_path).expect("Failed to create BTree file");
 
-        // Initialize meta and root pages
         let mut meta_page = BTreePage::new(0, PageKind::Meta);
-        meta_page.entries.push(BTreeEntry::new(
-            Value::Text("root".to_string()),
-            1,
-        ));
+        meta_page
+            .entries
+            .push(BTreeEntry::new(Value::Text("root".to_string()), 1));
         meta_page.header.entry_count = meta_page.entries.len() as u16;
-        file.write_page(&meta_page).expect("Failed to write meta page");
+        file.write_page(&meta_page)
+            .expect("Failed to write meta page");
 
         let mut root_page = BTreePage::new(1, PageKind::Leaf);
         root_page.header.entry_count = 0;
-        file.write_page(&root_page).expect("Failed to write root page");
+        file.write_page(&root_page)
+            .expect("Failed to write root page");
 
-        // Test insert
         let key1 = Value::Integer(10);
-        let value1 = Value::Text("value1".to_string());
-        let root_id = file.insert(key1.clone(), value1.clone(), 1)
+        let value1_json = serde_json::to_string(&Value::Text("value1".to_string())).unwrap();
+        let data_pointer1 = file
+            .write_data_to_pointer(&value1_json)
+            .expect("Failed to write data");
+        let root_id = file
+            .insert(key1.clone(), data_pointer1, 1)
             .expect("Failed to insert");
 
-        // Test search
-        let result = file.search(&key1, root_id)
-            .expect("Failed to search");
+        let result = file.search(&key1, root_id).expect("Failed to search");
         assert!(result.is_some(), "Key should be found after insert");
 
-        // Test insert another key
         let key2 = Value::Integer(20);
-        let value2 = Value::Text("value2".to_string());
-        file.insert(key2.clone(), value2.clone(), root_id)
+        let value2_json = serde_json::to_string(&Value::Text("value2".to_string())).unwrap();
+        let data_pointer2 = file
+            .write_data_to_pointer(&value2_json)
+            .expect("Failed to write data");
+        file.insert(key2.clone(), data_pointer2, root_id)
             .expect("Failed to insert second key");
 
-        // Test search for second key
-        let result2 = file.search(&key2, root_id)
+        let result2 = file
+            .search(&key2, root_id)
             .expect("Failed to search for second key");
         assert!(result2.is_some(), "Second key should be found");
 
-        // Test delete
-        let deleted = file.delete(&key1, root_id)
-            .expect("Failed to delete");
+        let deleted = file.delete(&key1, root_id).expect("Failed to delete");
         assert!(deleted, "Delete should return true for existing key");
 
-        // Verify key is gone
-        let result_after_delete = file.search(&key1, root_id)
+        let result_after_delete = file
+            .search(&key1, root_id)
             .expect("Failed to search after delete");
-        assert!(result_after_delete.is_none(), "Key should not be found after delete");
+        assert!(
+            result_after_delete.is_none(),
+            "Key should not be found after delete"
+        );
 
-        // Verify other key still exists
-        let result2_after_delete = file.search(&key2, root_id)
+        let result2_after_delete = file
+            .search(&key2, root_id)
             .expect("Failed to search for second key after delete");
-        assert!(result2_after_delete.is_some(), "Second key should still exist");
+        assert!(
+            result2_after_delete.is_some(),
+            "Second key should still exist"
+        );
 
         let _ = std::fs::remove_file(&temp_path);
     }
@@ -793,35 +1061,36 @@ mod tests {
 
         let mut file = BTreeFile::create(&temp_path).expect("Failed to create BTree file");
 
-        // Initialize meta and root pages
         let mut meta_page = BTreePage::new(0, PageKind::Meta);
-        meta_page.entries.push(BTreeEntry::new(
-            Value::Text("root".to_string()),
-            1,
-        ));
+        meta_page
+            .entries
+            .push(BTreeEntry::new(Value::Text("root".to_string()), 1));
         meta_page.header.entry_count = meta_page.entries.len() as u16;
-        file.write_page(&meta_page).expect("Failed to write meta page");
+        file.write_page(&meta_page)
+            .expect("Failed to write meta page");
 
         let mut root_page = BTreePage::new(1, PageKind::Leaf);
         root_page.header.entry_count = 0;
-        file.write_page(&root_page).expect("Failed to write root page");
+        file.write_page(&root_page)
+            .expect("Failed to write root page");
 
-        // Insert multiple keys
         let root_id = 1;
         for i in 1..=10 {
             let key = Value::Integer(i * 10);
-            let value = Value::Text(format!("value{}", i));
-            file.insert(key, value, root_id)
+            let value_json = serde_json::to_string(&Value::Text(format!("value{}", i))).unwrap();
+            let data_pointer = file
+                .write_data_to_pointer(&value_json)
+                .expect(&format!("Failed to write data for key {}", i));
+            file.insert(key, data_pointer, root_id)
                 .expect(&format!("Failed to insert key {}", i));
         }
 
-        // Test range scan
         let start = Value::Integer(30);
         let end = Value::Integer(70);
-        let results = file.range_scan(Some(&start), Some(&end), root_id)
+        let results = file
+            .range_scan(Some(&start), Some(&end), root_id)
             .expect("Failed to range scan");
 
-        // Should find keys 30, 40, 50, 60, 70
         assert!(results.len() >= 5, "Range scan should find multiple keys");
 
         let _ = std::fs::remove_file(&temp_path);
