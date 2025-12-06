@@ -548,16 +548,6 @@ The EXPLAIN output shows:
 - Whether indexes are being used
 - Join algorithms (Hash Join, Nested Loop Join)
 
-## Future Enhancements
-
-Possible improvements for the project:
-
-- [ ] B-tree or LSM-tree storage engine
-- [ ] Concurrency control
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
 
 ## License
 
