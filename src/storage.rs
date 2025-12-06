@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock, RwLock};
 
 pub trait StorageEngine: Send + Sync {
     fn load(&self) -> Database;
@@ -14,16 +14,21 @@ pub trait StorageEngine: Send + Sync {
 
 pub struct JsonStorageEngine {
     path: PathBuf,
+    lock: Arc<RwLock<()>>,
 }
 
 impl JsonStorageEngine {
     pub fn new<P: Into<PathBuf>>(path: P) -> Self {
-        JsonStorageEngine { path: path.into() }
+        JsonStorageEngine {
+            path: path.into(),
+            lock: Arc::new(RwLock::new(())),
+        }
     }
 }
 
 impl StorageEngine for JsonStorageEngine {
     fn load(&self) -> Database {
+        let _guard = self.lock.read().unwrap();
         if Path::new(&self.path).exists() {
             let data = fs::read_to_string(&self.path).unwrap_or_default();
             serde_json::from_str(&data).unwrap_or_default()
@@ -33,6 +38,7 @@ impl StorageEngine for JsonStorageEngine {
     }
 
     fn save(&self, db: &Database) -> Result<(), String> {
+        let _guard = self.lock.write().unwrap();
         let data = serde_json::to_string_pretty(db)
             .map_err(|e| format!("Failed to serialize database: {}", e))?;
         fs::write(&self.path, data).map_err(|e| format!("Failed to write database file: {}", e))?;
@@ -59,18 +65,21 @@ pub fn storage_engine() -> &'static dyn StorageEngine {
 
 pub struct BTreeStorageEngine {
     data_path: PathBuf,
+    file: Arc<RwLock<Option<BTreeFile>>>,
+    path_lock: Arc<RwLock<()>>,
 }
 
 impl BTreeStorageEngine {
     pub fn new<P: Into<PathBuf>>(data_path: P) -> Self {
         BTreeStorageEngine {
             data_path: data_path.into(),
+            file: Arc::new(RwLock::new(None)),
+            path_lock: Arc::new(RwLock::new(())),
         }
     }
-}
 
-impl StorageEngine for BTreeStorageEngine {
-    fn load(&self) -> Database {
+    pub fn concurrent_load(&self) -> Database {
+        let _path_guard = self.path_lock.read().unwrap();
         match BTreeFile::open(&self.data_path) {
             Ok(mut file) => match file.read_database_via_pages() {
                 Ok(db) => db,
@@ -79,10 +88,23 @@ impl StorageEngine for BTreeStorageEngine {
             Err(_) => Database::new(),
         }
     }
+}
+
+impl StorageEngine for BTreeStorageEngine {
+    fn load(&self) -> Database {
+        self.concurrent_load()
+    }
 
     fn save(&self, db: &Database) -> Result<(), String> {
+        let _path_guard = self.path_lock.write().unwrap();
+        let mut file_guard = self
+            .file
+            .write()
+            .map_err(|e| format!("Failed to acquire write lock: {}", e))?;
         let mut file = BTreeFile::create(&self.data_path)?;
-        file.write_database_via_pages(db)
+        let result = file.write_database_via_pages(db);
+        *file_guard = Some(file);
+        result
     }
 }
 
