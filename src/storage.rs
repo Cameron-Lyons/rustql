@@ -753,7 +753,6 @@ impl BTreeFile {
         let leaf_page_id = *path.last().unwrap();
         let mut leaf_page = self.read_page(leaf_page_id)?;
 
-        // Check if key already exists
         for (idx, entry) in leaf_page.entries.iter().enumerate() {
             if entry.key == key {
                 leaf_page.entries[idx].pointer = data_pointer;
@@ -785,14 +784,12 @@ impl BTreeFile {
         mut path: Vec<u64>,
         root_page_id: u64,
     ) -> Result<u64, String> {
-        // Insert the new entry into the page
         let insert_pos = page
             .entries
             .binary_search_by(|e| e.key.cmp(&new_entry.key))
             .unwrap_or_else(|pos| pos);
         page.entries.insert(insert_pos, new_entry);
 
-        // Split the page
         let mid = page.entries.len() / 2;
         let right_entries = page.entries.split_off(mid);
         let split_key = right_entries[0].key.clone();
@@ -806,13 +803,10 @@ impl BTreeFile {
         right_page.header.entry_count = right_page.entries.len() as u16;
         self.write_page(&right_page)?;
 
-        // If this is the root, create a new root
         if page.header.page_id == root_page_id {
             let new_root_id = self.get_next_page_id()?;
             let mut new_root = BTreePage::new(new_root_id, PageKind::Internal);
 
-            // The left entry uses the first key from the left page
-            // The right entry uses the split key (first key of right page)
             let left_key = page.entries[0].key.clone();
 
             new_root
@@ -845,16 +839,13 @@ impl BTreeFile {
             return Ok(new_root_id);
         }
 
-        // This is not the root, so we need to propagate the split upward
-        path.pop(); // Remove current page from path
+        path.pop();
         if let Some(parent_page_id) = path.last().copied() {
             let mut parent_page = self.read_page(parent_page_id)?;
 
-            // Create entry to insert into parent
             let parent_entry = BTreeEntry::new(split_key, right_page_id);
 
             if parent_page.can_accept_entry(&parent_entry) {
-                // Parent has room, just insert
                 let insert_pos = parent_page
                     .entries
                     .binary_search_by(|e| e.key.cmp(&parent_entry.key))
@@ -864,11 +855,9 @@ impl BTreeFile {
                 self.write_page(&parent_page)?;
                 Ok(root_page_id)
             } else {
-                // Parent is full, need to split it too
                 self.split_and_insert_recursive(parent_page, parent_entry, path, root_page_id)
             }
         } else {
-            // No parent (shouldn't happen, but handle gracefully)
             Ok(root_page_id)
         }
     }
