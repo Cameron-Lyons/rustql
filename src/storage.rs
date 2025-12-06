@@ -1,7 +1,6 @@
 use crate::ast::Value;
 use crate::database::Database;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -66,22 +65,20 @@ pub fn storage_engine() -> &'static dyn StorageEngine {
 
 pub struct BTreeStorageEngine {
     data_path: PathBuf,
-    file: Arc<RwLock<Option<BTreeFile>>>,
     path_lock: Arc<RwLock<()>>,
-    page_cache: Arc<RwLock<HashMap<u64, BTreePage>>>,
 }
 
 impl BTreeStorageEngine {
     pub fn new<P: Into<PathBuf>>(data_path: P) -> Self {
         BTreeStorageEngine {
             data_path: data_path.into(),
-            file: Arc::new(RwLock::new(None)),
             path_lock: Arc::new(RwLock::new(())),
-            page_cache: Arc::new(RwLock::new(HashMap::new())),
         }
     }
+}
 
-    pub fn concurrent_load(&self) -> Database {
+impl StorageEngine for BTreeStorageEngine {
+    fn load(&self) -> Database {
         let _path_guard = self.path_lock.read().unwrap();
         match BTreeFile::open(&self.data_path) {
             Ok(mut file) => match file.read_database_via_pages() {
@@ -92,28 +89,10 @@ impl BTreeStorageEngine {
         }
     }
 
-    pub fn clear_cache(&self) {
-        let mut cache = self.page_cache.write().unwrap();
-        cache.clear();
-    }
-}
-
-impl StorageEngine for BTreeStorageEngine {
-    fn load(&self) -> Database {
-        self.concurrent_load()
-    }
-
     fn save(&self, db: &Database) -> Result<(), String> {
         let _path_guard = self.path_lock.write().unwrap();
-        let mut file_guard = self
-            .file
-            .write()
-            .map_err(|e| format!("Failed to acquire write lock: {}", e))?;
         let mut file = BTreeFile::create(&self.data_path)?;
-        let result = file.write_database_via_pages(db);
-        *file_guard = Some(file);
-        self.clear_cache();
-        result
+        file.write_database_via_pages(db)
     }
 }
 

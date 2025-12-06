@@ -8,38 +8,23 @@ use std::sync::{Mutex, OnceLock, RwLock};
 static DATABASE: OnceLock<RwLock<Database>> = OnceLock::new();
 static TRANSACTION_STATE: OnceLock<Mutex<Option<Database>>> = OnceLock::new();
 
-fn get_database_read() -> std::sync::RwLockReadGuard<'static, Database> {
+fn get_database() -> &'static RwLock<Database> {
     #[cfg(test)]
     {
-        DATABASE
-            .get_or_init(|| RwLock::new(Database::new()))
-            .read()
-            .unwrap()
+        DATABASE.get_or_init(|| RwLock::new(Database::new()))
     }
     #[cfg(not(test))]
     {
-        DATABASE
-            .get_or_init(|| RwLock::new(Database::load()))
-            .read()
-            .unwrap()
+        DATABASE.get_or_init(|| RwLock::new(Database::load()))
     }
 }
 
+fn get_database_read() -> std::sync::RwLockReadGuard<'static, Database> {
+    get_database().read().unwrap()
+}
+
 fn get_database_write() -> std::sync::RwLockWriteGuard<'static, Database> {
-    #[cfg(test)]
-    {
-        DATABASE
-            .get_or_init(|| RwLock::new(Database::new()))
-            .write()
-            .unwrap()
-    }
-    #[cfg(not(test))]
-    {
-        DATABASE
-            .get_or_init(|| RwLock::new(Database::load()))
-            .write()
-            .unwrap()
-    }
+    get_database().write().unwrap()
 }
 
 pub fn get_database_for_testing() -> Database {
