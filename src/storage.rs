@@ -57,12 +57,10 @@ pub fn storage_engine() -> &'static dyn StorageEngine {
     &**STORAGE_ENGINE.get().unwrap()
 }
 
-#[allow(dead_code)]
 pub struct BTreeStorageEngine {
     data_path: PathBuf,
 }
 
-#[allow(dead_code)]
 impl BTreeStorageEngine {
     pub fn new<P: Into<PathBuf>>(data_path: P) -> Self {
         BTreeStorageEngine {
@@ -71,7 +69,6 @@ impl BTreeStorageEngine {
     }
 }
 
-#[allow(dead_code)]
 impl StorageEngine for BTreeStorageEngine {
     fn load(&self) -> Database {
         match BTreeFile::open(&self.data_path) {
@@ -715,15 +712,17 @@ impl BTreeFile {
         }
     }
 
-    fn find_leaf_for_insert(&mut self, key: &Value, root_page_id: u64) -> Result<u64, String> {
+    fn find_path_to_leaf(&mut self, key: &Value, root_page_id: u64) -> Result<Vec<u64>, String> {
+        let mut path = Vec::new();
         let mut current_page_id = root_page_id;
 
         loop {
+            path.push(current_page_id);
             let page = self.read_page(current_page_id)?;
 
             match page.header.kind {
                 PageKind::Leaf => {
-                    return Ok(current_page_id);
+                    return Ok(path);
                 }
                 PageKind::Internal => {
                     let mut next_page_id = None;
@@ -750,9 +749,11 @@ impl BTreeFile {
         data_pointer: u64,
         root_page_id: u64,
     ) -> Result<u64, String> {
-        let leaf_page_id = self.find_leaf_for_insert(&key, root_page_id)?;
+        let path = self.find_path_to_leaf(&key, root_page_id)?;
+        let leaf_page_id = *path.last().unwrap();
         let mut leaf_page = self.read_page(leaf_page_id)?;
 
+        // Check if key already exists
         for (idx, entry) in leaf_page.entries.iter().enumerate() {
             if entry.key == key {
                 leaf_page.entries[idx].pointer = data_pointer;
@@ -773,22 +774,25 @@ impl BTreeFile {
             self.write_page(&leaf_page)?;
             return Ok(root_page_id);
         } else {
-            return self.split_and_insert(leaf_page, new_entry, root_page_id);
+            return self.split_and_insert_recursive(leaf_page, new_entry, path, root_page_id);
         }
     }
 
-    fn split_and_insert(
+    fn split_and_insert_recursive(
         &mut self,
         mut page: BTreePage,
         new_entry: BTreeEntry,
+        mut path: Vec<u64>,
         root_page_id: u64,
     ) -> Result<u64, String> {
+        // Insert the new entry into the page
         let insert_pos = page
             .entries
             .binary_search_by(|e| e.key.cmp(&new_entry.key))
             .unwrap_or_else(|pos| pos);
         page.entries.insert(insert_pos, new_entry);
 
+        // Split the page
         let mid = page.entries.len() / 2;
         let right_entries = page.entries.split_off(mid);
         let split_key = right_entries[0].key.clone();
@@ -802,13 +806,18 @@ impl BTreeFile {
         right_page.header.entry_count = right_page.entries.len() as u16;
         self.write_page(&right_page)?;
 
+        // If this is the root, create a new root
         if page.header.page_id == root_page_id {
             let new_root_id = self.get_next_page_id()?;
             let mut new_root = BTreePage::new(new_root_id, PageKind::Internal);
-            new_root.entries.push(BTreeEntry::new(
-                page.entries[0].key.clone(),
-                page.header.page_id,
-            ));
+
+            // The left entry uses the first key from the left page
+            // The right entry uses the split key (first key of right page)
+            let left_key = page.entries[0].key.clone();
+
+            new_root
+                .entries
+                .push(BTreeEntry::new(left_key, page.header.page_id));
             new_root
                 .entries
                 .push(BTreeEntry::new(split_key, right_page_id));
@@ -824,13 +833,44 @@ impl BTreeFile {
                 }
             }) {
                 root_entry.pointer = new_root_id;
+            } else {
+                meta_page.entries.push(BTreeEntry::new(
+                    Value::Text("root".to_string()),
+                    new_root_id,
+                ));
             }
+            meta_page.header.entry_count = meta_page.entries.len() as u16;
             self.write_page(&meta_page)?;
 
             return Ok(new_root_id);
         }
 
-        Ok(root_page_id)
+        // This is not the root, so we need to propagate the split upward
+        path.pop(); // Remove current page from path
+        if let Some(parent_page_id) = path.last().copied() {
+            let mut parent_page = self.read_page(parent_page_id)?;
+
+            // Create entry to insert into parent
+            let parent_entry = BTreeEntry::new(split_key, right_page_id);
+
+            if parent_page.can_accept_entry(&parent_entry) {
+                // Parent has room, just insert
+                let insert_pos = parent_page
+                    .entries
+                    .binary_search_by(|e| e.key.cmp(&parent_entry.key))
+                    .unwrap_or_else(|pos| pos);
+                parent_page.entries.insert(insert_pos, parent_entry);
+                parent_page.header.entry_count = parent_page.entries.len() as u16;
+                self.write_page(&parent_page)?;
+                Ok(root_page_id)
+            } else {
+                // Parent is full, need to split it too
+                self.split_and_insert_recursive(parent_page, parent_entry, path, root_page_id)
+            }
+        } else {
+            // No parent (shouldn't happen, but handle gracefully)
+            Ok(root_page_id)
+        }
     }
 
     pub fn delete(&mut self, key: &Value, root_page_id: u64) -> Result<bool, String> {
