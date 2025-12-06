@@ -3,30 +3,47 @@ use crate::database::{Database, Table};
 use crate::planner;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashSet};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Mutex, OnceLock, RwLock};
 
-static DATABASE: OnceLock<Mutex<Database>> = OnceLock::new();
+static DATABASE: OnceLock<RwLock<Database>> = OnceLock::new();
 static TRANSACTION_STATE: OnceLock<Mutex<Option<Database>>> = OnceLock::new();
 
-fn get_database() -> std::sync::MutexGuard<'static, Database> {
+fn get_database_read() -> std::sync::RwLockReadGuard<'static, Database> {
     #[cfg(test)]
     {
         DATABASE
-            .get_or_init(|| Mutex::new(Database::new()))
-            .lock()
+            .get_or_init(|| RwLock::new(Database::new()))
+            .read()
             .unwrap()
     }
     #[cfg(not(test))]
     {
         DATABASE
-            .get_or_init(|| Mutex::new(Database::load()))
-            .lock()
+            .get_or_init(|| RwLock::new(Database::load()))
+            .read()
+            .unwrap()
+    }
+}
+
+fn get_database_write() -> std::sync::RwLockWriteGuard<'static, Database> {
+    #[cfg(test)]
+    {
+        DATABASE
+            .get_or_init(|| RwLock::new(Database::new()))
+            .write()
+            .unwrap()
+    }
+    #[cfg(not(test))]
+    {
+        DATABASE
+            .get_or_init(|| RwLock::new(Database::load()))
+            .write()
             .unwrap()
     }
 }
 
 pub fn get_database_for_testing() -> Database {
-    (*get_database()).clone()
+    (*get_database_read()).clone()
 }
 
 pub fn execute(statement: Statement) -> Result<String, String> {
@@ -50,7 +67,7 @@ pub fn execute(statement: Statement) -> Result<String, String> {
 }
 
 pub fn reset_database_state() {
-    let mut db = get_database();
+    let mut db = get_database_write();
     db.tables.clear();
     db.indexes.clear();
     TRANSACTION_STATE
@@ -85,7 +102,7 @@ fn execute_begin_transaction() -> Result<String, String> {
         return Err("Transaction already in progress".to_string());
     }
 
-    let db = get_database();
+    let db = get_database_read();
     let db_json = serde_json::to_string(&*db)
         .map_err(|e| format!("Failed to serialize database snapshot: {}", e))?;
     let snapshot: Database = serde_json::from_str(&db_json)
@@ -107,7 +124,7 @@ fn execute_commit_transaction() -> Result<String, String> {
 
     *transaction_state = None;
 
-    let db = get_database();
+    let db = get_database_read();
     db.save()?;
 
     Ok("Transaction committed".to_string())
@@ -120,7 +137,7 @@ fn execute_rollback_transaction() -> Result<String, String> {
         .unwrap();
 
     if let Some(snapshot) = transaction_state.take() {
-        let mut db = get_database();
+        let mut db = get_database_write();
         *db = snapshot;
         Ok("Transaction rolled back".to_string())
     } else {
@@ -129,12 +146,12 @@ fn execute_rollback_transaction() -> Result<String, String> {
 }
 
 fn execute_explain(stmt: SelectStatement) -> Result<String, String> {
-    let db = get_database();
+    let db = get_database_read();
     planner::explain_query(&*db, &stmt)
 }
 
 fn execute_describe(table_name: String) -> Result<String, String> {
-    let db = get_database();
+    let db = get_database_read();
     let table = db
         .tables
         .get(&table_name)
@@ -175,7 +192,7 @@ fn execute_describe(table_name: String) -> Result<String, String> {
 }
 
 fn execute_show_tables() -> Result<String, String> {
-    let db = get_database();
+    let db = get_database_read();
     let mut result = String::new();
     result.push_str("Tables\n");
     result.push_str(&"-".repeat(40));
@@ -193,7 +210,7 @@ fn execute_show_tables() -> Result<String, String> {
 }
 
 fn execute_create_table(stmt: CreateTableStatement) -> Result<String, String> {
-    let mut db = get_database();
+    let mut db = get_database_write();
     if db.tables.contains_key(&stmt.name) {
         return Err(format!("Table '{}' already exists", stmt.name));
     }
@@ -209,7 +226,7 @@ fn execute_create_table(stmt: CreateTableStatement) -> Result<String, String> {
 }
 
 fn execute_drop_table(stmt: DropTableStatement) -> Result<String, String> {
-    let mut db = get_database();
+    let mut db = get_database_write();
     if db.tables.remove(&stmt.name).is_some() {
         save_if_not_in_transaction(&db)?;
         Ok(format!("Table '{}' dropped", stmt.name))
@@ -219,7 +236,7 @@ fn execute_drop_table(stmt: DropTableStatement) -> Result<String, String> {
 }
 
 fn execute_insert(stmt: InsertStatement) -> Result<String, String> {
-    let mut db = get_database();
+    let mut db = get_database_write();
 
     let table_ref = db
         .tables
@@ -339,7 +356,7 @@ fn execute_insert(stmt: InsertStatement) -> Result<String, String> {
 }
 
 fn execute_select(stmt: SelectStatement) -> Result<String, String> {
-    let db = get_database();
+    let db = get_database_read();
 
     if let Some(ref union_stmt) = stmt.union {
         let left_stmt = SelectStatement {
@@ -1553,7 +1570,7 @@ fn evaluate_having_value(
 }
 
 fn execute_update(stmt: UpdateStatement) -> Result<String, String> {
-    let mut db = get_database();
+    let mut db = get_database_write();
 
     let candidate_indices: Option<HashSet<usize>> = {
         let table_ref_immut = db
@@ -1647,7 +1664,7 @@ fn execute_update(stmt: UpdateStatement) -> Result<String, String> {
 }
 
 fn execute_delete(stmt: DeleteStatement) -> Result<String, String> {
-    let mut db = get_database();
+    let mut db = get_database_write();
 
     let (columns, rows_to_delete) = {
         let table_ref = db
@@ -2879,7 +2896,7 @@ fn execute_select_with_joins(stmt: SelectStatement, db: &Database) -> Result<Str
 }
 
 fn execute_alter_table(stmt: AlterTableStatement) -> Result<String, String> {
-    let mut db = get_database();
+    let mut db = get_database_write();
     let table = db
         .tables
         .get_mut(&stmt.table)
@@ -3168,7 +3185,7 @@ fn handle_foreign_keys_for_delete(
 }
 
 fn execute_create_index(stmt: CreateIndexStatement) -> Result<String, String> {
-    let mut db = get_database();
+    let mut db = get_database_write();
 
     if db.indexes.contains_key(&stmt.name) {
         return Err(format!("Index '{}' already exists", stmt.name));
@@ -3215,7 +3232,7 @@ fn execute_create_index(stmt: CreateIndexStatement) -> Result<String, String> {
 }
 
 fn execute_drop_index(stmt: DropIndexStatement) -> Result<String, String> {
-    let mut db = get_database();
+    let mut db = get_database_write();
     if db.indexes.remove(&stmt.name).is_some() {
         save_if_not_in_transaction(&db)?;
         Ok(format!("Index '{}' dropped", stmt.name))
