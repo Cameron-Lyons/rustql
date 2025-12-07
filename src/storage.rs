@@ -125,7 +125,6 @@ impl PageCache {
 
 pub struct BTreeStorageEngine {
     data_path: PathBuf,
-    file: Arc<RwLock<Option<BTreeFile>>>,
     path_lock: Arc<RwLock<()>>,
     page_cache: Arc<RwLock<PageCache>>,
 }
@@ -134,7 +133,6 @@ impl BTreeStorageEngine {
     pub fn new<P: Into<PathBuf>>(data_path: P) -> Self {
         BTreeStorageEngine {
             data_path: data_path.into(),
-            file: Arc::new(RwLock::new(None)),
             path_lock: Arc::new(RwLock::new(())),
             page_cache: Arc::new(RwLock::new(PageCache::new())),
         }
@@ -204,8 +202,10 @@ impl BTreeStorageEngine {
         cache.pages.remove(&page_id);
         cache.access_order.retain(|&id| id != page_id);
     }
+}
 
-    pub fn concurrent_load(&self) -> Database {
+impl StorageEngine for BTreeStorageEngine {
+    fn load(&self) -> Database {
         let _path_guard = self.path_lock.read().unwrap();
         let mut cached_file = CachedBTreeFile { engine: self };
         match cached_file.read_database_via_pages() {
@@ -235,15 +235,8 @@ impl StorageEngine for BTreeStorageEngine {
 
     fn save(&self, db: &Database) -> Result<(), String> {
         let _path_guard = self.path_lock.write().unwrap();
-        let mut file_guard = self
-            .file
-            .write()
-            .map_err(|e| format!("Failed to acquire write lock: {}", e))?;
         let mut file = BTreeFile::create(&self.data_path)?;
-        let result = file.write_database_via_pages(db);
-        *file_guard = Some(file);
-        self.clear_cache();
-        result
+        file.write_database_via_pages(db)
     }
 }
 
