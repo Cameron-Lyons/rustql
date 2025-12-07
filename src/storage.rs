@@ -149,47 +149,16 @@ impl BTreeStorageEngine {
             }
         }
 
-        let file_guard = self
-            .file
-            .read()
-            .map_err(|e| format!("Failed to acquire file read lock: {}", e))?;
-
-        if file_guard.is_none() {
-            drop(file_guard);
-            let mut file_guard = self
-                .file
+        let mut file = BTreeFile::open(&self.data_path)?;
+        let page = file.read_page(page_id)?;
+        {
+            let mut cache = self
+                .page_cache
                 .write()
-                .map_err(|e| format!("Failed to acquire file write lock: {}", e))?;
-            if file_guard.is_none() {
-                let btree_file = BTreeFile::open(&self.data_path)?;
-                *file_guard = Some(btree_file);
-            }
-            drop(file_guard);
+                .map_err(|e| format!("Failed to acquire cache write lock: {}", e))?;
+            cache.insert(page_id, page.clone());
         }
-
-        let file_guard = self
-            .file
-            .read()
-            .map_err(|e| format!("Failed to acquire file read lock: {}", e))?;
-        if let Some(ref file) = *file_guard {
-            let mut file_clone = BTreeFile {
-                file: file
-                    .file
-                    .try_clone()
-                    .map_err(|e| format!("Failed to clone file: {}", e))?,
-            };
-            let page = file_clone.read_page(page_id)?;
-            {
-                let mut cache = self
-                    .page_cache
-                    .write()
-                    .map_err(|e| format!("Failed to acquire cache write lock: {}", e))?;
-                cache.insert(page_id, page.clone());
-            }
-            Ok(page)
-        } else {
-            Err("File handle not available".to_string())
-        }
+        Ok(page)
     }
 
     pub fn cache_stats(&self) -> (u64, u64, usize) {
@@ -201,17 +170,6 @@ impl BTreeStorageEngine {
         let mut cache = self.page_cache.write().unwrap();
         cache.pages.remove(&page_id);
         cache.access_order.retain(|&id| id != page_id);
-    }
-}
-
-impl StorageEngine for BTreeStorageEngine {
-    fn load(&self) -> Database {
-        let _path_guard = self.path_lock.read().unwrap();
-        let mut cached_file = CachedBTreeFile { engine: self };
-        match cached_file.read_database_via_pages() {
-            Ok(db) => db,
-            Err(_) => Database::new(),
-        }
     }
 
     pub fn clear_cache(&self) {
@@ -230,13 +188,20 @@ impl StorageEngine for BTreeStorageEngine {
 
 impl StorageEngine for BTreeStorageEngine {
     fn load(&self) -> Database {
-        self.concurrent_load()
+        let _path_guard = self.path_lock.read().unwrap();
+        let mut cached_file = CachedBTreeFile { engine: self };
+        match cached_file.read_database_via_pages() {
+            Ok(db) => db,
+            Err(_) => Database::new(),
+        }
     }
 
     fn save(&self, db: &Database) -> Result<(), String> {
         let _path_guard = self.path_lock.write().unwrap();
         let mut file = BTreeFile::create(&self.data_path)?;
-        file.write_database_via_pages(db)
+        let result = file.write_database_via_pages(db);
+        self.clear_cache();
+        result
     }
 }
 
@@ -250,65 +215,36 @@ impl<'a> CachedBTreeFile<'a> {
     }
 
     fn read_database_via_pages(&mut self) -> Result<Database, String> {
-        {
-            let mut file_guard = self
-                .engine
-                .file
-                .write()
-                .map_err(|e| format!("Failed to acquire file write lock: {}", e))?;
+        let mut file = BTreeFile::open(&self.engine.data_path)?;
+        
+        let file_size = file
+            .file
+            .metadata()
+            .map_err(|e| format!("Failed to get file metadata: {}", e))?
+            .len();
 
-            if file_guard.is_none() {
-                let btree_file = BTreeFile::open(&self.engine.data_path)?;
-                *file_guard = Some(btree_file);
-            }
+        if file_size < 16 {
+            return Ok(Database::new());
         }
 
-        let file_arc = Arc::clone(&self.engine.file);
-        let file_guard = file_arc
-            .read()
-            .map_err(|e| format!("Failed to acquire file read lock: {}", e))?;
+        let mut header = [0u8; 16];
+        file.file
+            .seek(SeekFrom::Start(0))
+            .map_err(|e| format!("Failed to seek to start: {}", e))?;
+        let bytes_read = file
+            .file
+            .read(&mut header)
+            .map_err(|e| format!("Failed to read BTree storage header: {}", e))?;
 
-        if let Some(ref file) = *file_guard {
-            let file_size = file
-                .file
-                .metadata()
-                .map_err(|e| format!("Failed to get file metadata: {}", e))?
-                .len();
-
-            if file_size < 16 {
-                return Ok(Database::new());
-            }
-
-            let mut header = [0u8; 16];
-            let mut file_clone = BTreeFile {
-                file: file
-                    .file
-                    .try_clone()
-                    .map_err(|e| format!("Failed to clone file: {}", e))?,
-            };
-            file_clone
-                .file
-                .seek(SeekFrom::Start(0))
-                .map_err(|e| format!("Failed to seek to start: {}", e))?;
-            let bytes_read = file_clone
-                .file
-                .read(&mut header)
-                .map_err(|e| format!("Failed to read BTree storage header: {}", e))?;
-
-            if bytes_read < header.len() || header[0..8] != BTreeFile::MAGIC {
-                return file_clone
-                    .read_database_legacy()
-                    .or_else(|_| Ok(Database::new()));
-            }
-
-            let _version = u32::from_le_bytes([header[8], header[9], header[10], header[11]]);
-
-            if file_size < 16 + BTREE_PAGE_SIZE as u64 {
-                return Ok(Database::new());
-            }
+        if bytes_read < header.len() || header[0..8] != BTreeFile::MAGIC {
+            return file.read_database_legacy().or_else(|_| Ok(Database::new()));
         }
 
-        drop(file_guard);
+        let _version = u32::from_le_bytes([header[8], header[9], header[10], header[11]]);
+
+        if file_size < 16 + BTREE_PAGE_SIZE as u64 {
+            return Ok(Database::new());
+        }
 
         let meta_page = match self.read_page(0) {
             Ok(page) => page,
