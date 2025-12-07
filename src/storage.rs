@@ -1,6 +1,7 @@
 use crate::ast::Value;
 use crate::database::Database;
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -63,9 +64,69 @@ pub fn storage_engine() -> &'static dyn StorageEngine {
     &**STORAGE_ENGINE.get().unwrap()
 }
 
+const MAX_CACHE_SIZE: usize = 1000;
+
+struct PageCache {
+    pages: HashMap<u64, BTreePage>,
+    access_order: VecDeque<u64>,
+    hits: u64,
+    misses: u64,
+}
+
+impl PageCache {
+    fn new() -> Self {
+        PageCache {
+            pages: HashMap::new(),
+            access_order: VecDeque::new(),
+            hits: 0,
+            misses: 0,
+        }
+    }
+
+    fn get(&mut self, page_id: &u64) -> Option<&BTreePage> {
+        if self.pages.contains_key(page_id) {
+            self.hits += 1;
+            self.access_order.retain(|&id| id != *page_id);
+            self.access_order.push_back(*page_id);
+            self.pages.get(page_id)
+        } else {
+            self.misses += 1;
+            None
+        }
+    }
+
+    fn insert(&mut self, page_id: u64, page: BTreePage) {
+        if self.pages.contains_key(&page_id) {
+            self.pages.insert(page_id, page);
+            self.access_order.retain(|&id| id != page_id);
+            self.access_order.push_back(page_id);
+        } else {
+            while self.pages.len() >= MAX_CACHE_SIZE {
+                if let Some(oldest_id) = self.access_order.pop_front() {
+                    self.pages.remove(&oldest_id);
+                } else {
+                    break;
+                }
+            }
+            self.pages.insert(page_id, page);
+            self.access_order.push_back(page_id);
+        }
+    }
+
+    fn clear(&mut self) {
+        self.pages.clear();
+        self.access_order.clear();
+    }
+
+    fn stats(&self) -> (u64, u64, usize) {
+        (self.hits, self.misses, self.pages.len())
+    }
+}
+
 pub struct BTreeStorageEngine {
     data_path: PathBuf,
     path_lock: Arc<RwLock<()>>,
+    page_cache: Arc<RwLock<PageCache>>,
 }
 
 impl BTreeStorageEngine {
@@ -73,6 +134,54 @@ impl BTreeStorageEngine {
         BTreeStorageEngine {
             data_path: data_path.into(),
             path_lock: Arc::new(RwLock::new(())),
+            page_cache: Arc::new(RwLock::new(PageCache::new())),
+        }
+    }
+
+    fn read_page_cached(&self, page_id: u64) -> Result<BTreePage, String> {
+        {
+            let mut cache = self
+                .page_cache
+                .write()
+                .map_err(|e| format!("Failed to acquire cache write lock: {}", e))?;
+            if let Some(page) = cache.get(&page_id) {
+                return Ok(page.clone());
+            }
+        }
+
+        let mut file = BTreeFile::open(&self.data_path)?;
+        let page = file.read_page(page_id)?;
+        {
+            let mut cache = self
+                .page_cache
+                .write()
+                .map_err(|e| format!("Failed to acquire cache write lock: {}", e))?;
+            cache.insert(page_id, page.clone());
+        }
+        Ok(page)
+    }
+
+    pub fn cache_stats(&self) -> (u64, u64, usize) {
+        let cache = self.page_cache.read().unwrap();
+        cache.stats()
+    }
+
+    pub fn invalidate_page(&self, page_id: u64) {
+        let mut cache = self.page_cache.write().unwrap();
+        cache.pages.remove(&page_id);
+        cache.access_order.retain(|&id| id != page_id);
+    }
+
+    pub fn clear_cache(&self) {
+        let mut cache = self.page_cache.write().unwrap();
+        cache.clear();
+    }
+
+    pub fn invalidate_pages(&self, page_ids: &[u64]) {
+        let mut cache = self.page_cache.write().unwrap();
+        for &page_id in page_ids {
+            cache.pages.remove(&page_id);
+            cache.access_order.retain(|&id| id != page_id);
         }
     }
 }
@@ -80,11 +189,9 @@ impl BTreeStorageEngine {
 impl StorageEngine for BTreeStorageEngine {
     fn load(&self) -> Database {
         let _path_guard = self.path_lock.read().unwrap();
-        match BTreeFile::open(&self.data_path) {
-            Ok(mut file) => match file.read_database_via_pages() {
-                Ok(db) => db,
-                Err(_) => Database::new(),
-            },
+        let mut cached_file = CachedBTreeFile { engine: self };
+        match cached_file.read_database_via_pages() {
+            Ok(db) => db,
             Err(_) => Database::new(),
         }
     }
@@ -92,7 +199,257 @@ impl StorageEngine for BTreeStorageEngine {
     fn save(&self, db: &Database) -> Result<(), String> {
         let _path_guard = self.path_lock.write().unwrap();
         let mut file = BTreeFile::create(&self.data_path)?;
-        file.write_database_via_pages(db)
+        let result = file.write_database_via_pages(db);
+        self.clear_cache();
+        result
+    }
+}
+
+struct CachedBTreeFile<'a> {
+    engine: &'a BTreeStorageEngine,
+}
+
+impl<'a> CachedBTreeFile<'a> {
+    fn read_page(&self, page_id: u64) -> Result<BTreePage, String> {
+        self.engine.read_page_cached(page_id)
+    }
+
+    fn read_database_via_pages(&mut self) -> Result<Database, String> {
+        let mut file = BTreeFile::open(&self.engine.data_path)?;
+        
+        let file_size = file
+            .file
+            .metadata()
+            .map_err(|e| format!("Failed to get file metadata: {}", e))?
+            .len();
+
+        if file_size < 16 {
+            return Ok(Database::new());
+        }
+
+        let mut header = [0u8; 16];
+        file.file
+            .seek(SeekFrom::Start(0))
+            .map_err(|e| format!("Failed to seek to start: {}", e))?;
+        let bytes_read = file
+            .file
+            .read(&mut header)
+            .map_err(|e| format!("Failed to read BTree storage header: {}", e))?;
+
+        if bytes_read < header.len() || header[0..8] != BTreeFile::MAGIC {
+            return file.read_database_legacy().or_else(|_| Ok(Database::new()));
+        }
+
+        let _version = u32::from_le_bytes([header[8], header[9], header[10], header[11]]);
+
+        if file_size < 16 + BTREE_PAGE_SIZE as u64 {
+            return Ok(Database::new());
+        }
+
+        let meta_page = match self.read_page(0) {
+            Ok(page) => page,
+            Err(_) => return Ok(Database::new()),
+        };
+        let root_page_id = meta_page
+            .entries
+            .iter()
+            .find(|e| {
+                if let Value::Text(ref s) = e.key {
+                    s == "root"
+                } else {
+                    false
+                }
+            })
+            .map(|e| e.pointer)
+            .unwrap_or(1);
+
+        let root_page = self.read_page(root_page_id)?;
+
+        if root_page.entries.len() == 1 {
+            if let Some(entry) = root_page.entries.get(0) {
+                if let Value::Text(ref json_str) = entry.key {
+                    if json_str.starts_with('{') && json_str.len() > 100 {
+                        return serde_json::from_str(json_str).map_err(|e| {
+                            format!("Failed to decode Database from BTree root page: {}", e)
+                        });
+                    }
+                }
+            }
+        }
+
+        self.load_database_from_rows(root_page_id)
+    }
+
+    fn load_database_from_rows(&self, root_page_id: u64) -> Result<Database, String> {
+        let mut db = Database::new();
+
+        let schema_prefix = Value::Text("schema:".to_string());
+        let schema_end = Value::Text("schema;".to_string());
+        let schemas = self.range_scan(Some(&schema_prefix), Some(&schema_end), root_page_id)?;
+
+        for (key, pointer) in schemas {
+            if let Value::Text(ref key_str) = key {
+                if let Some(table_name) = key_str.strip_prefix("schema:") {
+                    let schema_json = self.read_data_from_pointer(pointer)?;
+                    let columns: Vec<crate::ast::ColumnDefinition> =
+                        serde_json::from_str(&schema_json).map_err(|e| {
+                            format!(
+                                "Failed to deserialize schema for table {}: {}",
+                                table_name, e
+                            )
+                        })?;
+
+                    db.tables.insert(
+                        table_name.to_string(),
+                        crate::database::Table {
+                            columns,
+                            rows: Vec::new(),
+                        },
+                    );
+                }
+            }
+        }
+
+        for table_name in db.tables.keys().cloned().collect::<Vec<_>>() {
+            let row_prefix = Value::Text(format!("row:{}:", table_name));
+            let row_end = Value::Text(format!("row:{};", table_name));
+            let rows = self.range_scan(Some(&row_prefix), Some(&row_end), root_page_id)?;
+
+            let mut row_indices: Vec<(usize, Vec<Value>)> = Vec::new();
+
+            for (key, pointer) in rows {
+                if let Value::Text(ref key_str) = key {
+                    if let Some(row_id_str) = key_str.strip_prefix(&format!("row:{}:", table_name))
+                    {
+                        if let Ok(row_index) = row_id_str.parse::<usize>() {
+                            let row_json = self.read_data_from_pointer(pointer)?;
+                            let row: Vec<Value> = serde_json::from_str(&row_json).map_err(|e| {
+                                format!(
+                                    "Failed to deserialize row {} for table {}: {}",
+                                    row_id_str, table_name, e
+                                )
+                            })?;
+                            row_indices.push((row_index, row));
+                        }
+                    }
+                }
+            }
+
+            row_indices.sort_by_key(|(idx, _)| *idx);
+            let sorted_rows: Vec<Vec<Value>> =
+                row_indices.into_iter().map(|(_, row)| row).collect();
+
+            if let Some(table_ref) = db.tables.get_mut(&table_name) {
+                table_ref.rows = sorted_rows;
+            }
+        }
+
+        let index_prefix = Value::Text("index:".to_string());
+        let index_end = Value::Text("index;".to_string());
+        let indexes = self.range_scan(Some(&index_prefix), Some(&index_end), root_page_id)?;
+
+        for (key, pointer) in indexes {
+            if let Value::Text(ref key_str) = key {
+                if let Some(index_name) = key_str.strip_prefix("index:") {
+                    let index_json = self.read_data_from_pointer(pointer)?;
+                    let index: crate::database::Index =
+                        serde_json::from_str(&index_json).map_err(|e| {
+                            format!("Failed to deserialize index {}: {}", index_name, e)
+                        })?;
+                    db.indexes.insert(index_name.to_string(), index);
+                }
+            }
+        }
+
+        Ok(db)
+    }
+
+    fn read_data_from_pointer(&self, pointer: u64) -> Result<String, String> {
+        let data_page = self.read_page(pointer)?;
+
+        if let Some(entry) = data_page.entries.get(0) {
+            if let Value::Text(ref json_str) = entry.key {
+                return Ok(json_str.clone());
+            }
+        }
+
+        Err("Data page does not contain valid JSON".to_string())
+    }
+
+    fn range_scan(
+        &self,
+        start_key: Option<&Value>,
+        end_key: Option<&Value>,
+        root_page_id: u64,
+    ) -> Result<Vec<(Value, u64)>, String> {
+        let mut results = Vec::new();
+
+        let current_page_id = self.find_starting_leaf(start_key, root_page_id)?;
+
+        loop {
+            let page = self.read_page(current_page_id)?;
+
+            match page.header.kind {
+                PageKind::Leaf => {
+                    for entry in &page.entries {
+                        let in_range = match (start_key, end_key) {
+                            (Some(start), Some(end)) => entry.key >= *start && entry.key <= *end,
+                            (Some(start), None) => entry.key >= *start,
+                            (None, Some(end)) => entry.key <= *end,
+                            (None, None) => true,
+                        };
+
+                        if in_range {
+                            results.push((entry.key.clone(), entry.pointer));
+                        } else if end_key.is_some() && &entry.key > end_key.unwrap() {
+                            return Ok(results);
+                        }
+                    }
+
+                    break;
+                }
+                _ => {
+                    return Err("Expected leaf page in range scan".to_string());
+                }
+            }
+        }
+
+        Ok(results)
+    }
+
+    fn find_starting_leaf(
+        &self,
+        start_key: Option<&Value>,
+        root_page_id: u64,
+    ) -> Result<u64, String> {
+        let mut current_page_id = root_page_id;
+
+        loop {
+            let page = self.read_page(current_page_id)?;
+
+            match page.header.kind {
+                PageKind::Leaf => {
+                    return Ok(current_page_id);
+                }
+                PageKind::Internal => {
+                    let mut next_page_id = None;
+                    if let Some(start) = start_key {
+                        for entry in &page.entries {
+                            if &entry.key > start {
+                                next_page_id = Some(entry.pointer);
+                                break;
+                            }
+                        }
+                    }
+                    current_page_id = next_page_id
+                        .or_else(|| page.entries.first().map(|e| e.pointer))
+                        .ok_or_else(|| "Invalid internal page structure".to_string())?;
+                }
+                PageKind::Meta => {
+                    return Err("Cannot find leaf in meta page".to_string());
+                }
+            }
+        }
     }
 }
 
@@ -151,6 +508,7 @@ impl BTreeFile {
             .map_err(|e| format!("Failed to decode BTree storage payload: {}", e))
     }
 
+    #[allow(dead_code)]
     fn read_database_via_pages(&mut self) -> Result<Database, String> {
         let file_size = self
             .file
@@ -215,6 +573,7 @@ impl BTreeFile {
         self.load_database_from_rows(root_page_id)
     }
 
+    #[allow(dead_code)]
     fn load_database_from_rows(&mut self, root_page_id: u64) -> Result<Database, String> {
         let mut db = Database::new();
 
@@ -299,6 +658,7 @@ impl BTreeFile {
         Ok(db)
     }
 
+    #[allow(dead_code)]
     fn read_data_from_pointer(&mut self, pointer: u64) -> Result<String, String> {
         let data_page = self.read_page(pointer)?;
 
@@ -1131,6 +1491,94 @@ mod tests {
             .expect("Failed to range scan");
 
         assert!(results.len() >= 5, "Range scan should find multiple keys");
+
+        let _ = std::fs::remove_file(&temp_path);
+    }
+
+    #[test]
+    fn btree_concurrent_loads() {
+        let temp_path = std::env::temp_dir().join("rustql_btree_concurrent_test.dat");
+        let _ = std::fs::remove_file(&temp_path);
+
+        let engine = Arc::new(BTreeStorageEngine::new(&temp_path));
+
+        let mut db = Database::new();
+        let columns = vec![ColumnDefinition {
+            name: "id".to_string(),
+            data_type: DataType::Integer,
+            nullable: false,
+            primary_key: true,
+            unique: false,
+            default_value: None,
+            foreign_key: None,
+        }];
+        let table = Table {
+            columns,
+            rows: vec![vec![Value::Integer(1)]],
+        };
+        db.tables.insert("test".to_string(), table);
+
+        engine.save(&db).expect("Failed to save");
+
+        let loaded_before = engine.load();
+        assert_eq!(loaded_before.tables.len(), 1, "Initial load should work");
+
+        use std::thread;
+        let handles: Vec<_> = (0..10)
+            .map(|_| {
+                let engine = Arc::clone(&engine);
+                thread::spawn(move || {
+                    let loaded = engine.load();
+                    assert_eq!(loaded.tables.len(), 1, "Expected 1 table");
+                    assert!(loaded.tables.contains_key("test"), "Expected 'test' table");
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            if let Err(e) = handle.join() {
+                panic!("Thread panicked: {:?}", e);
+            }
+        }
+
+        let (hits, misses, _size) = engine.cache_stats();
+        assert!(hits + misses > 0, "Cache should have activity");
+
+        let _ = std::fs::remove_file(&temp_path);
+    }
+
+    #[test]
+    fn btree_cache_lru_eviction() {
+        let temp_path = std::env::temp_dir().join("rustql_btree_cache_test.dat");
+        let _ = std::fs::remove_file(&temp_path);
+
+        let engine = BTreeStorageEngine::new(&temp_path);
+
+        let mut db = Database::new();
+        let columns = vec![ColumnDefinition {
+            name: "id".to_string(),
+            data_type: DataType::Integer,
+            nullable: false,
+            primary_key: true,
+            unique: false,
+            default_value: None,
+            foreign_key: None,
+        }];
+        let table = Table {
+            columns,
+            rows: vec![vec![Value::Integer(1)]],
+        };
+        db.tables.insert("test".to_string(), table);
+
+        engine.save(&db).expect("Failed to save");
+
+        engine.load();
+        let (_, _, size1) = engine.cache_stats();
+        assert!(size1 > 0, "Cache should have pages after load");
+
+        engine.clear_cache();
+        let (_, _, size2) = engine.cache_stats();
+        assert_eq!(size2, 0, "Cache should be empty after clear");
 
         let _ = std::fs::remove_file(&temp_path);
     }
