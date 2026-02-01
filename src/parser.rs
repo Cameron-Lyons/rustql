@@ -1,4 +1,5 @@
 use crate::ast::*;
+use crate::error::RustqlError;
 use crate::lexer::Token;
 
 pub struct Parser {
@@ -20,16 +21,16 @@ impl Parser {
         self.tokens.get(self.current + 1).unwrap_or(&Token::Eof)
     }
 
-    fn consume(&mut self, expected: Token) -> Result<(), String> {
+    fn consume(&mut self, expected: Token) -> Result<(), RustqlError> {
         if *self.current_token() == expected {
             self.current += 1;
             Ok(())
         } else {
-            Err(format!(
+            Err(RustqlError::ParseError(format!(
                 "Expected {:?}, found {:?}",
                 expected,
                 self.current_token()
-            ))
+            )))
         }
     }
 
@@ -39,7 +40,7 @@ impl Parser {
         token
     }
 
-    fn parse_statement(&mut self) -> Result<Statement, String> {
+    fn parse_statement(&mut self) -> Result<Statement, RustqlError> {
         match self.current_token() {
             Token::Explain => self.parse_explain(),
             Token::Select => self.parse_select(),
@@ -54,11 +55,14 @@ impl Parser {
             Token::Rollback => self.parse_rollback_transaction(),
             Token::Describe => self.parse_describe(),
             Token::Show => self.parse_show(),
-            _ => Err(format!("Unexpected token: {:?}", self.current_token())),
+            _ => Err(RustqlError::ParseError(format!(
+                "Unexpected token: {:?}",
+                self.current_token()
+            ))),
         }
     }
 
-    fn parse_select(&mut self) -> Result<Statement, String> {
+    fn parse_select(&mut self) -> Result<Statement, RustqlError> {
         self.consume(Token::Select)?;
 
         let distinct = if *self.current_token() == Token::Distinct {
@@ -74,7 +78,7 @@ impl Parser {
 
         let table = match self.advance() {
             Token::Identifier(name) => name,
-            _ => return Err("Expected table name".to_string()),
+            _ => return Err(RustqlError::ParseError("Expected table name".to_string())),
         };
 
         let mut joins = Vec::new();
@@ -102,7 +106,11 @@ impl Parser {
 
                 let join_table = match self.advance() {
                     Token::Identifier(name) => name,
-                    _ => return Err("Expected table name after JOIN".to_string()),
+                    _ => {
+                        return Err(RustqlError::ParseError(
+                            "Expected table name after JOIN".to_string(),
+                        ));
+                    }
                 };
 
                 self.consume(Token::On)?;
@@ -152,7 +160,11 @@ impl Parser {
             self.advance();
             match self.advance() {
                 Token::Number(n) => Some(n as usize),
-                _ => return Err("Expected number after LIMIT".to_string()),
+                _ => {
+                    return Err(RustqlError::ParseError(
+                        "Expected number after LIMIT".to_string(),
+                    ));
+                }
             }
         } else {
             None
@@ -162,7 +174,11 @@ impl Parser {
             self.advance();
             match self.advance() {
                 Token::Number(n) => Some(n as usize),
-                _ => return Err("Expected number after OFFSET".to_string()),
+                _ => {
+                    return Err(RustqlError::ParseError(
+                        "Expected number after OFFSET".to_string(),
+                    ));
+                }
             }
         } else {
             None
@@ -178,7 +194,9 @@ impl Parser {
             if let Statement::Select(union_stmt) = union_stmt {
                 (Some(Box::new(union_stmt)), is_all)
             } else {
-                return Err("UNION must be followed by a SELECT statement".to_string());
+                return Err(RustqlError::ParseError(
+                    "UNION must be followed by a SELECT statement".to_string(),
+                ));
             }
         } else {
             (None, false)
@@ -200,7 +218,7 @@ impl Parser {
         }))
     }
 
-    fn parse_columns(&mut self) -> Result<Vec<Column>, String> {
+    fn parse_columns(&mut self) -> Result<Vec<Column>, RustqlError> {
         let mut columns = Vec::new();
 
         if *self.current_token() == Token::Star {
@@ -223,9 +241,9 @@ impl Parser {
                                 self.consume(Token::RightParen)?;
                                 Column::Subquery(Box::new(subquery_stmt))
                             } else {
-                                return Err(
-                                    "Expected SELECT statement in scalar subquery".to_string()
-                                );
+                                return Err(RustqlError::ParseError(
+                                    "Expected SELECT statement in scalar subquery".to_string(),
+                                ));
                             }
                         } else {
                             let saved_pos = self.current;
@@ -233,7 +251,9 @@ impl Parser {
                                 Ok((expr, alias)) => Column::Expression { expr, alias },
                                 Err(_) => {
                                     self.current = saved_pos;
-                                    return Err("Unexpected '(' in column list".to_string());
+                                    return Err(RustqlError::ParseError(
+                                        "Unexpected '(' in column list".to_string(),
+                                    ));
                                 }
                             }
                         }
@@ -263,9 +283,9 @@ impl Parser {
                                             match self.advance() {
                                                 Token::Identifier(alias) => Some(alias),
                                                 _ => {
-                                                    return Err(
-                                                        "Expected alias after AS".to_string()
-                                                    );
+                                                    return Err(RustqlError::ParseError(
+                                                        "Expected alias after AS".to_string(),
+                                                    ));
                                                 }
                                             }
                                         } else {
@@ -291,20 +311,26 @@ impl Parser {
         }
 
         if columns.is_empty() {
-            return Err("Expected column names or *".to_string());
+            return Err(RustqlError::ParseError(
+                "Expected column names or *".to_string(),
+            ));
         }
 
         Ok(columns)
     }
 
-    fn parse_column_expression(&mut self) -> Result<(Expression, Option<String>), String> {
+    fn parse_column_expression(&mut self) -> Result<(Expression, Option<String>), RustqlError> {
         let expr = self.parse_arithmetic_expression()?;
 
         let alias = if *self.current_token() == Token::As {
             self.advance();
             match self.advance() {
                 Token::Identifier(alias) => Some(alias),
-                _ => return Err("Expected alias after AS".to_string()),
+                _ => {
+                    return Err(RustqlError::ParseError(
+                        "Expected alias after AS".to_string(),
+                    ));
+                }
             }
         } else {
             None
@@ -313,11 +339,11 @@ impl Parser {
         Ok((expr, alias))
     }
 
-    fn parse_arithmetic_expression(&mut self) -> Result<Expression, String> {
+    fn parse_arithmetic_expression(&mut self) -> Result<Expression, RustqlError> {
         self.parse_arithmetic_term()
     }
 
-    fn parse_arithmetic_term(&mut self) -> Result<Expression, String> {
+    fn parse_arithmetic_term(&mut self) -> Result<Expression, RustqlError> {
         let mut expr = self.parse_arithmetic_factor()?;
 
         loop {
@@ -339,7 +365,7 @@ impl Parser {
         Ok(expr)
     }
 
-    fn parse_arithmetic_factor(&mut self) -> Result<Expression, String> {
+    fn parse_arithmetic_factor(&mut self) -> Result<Expression, RustqlError> {
         let mut expr = self.parse_arithmetic_unary()?;
 
         loop {
@@ -366,7 +392,7 @@ impl Parser {
         Ok(expr)
     }
 
-    fn parse_arithmetic_unary(&mut self) -> Result<Expression, String> {
+    fn parse_arithmetic_unary(&mut self) -> Result<Expression, RustqlError> {
         match self.current_token() {
             Token::Minus => {
                 self.advance();
@@ -383,7 +409,7 @@ impl Parser {
         }
     }
 
-    fn parse_arithmetic_primary(&mut self) -> Result<Expression, String> {
+    fn parse_arithmetic_primary(&mut self) -> Result<Expression, RustqlError> {
         match self.current_token() {
             Token::LeftParen => {
                 self.advance();
@@ -411,21 +437,25 @@ impl Parser {
                 self.advance();
                 Ok(Expression::Value(Value::Text(s)))
             }
-            _ => Err(format!(
+            _ => Err(RustqlError::ParseError(format!(
                 "Unexpected token in expression: {:?}",
                 self.current_token()
-            )),
+            ))),
         }
     }
 
-    fn parse_aggregate_function(&mut self) -> Result<Column, String> {
+    fn parse_aggregate_function(&mut self) -> Result<Column, RustqlError> {
         let func_type = match self.advance() {
             Token::Count => AggregateFunctionType::Count,
             Token::Sum => AggregateFunctionType::Sum,
             Token::Avg => AggregateFunctionType::Avg,
             Token::Min => AggregateFunctionType::Min,
             Token::Max => AggregateFunctionType::Max,
-            _ => return Err("Expected aggregate function".to_string()),
+            _ => {
+                return Err(RustqlError::ParseError(
+                    "Expected aggregate function".to_string(),
+                ));
+            }
         };
 
         self.consume(Token::LeftParen)?;
@@ -445,7 +475,9 @@ impl Parser {
         };
 
         if distinct && matches!(&*expr, Expression::Column(name) if name == "*") {
-            return Err("DISTINCT * is not supported".to_string());
+            return Err(RustqlError::ParseError(
+                "DISTINCT * is not supported".to_string(),
+            ));
         }
 
         self.consume(Token::RightParen)?;
@@ -454,7 +486,11 @@ impl Parser {
             self.advance();
             match self.advance() {
                 Token::Identifier(name) => Some(name),
-                _ => return Err("Expected alias after AS".to_string()),
+                _ => {
+                    return Err(RustqlError::ParseError(
+                        "Expected alias after AS".to_string(),
+                    ));
+                }
             }
         } else {
             None
@@ -468,13 +504,17 @@ impl Parser {
         }))
     }
 
-    fn parse_group_by(&mut self) -> Result<Vec<String>, String> {
+    fn parse_group_by(&mut self) -> Result<Vec<String>, RustqlError> {
         let mut columns = Vec::new();
 
         loop {
             match self.advance() {
                 Token::Identifier(name) => columns.push(name),
-                _ => return Err("Expected column name in GROUP BY".to_string()),
+                _ => {
+                    return Err(RustqlError::ParseError(
+                        "Expected column name in GROUP BY".to_string(),
+                    ));
+                }
             }
 
             if *self.current_token() == Token::Comma {
@@ -487,13 +527,13 @@ impl Parser {
         Ok(columns)
     }
 
-    fn parse_insert(&mut self) -> Result<Statement, String> {
+    fn parse_insert(&mut self) -> Result<Statement, RustqlError> {
         self.consume(Token::Insert)?;
         self.consume(Token::Into)?;
 
         let table = match self.advance() {
             Token::Identifier(name) => name,
-            _ => return Err("Expected table name".to_string()),
+            _ => return Err(RustqlError::ParseError("Expected table name".to_string())),
         };
 
         let columns = if *self.current_token() == Token::LeftParen {
@@ -528,7 +568,7 @@ impl Parser {
         }))
     }
 
-    fn parse_values(&mut self) -> Result<Vec<Vec<Value>>, String> {
+    fn parse_values(&mut self) -> Result<Vec<Vec<Value>>, RustqlError> {
         let mut all_values = Vec::new();
 
         loop {
@@ -558,22 +598,22 @@ impl Parser {
         Ok(all_values)
     }
 
-    fn parse_value(&mut self) -> Result<Value, String> {
+    fn parse_value(&mut self) -> Result<Value, RustqlError> {
         match self.advance() {
             Token::Null => Ok(Value::Null),
             Token::Number(n) => Ok(Value::Integer(n)),
             Token::Float(f) => Ok(Value::Float(f)),
             Token::StringLiteral(s) => Ok(Value::Text(s)),
-            _ => Err("Expected value".to_string()),
+            _ => Err(RustqlError::ParseError("Expected value".to_string())),
         }
     }
 
-    fn parse_update(&mut self) -> Result<Statement, String> {
+    fn parse_update(&mut self) -> Result<Statement, RustqlError> {
         self.consume(Token::Update)?;
 
         let table = match self.advance() {
             Token::Identifier(name) => name,
-            _ => return Err("Expected table name".to_string()),
+            _ => return Err(RustqlError::ParseError("Expected table name".to_string())),
         };
 
         self.consume(Token::Set)?;
@@ -594,13 +634,13 @@ impl Parser {
         }))
     }
 
-    fn parse_assignments(&mut self) -> Result<Vec<Assignment>, String> {
+    fn parse_assignments(&mut self) -> Result<Vec<Assignment>, RustqlError> {
         let mut assignments = Vec::new();
 
         loop {
             let column = match self.advance() {
                 Token::Identifier(name) => name,
-                _ => return Err("Expected column name".to_string()),
+                _ => return Err(RustqlError::ParseError("Expected column name".to_string())),
             };
 
             self.consume(Token::Equal)?;
@@ -619,13 +659,13 @@ impl Parser {
         Ok(assignments)
     }
 
-    fn parse_delete(&mut self) -> Result<Statement, String> {
+    fn parse_delete(&mut self) -> Result<Statement, RustqlError> {
         self.consume(Token::Delete)?;
         self.consume(Token::From)?;
 
         let table = match self.advance() {
             Token::Identifier(name) => name,
-            _ => return Err("Expected table name".to_string()),
+            _ => return Err(RustqlError::ParseError("Expected table name".to_string())),
         };
 
         let where_clause = if *self.current_token() == Token::Where {
@@ -641,7 +681,7 @@ impl Parser {
         }))
     }
 
-    fn parse_create(&mut self) -> Result<Statement, String> {
+    fn parse_create(&mut self) -> Result<Statement, RustqlError> {
         self.consume(Token::Create)?;
 
         match self.current_token() {
@@ -649,7 +689,7 @@ impl Parser {
                 self.advance();
                 let name = match self.advance() {
                     Token::Identifier(name) => name,
-                    _ => return Err("Expected table name".to_string()),
+                    _ => return Err(RustqlError::ParseError("Expected table name".to_string())),
                 };
 
                 self.consume(Token::LeftParen)?;
@@ -667,21 +707,21 @@ impl Parser {
                 self.advance();
                 let index_name = match self.advance() {
                     Token::Identifier(name) => name,
-                    _ => return Err("Expected index name".to_string()),
+                    _ => return Err(RustqlError::ParseError("Expected index name".to_string())),
                 };
 
                 self.consume(Token::On)?;
 
                 let table = match self.advance() {
                     Token::Identifier(name) => name,
-                    _ => return Err("Expected table name".to_string()),
+                    _ => return Err(RustqlError::ParseError("Expected table name".to_string())),
                 };
 
                 self.consume(Token::LeftParen)?;
 
                 let column = match self.advance() {
                     Token::Identifier(name) => name,
-                    _ => return Err("Expected column name".to_string()),
+                    _ => return Err(RustqlError::ParseError("Expected column name".to_string())),
                 };
 
                 self.consume(Token::RightParen)?;
@@ -692,17 +732,19 @@ impl Parser {
                     column,
                 }))
             }
-            _ => Err("Expected TABLE or INDEX after CREATE".to_string()),
+            _ => Err(RustqlError::ParseError(
+                "Expected TABLE or INDEX after CREATE".to_string(),
+            )),
         }
     }
 
-    fn parse_column_definitions(&mut self) -> Result<Vec<ColumnDefinition>, String> {
+    fn parse_column_definitions(&mut self) -> Result<Vec<ColumnDefinition>, RustqlError> {
         let mut columns = Vec::new();
 
         loop {
             let name = match self.advance() {
                 Token::Identifier(name) => name,
-                _ => return Err("Expected column name".to_string()),
+                _ => return Err(RustqlError::ParseError("Expected column name".to_string())),
             };
 
             let data_type = self.parse_data_type()?;
@@ -743,12 +785,20 @@ impl Parser {
                 self.consume(Token::References)?;
                 let ref_table = match self.advance() {
                     Token::Identifier(name) => name,
-                    _ => return Err("Expected table name after REFERENCES".to_string()),
+                    _ => {
+                        return Err(RustqlError::ParseError(
+                            "Expected table name after REFERENCES".to_string(),
+                        ));
+                    }
                 };
                 self.consume(Token::LeftParen)?;
                 let ref_column = match self.advance() {
                     Token::Identifier(name) => name,
-                    _ => return Err("Expected column name after REFERENCES table".to_string()),
+                    _ => {
+                        return Err(RustqlError::ParseError(
+                            "Expected column name after REFERENCES table".to_string(),
+                        ));
+                    }
                 };
                 self.consume(Token::RightParen)?;
 
@@ -766,7 +816,11 @@ impl Parser {
                             self.advance();
                             &mut on_update
                         }
-                        _ => return Err("Expected DELETE or UPDATE after ON".to_string()),
+                        _ => {
+                            return Err(RustqlError::ParseError(
+                                "Expected DELETE or UPDATE after ON".to_string(),
+                            ));
+                        }
                     };
 
                     *action_type = match self.current_token() {
@@ -789,9 +843,9 @@ impl Parser {
                             crate::ast::ForeignKeyAction::NoAction
                         }
                         _ => {
-                            return Err(
-                                "Expected CASCADE, RESTRICT, SET NULL, or NO ACTION".to_string()
-                            );
+                            return Err(RustqlError::ParseError(
+                                "Expected CASCADE, RESTRICT, SET NULL, or NO ACTION".to_string(),
+                            ));
                         }
                     };
                 }
@@ -826,7 +880,7 @@ impl Parser {
         Ok(columns)
     }
 
-    fn parse_data_type(&mut self) -> Result<DataType, String> {
+    fn parse_data_type(&mut self) -> Result<DataType, RustqlError> {
         match self.advance() {
             Token::Boolean => Ok(DataType::Boolean),
             Token::Date => Ok(DataType::Date),
@@ -838,13 +892,16 @@ impl Parser {
                 "TEXT" | "VARCHAR" | "STRING" => Ok(DataType::Text),
                 "BOOL" => Ok(DataType::Boolean),
                 "DATETIME" | "TIMESTAMP" => Ok(DataType::DateTime),
-                _ => Err(format!("Unknown data type: {}", name)),
+                _ => Err(RustqlError::ParseError(format!(
+                    "Unknown data type: {}",
+                    name
+                ))),
             },
-            _ => Err("Expected data type".to_string()),
+            _ => Err(RustqlError::ParseError("Expected data type".to_string())),
         }
     }
 
-    fn parse_drop(&mut self) -> Result<Statement, String> {
+    fn parse_drop(&mut self) -> Result<Statement, RustqlError> {
         self.consume(Token::Drop)?;
 
         match self.current_token() {
@@ -852,7 +909,7 @@ impl Parser {
                 self.advance();
                 let name = match self.advance() {
                     Token::Identifier(name) => name,
-                    _ => return Err("Expected table name".to_string()),
+                    _ => return Err(RustqlError::ParseError("Expected table name".to_string())),
                 };
 
                 Ok(Statement::DropTable(DropTableStatement { name }))
@@ -861,22 +918,24 @@ impl Parser {
                 self.advance();
                 let name = match self.advance() {
                     Token::Identifier(name) => name,
-                    _ => return Err("Expected index name".to_string()),
+                    _ => return Err(RustqlError::ParseError("Expected index name".to_string())),
                 };
 
                 Ok(Statement::DropIndex(DropIndexStatement { name }))
             }
-            _ => Err("Expected TABLE or INDEX after DROP".to_string()),
+            _ => Err(RustqlError::ParseError(
+                "Expected TABLE or INDEX after DROP".to_string(),
+            )),
         }
     }
 
-    fn parse_alter(&mut self) -> Result<Statement, String> {
+    fn parse_alter(&mut self) -> Result<Statement, RustqlError> {
         self.consume(Token::Alter)?;
         self.consume(Token::Table)?;
 
         let table = match self.advance() {
             Token::Identifier(name) => name,
-            _ => return Err("Expected table name".to_string()),
+            _ => return Err(RustqlError::ParseError("Expected table name".to_string())),
         };
 
         let operation = match self.current_token() {
@@ -885,7 +944,7 @@ impl Parser {
                 self.consume(Token::Column)?;
                 let name = match self.advance() {
                     Token::Identifier(n) => n,
-                    _ => return Err("Expected column name".to_string()),
+                    _ => return Err(RustqlError::ParseError("Expected column name".to_string())),
                 };
                 let data_type = self.parse_data_type()?;
                 AlterOperation::AddColumn(ColumnDefinition {
@@ -903,7 +962,7 @@ impl Parser {
                 self.consume(Token::Column)?;
                 match self.advance() {
                     Token::Identifier(name) => AlterOperation::DropColumn(name),
-                    _ => return Err("Expected column name".to_string()),
+                    _ => return Err(RustqlError::ParseError("Expected column name".to_string())),
                 }
             }
             Token::Rename => {
@@ -911,16 +970,24 @@ impl Parser {
                 self.consume(Token::Column)?;
                 let old = match self.advance() {
                     Token::Identifier(n) => n,
-                    _ => return Err("Expected column name".to_string()),
+                    _ => return Err(RustqlError::ParseError("Expected column name".to_string())),
                 };
                 self.consume(Token::To)?;
                 let new = match self.advance() {
                     Token::Identifier(n) => n,
-                    _ => return Err("Expected new column name".to_string()),
+                    _ => {
+                        return Err(RustqlError::ParseError(
+                            "Expected new column name".to_string(),
+                        ));
+                    }
                 };
                 AlterOperation::RenameColumn { old, new }
             }
-            _ => return Err("Expected ADD, DROP, or RENAME after ALTER TABLE".to_string()),
+            _ => {
+                return Err(RustqlError::ParseError(
+                    "Expected ADD, DROP, or RENAME after ALTER TABLE".to_string(),
+                ));
+            }
         };
 
         Ok(Statement::AlterTable(AlterTableStatement {
@@ -929,11 +996,11 @@ impl Parser {
         }))
     }
 
-    fn parse_expression(&mut self) -> Result<Expression, String> {
+    fn parse_expression(&mut self) -> Result<Expression, RustqlError> {
         self.parse_or()
     }
 
-    fn parse_or(&mut self) -> Result<Expression, String> {
+    fn parse_or(&mut self) -> Result<Expression, RustqlError> {
         let mut expr = self.parse_and()?;
 
         while *self.current_token() == Token::Or {
@@ -949,7 +1016,7 @@ impl Parser {
         Ok(expr)
     }
 
-    fn parse_and(&mut self) -> Result<Expression, String> {
+    fn parse_and(&mut self) -> Result<Expression, RustqlError> {
         let mut expr = self.parse_comparison()?;
 
         while *self.current_token() == Token::And {
@@ -965,7 +1032,7 @@ impl Parser {
         Ok(expr)
     }
 
-    fn parse_comparison(&mut self) -> Result<Expression, String> {
+    fn parse_comparison(&mut self) -> Result<Expression, RustqlError> {
         let mut expr = self.parse_term()?;
 
         loop {
@@ -1036,7 +1103,7 @@ impl Parser {
                 Token::In => {
                     self.advance();
                     if *self.current_token() != Token::LeftParen {
-                        return Err("Expected '(' after IN".to_string());
+                        return Err(RustqlError::ParseError("Expected '(' after IN".to_string()));
                     }
                     self.advance();
 
@@ -1050,7 +1117,9 @@ impl Parser {
                                 right: Box::new(Expression::Subquery(Box::new(subquery_stmt))),
                             };
                         } else {
-                            return Err("Expected SELECT statement in subquery".to_string());
+                            return Err(RustqlError::ParseError(
+                                "Expected SELECT statement in subquery".to_string(),
+                            ));
                         }
                     } else {
                         let mut values = Vec::new();
@@ -1104,7 +1173,7 @@ impl Parser {
         Ok(expr)
     }
 
-    fn parse_term(&mut self) -> Result<Expression, String> {
+    fn parse_term(&mut self) -> Result<Expression, RustqlError> {
         let mut expr = self.parse_factor()?;
 
         loop {
@@ -1126,7 +1195,7 @@ impl Parser {
         Ok(expr)
     }
 
-    fn parse_factor(&mut self) -> Result<Expression, String> {
+    fn parse_factor(&mut self) -> Result<Expression, RustqlError> {
         let mut expr = self.parse_unary()?;
 
         loop {
@@ -1148,7 +1217,7 @@ impl Parser {
         Ok(expr)
     }
 
-    fn parse_unary(&mut self) -> Result<Expression, String> {
+    fn parse_unary(&mut self) -> Result<Expression, RustqlError> {
         match self.current_token() {
             Token::Not => {
                 self.advance();
@@ -1168,7 +1237,7 @@ impl Parser {
         }
     }
 
-    fn parse_primary(&mut self) -> Result<Expression, String> {
+    fn parse_primary(&mut self) -> Result<Expression, RustqlError> {
         match self.current_token().clone() {
             Token::Exists => {
                 self.advance();
@@ -1177,7 +1246,9 @@ impl Parser {
                 let sub = if let Statement::Select(s) = sub {
                     s
                 } else {
-                    return Err("Expected SELECT inside EXISTS".to_string());
+                    return Err(RustqlError::ParseError(
+                        "Expected SELECT inside EXISTS".to_string(),
+                    ));
                 };
                 self.consume(Token::RightParen)?;
                 Ok(Expression::Exists(Box::new(sub)))
@@ -1187,7 +1258,9 @@ impl Parser {
                 if let Column::Function(func) = agg {
                     Ok(Expression::Function(func))
                 } else {
-                    Err("Expected aggregate function".to_string())
+                    Err(RustqlError::ParseError(
+                        "Expected aggregate function".to_string(),
+                    ))
                 }
             }
             Token::Identifier(name) => {
@@ -1212,14 +1285,14 @@ impl Parser {
                 self.consume(Token::RightParen)?;
                 Ok(expr)
             }
-            _ => Err(format!(
+            _ => Err(RustqlError::ParseError(format!(
                 "Unexpected token in expression: {:?}",
                 self.current_token()
-            )),
+            ))),
         }
     }
 
-    fn parse_order_by(&mut self) -> Result<Vec<OrderByExpr>, String> {
+    fn parse_order_by(&mut self) -> Result<Vec<OrderByExpr>, RustqlError> {
         let mut order_exprs = Vec::new();
 
         loop {
@@ -1247,7 +1320,7 @@ impl Parser {
         Ok(order_exprs)
     }
 
-    fn parse_begin_transaction(&mut self) -> Result<Statement, String> {
+    fn parse_begin_transaction(&mut self) -> Result<Statement, RustqlError> {
         self.consume(Token::Begin)?;
         if *self.current_token() == Token::Transaction {
             self.advance();
@@ -1255,7 +1328,7 @@ impl Parser {
         Ok(Statement::BeginTransaction)
     }
 
-    fn parse_commit_transaction(&mut self) -> Result<Statement, String> {
+    fn parse_commit_transaction(&mut self) -> Result<Statement, RustqlError> {
         self.consume(Token::Commit)?;
         if *self.current_token() == Token::Transaction {
             self.advance();
@@ -1263,7 +1336,7 @@ impl Parser {
         Ok(Statement::CommitTransaction)
     }
 
-    fn parse_rollback_transaction(&mut self) -> Result<Statement, String> {
+    fn parse_rollback_transaction(&mut self) -> Result<Statement, RustqlError> {
         self.consume(Token::Rollback)?;
         if *self.current_token() == Token::Transaction {
             self.advance();
@@ -1271,37 +1344,45 @@ impl Parser {
         Ok(Statement::RollbackTransaction)
     }
 
-    fn parse_explain(&mut self) -> Result<Statement, String> {
+    fn parse_explain(&mut self) -> Result<Statement, RustqlError> {
         self.consume(Token::Explain)?;
         let select_stmt = self.parse_select()?;
         if let Statement::Select(select_stmt) = select_stmt {
             Ok(Statement::Explain(select_stmt))
         } else {
-            Err("EXPLAIN must be followed by a SELECT statement".to_string())
+            Err(RustqlError::ParseError(
+                "EXPLAIN must be followed by a SELECT statement".to_string(),
+            ))
         }
     }
 
-    fn parse_describe(&mut self) -> Result<Statement, String> {
+    fn parse_describe(&mut self) -> Result<Statement, RustqlError> {
         self.consume(Token::Describe)?;
         let table_name = match self.advance() {
             Token::Identifier(name) => name,
-            _ => return Err("Expected table name after DESCRIBE".to_string()),
+            _ => {
+                return Err(RustqlError::ParseError(
+                    "Expected table name after DESCRIBE".to_string(),
+                ));
+            }
         };
         Ok(Statement::Describe(table_name))
     }
 
-    fn parse_show(&mut self) -> Result<Statement, String> {
+    fn parse_show(&mut self) -> Result<Statement, RustqlError> {
         self.consume(Token::Show)?;
         if *self.current_token() == Token::Tables {
             self.advance();
             Ok(Statement::ShowTables)
         } else {
-            Err("SHOW must be followed by TABLES".to_string())
+            Err(RustqlError::ParseError(
+                "SHOW must be followed by TABLES".to_string(),
+            ))
         }
     }
 }
 
-pub fn parse(tokens: Vec<Token>) -> Result<Statement, String> {
+pub fn parse(tokens: Vec<Token>) -> Result<Statement, RustqlError> {
     let mut parser = Parser::new(tokens);
     parser.parse_statement()
 }

@@ -1,8 +1,8 @@
 use rustql::process_query;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 
 fn main() {
-    if atty::is(atty::Stream::Stdin) {
+    if std::io::stdin().is_terminal() {
         println!("RustQL - SQL Engine in Rust");
         println!("Type 'exit' to quit\n");
 

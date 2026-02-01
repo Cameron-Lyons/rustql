@@ -1,4 +1,5 @@
 use crate::ast::*;
+use crate::error::RustqlError;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 
@@ -8,7 +9,7 @@ pub struct Database {
     pub indexes: HashMap<String, Index>,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Index {
     pub name: String,
     pub table: String,
@@ -68,23 +69,23 @@ mod index_entries {
         if s == "NULL" {
             return Value::Null;
         }
-        if let Some(rest) = s.strip_prefix("I:") {
-            if let Ok(i) = rest.parse::<i64>() {
-                return Value::Integer(i);
-            }
+        if let Some(rest) = s.strip_prefix("I:")
+            && let Ok(i) = rest.parse::<i64>()
+        {
+            return Value::Integer(i);
         }
-        if let Some(rest) = s.strip_prefix("F:") {
-            if let Ok(f) = rest.parse::<f64>() {
-                return Value::Float(f);
-            }
+        if let Some(rest) = s.strip_prefix("F:")
+            && let Ok(f) = rest.parse::<f64>()
+        {
+            return Value::Float(f);
         }
         if let Some(rest) = s.strip_prefix("S:") {
             return Value::Text(rest.to_string());
         }
-        if let Some(rest) = s.strip_prefix("B:") {
-            if let Ok(b) = rest.parse::<bool>() {
-                return Value::Boolean(b);
-            }
+        if let Some(rest) = s.strip_prefix("B:")
+            && let Ok(b) = rest.parse::<bool>()
+        {
+            return Value::Boolean(b);
         }
         if let Some(rest) = s.strip_prefix("D:") {
             return Value::Date(rest.to_string());
@@ -114,7 +115,7 @@ impl Database {
         crate::storage::storage_engine().load()
     }
 
-    pub fn save(&self) -> Result<(), String> {
+    pub fn save(&self) -> Result<(), RustqlError> {
         crate::storage::storage_engine().save(self)
     }
 }

@@ -1,3 +1,5 @@
+use crate::error::RustqlError;
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Token {
     Dot,
@@ -101,7 +103,7 @@ pub enum Token {
     Eof,
 }
 
-pub fn tokenize(input: &str) -> Result<Vec<Token>, String> {
+pub fn tokenize(input: &str) -> Result<Vec<Token>, RustqlError> {
     let mut tokens = Vec::new();
     let mut chars = input.chars().peekable();
 
@@ -186,7 +188,9 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, String> {
                     tokens.push(Token::NotEqual);
                     chars.next();
                 } else {
-                    return Err("Unexpected character: !".to_string());
+                    return Err(RustqlError::ParseError(
+                        "Unexpected character: !".to_string(),
+                    ));
                 }
             }
             '\'' => {
@@ -211,6 +215,27 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, String> {
                 let ident = read_identifier(&mut chars);
                 tokens.push(match_keyword(&ident));
             }
+            '`' => {
+                chars.next();
+                let mut ident = String::new();
+                loop {
+                    match chars.next() {
+                        Some('`') => break,
+                        Some(ch) => ident.push(ch),
+                        None => {
+                            return Err(RustqlError::ParseError(
+                                "Unterminated quoted identifier".to_string(),
+                            ));
+                        }
+                    }
+                }
+                if ident.is_empty() {
+                    return Err(RustqlError::ParseError(
+                        "Empty quoted identifier".to_string(),
+                    ));
+                }
+                tokens.push(Token::Identifier(ident));
+            }
             '.' => {
                 if let Some(Token::Identifier(last_ident)) = tokens.last_mut() {
                     chars.next();
@@ -233,7 +258,10 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, String> {
                 }
             }
             _ => {
-                return Err(format!("Unexpected character: {}", ch));
+                return Err(RustqlError::ParseError(format!(
+                    "Unexpected character: {}",
+                    ch
+                )));
             }
         }
     }
@@ -277,7 +305,7 @@ fn read_number(chars: &mut std::iter::Peekable<std::str::Chars>) -> String {
 fn read_string(
     chars: &mut std::iter::Peekable<std::str::Chars>,
     delimiter: char,
-) -> Result<String, String> {
+) -> Result<String, RustqlError> {
     let mut string_val = String::new();
     let mut escaped = false;
 
@@ -296,7 +324,9 @@ fn read_string(
         }
     }
 
-    Err("Unterminated string literal".to_string())
+    Err(RustqlError::ParseError(
+        "Unterminated string literal".to_string(),
+    ))
 }
 
 fn match_keyword(ident: &str) -> Token {

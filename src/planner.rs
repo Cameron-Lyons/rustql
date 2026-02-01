@@ -1,6 +1,7 @@
 use crate::ast::*;
 use crate::database::{Database, Index, Table};
-use std::collections::{BTreeSet, HashMap};
+use crate::error::RustqlError;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt;
 
 #[derive(Debug, Clone)]
@@ -83,43 +84,62 @@ pub struct ColumnStats {
     pub max_value: Option<Value>,
 }
 
-pub struct QueryPlanner {
-    db: *const Database,
+pub struct QueryPlanner<'a> {
+    db: &'a Database,
 }
 
-unsafe impl Send for QueryPlanner {}
-unsafe impl Sync for QueryPlanner {}
-
-impl QueryPlanner {
-    pub fn new(db: &Database) -> Self {
+impl<'a> QueryPlanner<'a> {
+    pub fn new(db: &'a Database) -> Self {
         QueryPlanner { db }
     }
 
-    pub fn plan_select(&self, stmt: &SelectStatement) -> Result<PlanNode, String> {
-        let db = unsafe { &*self.db };
+    pub fn plan_select(&self, stmt: &SelectStatement) -> Result<PlanNode, RustqlError> {
+        let db = self.db;
 
         let base_table = db
             .tables
             .get(&stmt.from)
-            .ok_or_else(|| format!("Table '{}' does not exist", stmt.from))?;
+            .ok_or_else(|| RustqlError::TableNotFound(stmt.from.clone()))?;
+
+        let join_tables: HashSet<String> = stmt.joins.iter().map(|j| j.table.clone()).collect();
+
+        let (base_filter, remaining_predicates) = if let Some(ref where_expr) = stmt.where_clause {
+            let conjuncts = self.extract_conjuncts(where_expr);
+            let mut base_preds = Vec::new();
+            let mut rest = Vec::new();
+
+            for conj in conjuncts {
+                let refs = self.referenced_tables(&conj);
+                if refs.is_empty()
+                    || (refs.len() == 1 && refs.contains(&stmt.from))
+                    || (!refs.iter().any(|r| join_tables.contains(r)) && refs.len() <= 1)
+                {
+                    base_preds.push(conj);
+                } else {
+                    rest.push(conj);
+                }
+            }
+
+            (self.combine_conjuncts(base_preds), rest)
+        } else {
+            (None, Vec::new())
+        };
 
         let base_stats = self.collect_table_stats(&stmt.from, base_table, db);
         let mut plan = self.plan_table_access(
             &stmt.from,
             base_table,
             &base_stats,
-            stmt.where_clause.as_ref(),
+            base_filter.as_ref(),
             db,
         )?;
 
         if !stmt.joins.is_empty() {
-            plan = self.plan_joins(plan, stmt, db)?;
-        }
-
-        if let Some(ref where_expr) = stmt.where_clause {
-            if !self.is_filter_applied(&plan, where_expr) {
-                plan = self.plan_filter(plan, where_expr.clone());
-            }
+            plan = self.plan_joins(plan, stmt, db, remaining_predicates)?;
+        } else if !remaining_predicates.is_empty()
+            && let Some(filter_expr) = self.combine_conjuncts(remaining_predicates)
+        {
+            plan = self.plan_filter(plan, filter_expr);
         }
 
         if let Some(ref group_by) = stmt.group_by {
@@ -158,21 +178,21 @@ impl QueryPlanner {
         stats: &TableStats,
         where_clause: Option<&Expression>,
         db: &Database,
-    ) -> Result<PlanNode, String> {
-        if let Some(ref where_expr) = where_clause {
-            if let Some(index_usage) = self.find_best_index(table_name, where_expr, db) {
-                let index = db.indexes.get(&index_usage.index_name).unwrap();
-                let estimated_rows = self.estimate_index_selectivity(&index_usage, index, stats);
-                let cost = self.estimate_index_scan_cost(stats.row_count, estimated_rows);
+    ) -> Result<PlanNode, RustqlError> {
+        if let Some(where_expr) = where_clause
+            && let Some(index_usage) = self.find_best_index(table_name, where_expr, db)
+        {
+            let index = db.indexes.get(&index_usage.index_name).unwrap();
+            let estimated_rows = self.estimate_index_selectivity(&index_usage, index, stats);
+            let cost = self.estimate_index_scan_cost(stats.row_count, estimated_rows);
 
-                return Ok(PlanNode::IndexScan {
-                    table: table_name.to_string(),
-                    index: index_usage.index_name,
-                    filter: Some((*where_expr).clone()),
-                    cost,
-                    rows: estimated_rows,
-                });
-            }
+            return Ok(PlanNode::IndexScan {
+                table: table_name.to_string(),
+                index: index_usage.index_name,
+                filter: Some((*where_expr).clone()),
+                cost,
+                rows: estimated_rows,
+            });
         }
 
         let cost = self.estimate_seq_scan_cost(stats.row_count);
@@ -191,7 +211,8 @@ impl QueryPlanner {
         left_plan: PlanNode,
         stmt: &SelectStatement,
         db: &Database,
-    ) -> Result<PlanNode, String> {
+        mut remaining_predicates: Vec<Expression>,
+    ) -> Result<PlanNode, RustqlError> {
         let mut current_plan = left_plan;
         let mut remaining_joins = stmt.joins.clone();
 
@@ -201,15 +222,36 @@ impl QueryPlanner {
             a_size.cmp(&b_size)
         });
 
+        let mut joined_tables: HashSet<String> = HashSet::new();
+        joined_tables.insert(stmt.from.clone());
+
         for join in remaining_joins {
             let right_table = db
                 .tables
                 .get(&join.table)
-                .ok_or_else(|| format!("Table '{}' does not exist", join.table))?;
+                .ok_or_else(|| RustqlError::TableNotFound(join.table.clone()))?;
 
+            let mut pushable = Vec::new();
+            let mut kept = Vec::new();
+            for pred in remaining_predicates {
+                let refs = self.referenced_tables(&pred);
+                if refs.len() == 1 && refs.contains(&join.table) {
+                    pushable.push(pred);
+                } else {
+                    kept.push(pred);
+                }
+            }
+            remaining_predicates = kept;
+
+            let right_filter = self.combine_conjuncts(pushable);
             let right_stats = self.collect_table_stats(&join.table, right_table, db);
-            let right_plan =
-                self.plan_table_access(&join.table, right_table, &right_stats, None, db)?;
+            let right_plan = self.plan_table_access(
+                &join.table,
+                right_table,
+                &right_stats,
+                right_filter.as_ref(),
+                db,
+            )?;
 
             let join_plan = if self.is_equality_join(&join.on) {
                 self.plan_hash_join(current_plan, right_plan, join.on.clone())
@@ -218,6 +260,13 @@ impl QueryPlanner {
             };
 
             current_plan = join_plan;
+            joined_tables.insert(join.table.clone());
+        }
+
+        if !remaining_predicates.is_empty()
+            && let Some(filter_expr) = self.combine_conjuncts(remaining_predicates)
+        {
+            current_plan = self.plan_filter(current_plan, filter_expr);
         }
 
         Ok(current_plan)
@@ -455,16 +504,6 @@ impl QueryPlanner {
         }
     }
 
-    fn is_filter_applied(&self, plan: &PlanNode, filter: &Expression) -> bool {
-        match plan {
-            PlanNode::SeqScan { filter: f, .. } | PlanNode::IndexScan { filter: f, .. } => {
-                f.as_ref().map(|f| f == filter).unwrap_or(false)
-            }
-            PlanNode::Filter { condition, .. } => condition == filter,
-            _ => false,
-        }
-    }
-
     fn collect_table_stats(&self, table_name: &str, table: &Table, db: &Database) -> TableStats {
         let row_count = table.rows.len();
         let mut column_stats = HashMap::new();
@@ -619,6 +658,64 @@ impl QueryPlanner {
             _ => None,
         }
     }
+
+    fn extract_conjuncts(&self, expr: &Expression) -> Vec<Expression> {
+        match expr {
+            Expression::BinaryOp {
+                left,
+                op: BinaryOperator::And,
+                right,
+            } => {
+                let mut result = self.extract_conjuncts(left);
+                result.extend(self.extract_conjuncts(right));
+                result
+            }
+            other => vec![other.clone()],
+        }
+    }
+
+    fn referenced_tables(&self, expr: &Expression) -> HashSet<String> {
+        let mut tables = HashSet::new();
+        self.collect_table_refs(expr, &mut tables);
+        tables
+    }
+
+    fn collect_table_refs(&self, expr: &Expression, tables: &mut HashSet<String>) {
+        match expr {
+            Expression::Column(name) => {
+                if let Some(dot_pos) = name.find('.') {
+                    tables.insert(name[..dot_pos].to_string());
+                }
+            }
+            Expression::BinaryOp { left, right, .. } => {
+                self.collect_table_refs(left, tables);
+                self.collect_table_refs(right, tables);
+            }
+            Expression::UnaryOp { expr, .. } => {
+                self.collect_table_refs(expr, tables);
+            }
+            Expression::In { left, .. } => {
+                self.collect_table_refs(left, tables);
+            }
+            Expression::IsNull { expr, .. } => {
+                self.collect_table_refs(expr, tables);
+            }
+            Expression::Function(agg) => {
+                self.collect_table_refs(&agg.expr, tables);
+            }
+            Expression::Subquery(_) | Expression::Exists(_) | Expression::Value(_) => {}
+        }
+    }
+
+    fn combine_conjuncts(&self, exprs: Vec<Expression>) -> Option<Expression> {
+        let mut iter = exprs.into_iter();
+        let first = iter.next()?;
+        Some(iter.fold(first, |acc, e| Expression::BinaryOp {
+            left: Box::new(acc),
+            op: BinaryOperator::And,
+            right: Box::new(e),
+        }))
+    }
 }
 
 impl fmt::Display for PlanNode {
@@ -637,11 +734,11 @@ impl PlanNode {
                 cost,
                 rows,
             } => {
-                write!(f, "{}Seq Scan on {}\n", indent_str, table)?;
-                if let Some(_) = filter {
-                    write!(f, "{}  Filter: [WHERE clause]\n", indent_str)?;
+                writeln!(f, "{}Seq Scan on {}", indent_str, table)?;
+                if filter.is_some() {
+                    writeln!(f, "{}  Filter: [WHERE clause]", indent_str)?;
                 }
-                write!(f, "{}  Cost: {:.2}, Rows: {}\n", indent_str, cost, rows)
+                writeln!(f, "{}  Cost: {:.2}, Rows: {}", indent_str, cost, rows)
             }
             PlanNode::IndexScan {
                 table,
@@ -650,11 +747,11 @@ impl PlanNode {
                 cost,
                 rows,
             } => {
-                write!(f, "{}Index Scan using {} on {}\n", indent_str, index, table)?;
-                if let Some(_) = filter {
-                    write!(f, "{}  Filter: [WHERE clause]\n", indent_str)?;
+                writeln!(f, "{}Index Scan using {} on {}", indent_str, index, table)?;
+                if filter.is_some() {
+                    writeln!(f, "{}  Filter: [WHERE clause]", indent_str)?;
                 }
-                write!(f, "{}  Cost: {:.2}, Rows: {}\n", indent_str, cost, rows)
+                writeln!(f, "{}  Cost: {:.2}, Rows: {}", indent_str, cost, rows)
             }
             PlanNode::NestedLoopJoin {
                 left,
@@ -663,8 +760,8 @@ impl PlanNode {
                 cost,
                 rows,
             } => {
-                write!(f, "{}Nested Loop Join\n", indent_str)?;
-                write!(f, "{}  Cost: {:.2}, Rows: {}\n", indent_str, cost, rows)?;
+                writeln!(f, "{}Nested Loop Join", indent_str)?;
+                writeln!(f, "{}  Cost: {:.2}, Rows: {}", indent_str, cost, rows)?;
                 left.fmt_with_indent(f, indent + 1)?;
                 right.fmt_with_indent(f, indent + 1)
             }
@@ -675,8 +772,8 @@ impl PlanNode {
                 cost,
                 rows,
             } => {
-                write!(f, "{}Hash Join\n", indent_str)?;
-                write!(f, "{}  Cost: {:.2}, Rows: {}\n", indent_str, cost, rows)?;
+                writeln!(f, "{}Hash Join", indent_str)?;
+                writeln!(f, "{}  Cost: {:.2}, Rows: {}", indent_str, cost, rows)?;
                 left.fmt_with_indent(f, indent + 1)?;
                 right.fmt_with_indent(f, indent + 1)
             }
@@ -686,8 +783,8 @@ impl PlanNode {
                 cost,
                 rows,
             } => {
-                write!(f, "{}Filter\n", indent_str)?;
-                write!(f, "{}  Cost: {:.2}, Rows: {}\n", indent_str, cost, rows)?;
+                writeln!(f, "{}Filter", indent_str)?;
+                writeln!(f, "{}  Cost: {:.2}, Rows: {}", indent_str, cost, rows)?;
                 input.fmt_with_indent(f, indent + 1)
             }
             PlanNode::Sort {
@@ -696,8 +793,8 @@ impl PlanNode {
                 cost,
                 rows,
             } => {
-                write!(f, "{}Sort\n", indent_str)?;
-                write!(f, "{}  Cost: {:.2}, Rows: {}\n", indent_str, cost, rows)?;
+                writeln!(f, "{}Sort", indent_str)?;
+                writeln!(f, "{}  Cost: {:.2}, Rows: {}", indent_str, cost, rows)?;
                 input.fmt_with_indent(f, indent + 1)
             }
             PlanNode::Limit {
@@ -707,8 +804,8 @@ impl PlanNode {
                 cost,
                 rows,
             } => {
-                write!(f, "{}Limit: {} Offset: {}\n", indent_str, limit, offset)?;
-                write!(f, "{}  Cost: {:.2}, Rows: {}\n", indent_str, cost, rows)?;
+                writeln!(f, "{}Limit: {} Offset: {}", indent_str, limit, offset)?;
+                writeln!(f, "{}  Cost: {:.2}, Rows: {}", indent_str, cost, rows)?;
                 input.fmt_with_indent(f, indent + 1)
             }
             PlanNode::Aggregate {
@@ -719,20 +816,20 @@ impl PlanNode {
                 cost,
                 rows,
             } => {
-                write!(
+                writeln!(
                     f,
-                    "{}Aggregate (Group By: {})\n",
+                    "{}Aggregate (Group By: {})",
                     indent_str,
                     group_by.join(", ")
                 )?;
-                write!(f, "{}  Cost: {:.2}, Rows: {}\n", indent_str, cost, rows)?;
+                writeln!(f, "{}  Cost: {:.2}, Rows: {}", indent_str, cost, rows)?;
                 input.fmt_with_indent(f, indent + 1)
             }
         }
     }
 }
 
-pub fn explain_query(db: &Database, stmt: &SelectStatement) -> Result<String, String> {
+pub fn explain_query(db: &Database, stmt: &SelectStatement) -> Result<String, RustqlError> {
     let planner = QueryPlanner::new(db);
     let plan = planner.plan_select(stmt)?;
     Ok(format!("Query Plan:\n{}", plan))

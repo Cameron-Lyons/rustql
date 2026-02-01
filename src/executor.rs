@@ -1,12 +1,13 @@
 use crate::ast::*;
 use crate::database::{Database, Table};
+use crate::error::{ConstraintKind, RustqlError};
 use crate::planner;
+use crate::wal::{self, WalEntry};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashSet};
-use std::sync::{Mutex, OnceLock, RwLock};
+use std::sync::{OnceLock, RwLock};
 
 static DATABASE: OnceLock<RwLock<Database>> = OnceLock::new();
-static TRANSACTION_STATE: OnceLock<Mutex<Option<Database>>> = OnceLock::new();
 
 fn get_database() -> &'static RwLock<Database> {
     #[cfg(test)]
@@ -31,7 +32,7 @@ pub fn get_database_for_testing() -> Database {
     (*get_database_read()).clone()
 }
 
-pub fn execute(statement: Statement) -> Result<String, String> {
+pub fn execute(statement: Statement) -> Result<String, RustqlError> {
     match statement {
         Statement::CreateTable(stmt) => execute_create_table(stmt),
         Statement::DropTable(stmt) => execute_drop_table(stmt),
@@ -55,92 +56,45 @@ pub fn reset_database_state() {
     let mut db = get_database_write();
     db.tables.clear();
     db.indexes.clear();
-    TRANSACTION_STATE
-        .get_or_init(|| Mutex::new(None))
-        .lock()
-        .unwrap()
-        .take();
+    wal::reset_wal_state();
 }
 
-fn is_in_transaction() -> bool {
-    TRANSACTION_STATE
-        .get_or_init(|| Mutex::new(None))
-        .lock()
-        .unwrap()
-        .is_some()
-}
-
-fn save_if_not_in_transaction(db: &Database) -> Result<(), String> {
-    if !is_in_transaction() {
+fn save_if_not_in_transaction(db: &Database) -> Result<(), RustqlError> {
+    if !wal::is_in_transaction() {
         db.save()?;
     }
     Ok(())
 }
 
-fn execute_begin_transaction() -> Result<String, String> {
-    let mut transaction_state = TRANSACTION_STATE
-        .get_or_init(|| Mutex::new(None))
-        .lock()
-        .unwrap();
-
-    if transaction_state.is_some() {
-        return Err("Transaction already in progress".to_string());
-    }
-
-    let db = get_database_read();
-    let db_json = serde_json::to_string(&*db)
-        .map_err(|e| format!("Failed to serialize database snapshot: {}", e))?;
-    let snapshot: Database = serde_json::from_str(&db_json)
-        .map_err(|e| format!("Failed to deserialize database snapshot: {}", e))?;
-
-    *transaction_state = Some(snapshot);
+fn execute_begin_transaction() -> Result<String, RustqlError> {
+    wal::begin_transaction()?;
     Ok("Transaction begun".to_string())
 }
 
-fn execute_commit_transaction() -> Result<String, String> {
-    let mut transaction_state = TRANSACTION_STATE
-        .get_or_init(|| Mutex::new(None))
-        .lock()
-        .unwrap();
-
-    if transaction_state.is_none() {
-        return Err("No transaction in progress".to_string());
-    }
-
-    *transaction_state = None;
-
+fn execute_commit_transaction() -> Result<String, RustqlError> {
+    wal::commit_transaction()?;
     let db = get_database_read();
     db.save()?;
-
     Ok("Transaction committed".to_string())
 }
 
-fn execute_rollback_transaction() -> Result<String, String> {
-    let mut transaction_state = TRANSACTION_STATE
-        .get_or_init(|| Mutex::new(None))
-        .lock()
-        .unwrap();
-
-    if let Some(snapshot) = transaction_state.take() {
-        let mut db = get_database_write();
-        *db = snapshot;
-        Ok("Transaction rolled back".to_string())
-    } else {
-        Err("No transaction in progress".to_string())
-    }
+fn execute_rollback_transaction() -> Result<String, RustqlError> {
+    let mut db = get_database_write();
+    wal::rollback_transaction(&mut db)?;
+    Ok("Transaction rolled back".to_string())
 }
 
-fn execute_explain(stmt: SelectStatement) -> Result<String, String> {
+fn execute_explain(stmt: SelectStatement) -> Result<String, RustqlError> {
     let db = get_database_read();
-    planner::explain_query(&*db, &stmt)
+    planner::explain_query(&db, &stmt)
 }
 
-fn execute_describe(table_name: String) -> Result<String, String> {
+fn execute_describe(table_name: String) -> Result<String, RustqlError> {
     let db = get_database_read();
     let table = db
         .tables
         .get(&table_name)
-        .ok_or_else(|| format!("Table '{}' does not exist", table_name))?;
+        .ok_or_else(|| RustqlError::TableNotFound(table_name.to_string()))?;
 
     let mut result = String::new();
     result.push_str("Column\tType\tNullable\tPrimary Key\tUnique\tDefault\n");
@@ -176,7 +130,7 @@ fn execute_describe(table_name: String) -> Result<String, String> {
     Ok(result)
 }
 
-fn execute_show_tables() -> Result<String, String> {
+fn execute_show_tables() -> Result<String, RustqlError> {
     let db = get_database_read();
     let mut result = String::new();
     result.push_str("Tables\n");
@@ -194,10 +148,10 @@ fn execute_show_tables() -> Result<String, String> {
     Ok(result)
 }
 
-fn execute_create_table(stmt: CreateTableStatement) -> Result<String, String> {
+fn execute_create_table(stmt: CreateTableStatement) -> Result<String, RustqlError> {
     let mut db = get_database_write();
     if db.tables.contains_key(&stmt.name) {
-        return Err(format!("Table '{}' already exists", stmt.name));
+        return Err(RustqlError::TableAlreadyExists(stmt.name.clone()));
     }
     db.tables.insert(
         stmt.name.clone(),
@@ -206,35 +160,43 @@ fn execute_create_table(stmt: CreateTableStatement) -> Result<String, String> {
             rows: Vec::new(),
         },
     );
+    wal::record_wal_entry(WalEntry::CreateTable {
+        name: stmt.name.clone(),
+    });
     save_if_not_in_transaction(&db)?;
     Ok(format!("Table '{}' created", stmt.name))
 }
 
-fn execute_drop_table(stmt: DropTableStatement) -> Result<String, String> {
+fn execute_drop_table(stmt: DropTableStatement) -> Result<String, RustqlError> {
     let mut db = get_database_write();
-    if db.tables.remove(&stmt.name).is_some() {
+    if let Some(removed) = db.tables.remove(&stmt.name) {
+        wal::record_wal_entry(WalEntry::DropTable {
+            name: stmt.name.clone(),
+            columns: removed.columns,
+            rows: removed.rows,
+        });
         save_if_not_in_transaction(&db)?;
         Ok(format!("Table '{}' dropped", stmt.name))
     } else {
-        Err(format!("Table '{}' does not exist", stmt.name))
+        Err(RustqlError::TableNotFound(stmt.name.clone()))
     }
 }
 
-fn execute_insert(stmt: InsertStatement) -> Result<String, String> {
+fn execute_insert(stmt: InsertStatement) -> Result<String, RustqlError> {
     let mut db = get_database_write();
 
     let table_ref = db
         .tables
         .get(&stmt.table)
-        .ok_or_else(|| format!("Table '{}' does not exist", stmt.table))?;
+        .ok_or_else(|| RustqlError::TableNotFound(stmt.table.clone()))?;
 
     let mapped_values: Vec<Vec<Value>> = if let Some(ref specified_columns) = stmt.columns {
         for col_name in specified_columns {
             if !table_ref.columns.iter().any(|c| c.name == *col_name) {
-                return Err(format!(
-                    "Column '{}' does not exist in table '{}'",
+                return Err(RustqlError::ColumnNotFound(format!(
+                    "{} (table: {})",
                     col_name, stmt.table
-                ));
+                )));
             }
         }
 
@@ -242,12 +204,12 @@ fn execute_insert(stmt: InsertStatement) -> Result<String, String> {
             .iter()
             .map(|values| {
                 if values.len() != specified_columns.len() {
-                    return Err(format!(
+                    return Err(RustqlError::Internal(format!(
                         "Column count mismatch: expected {} values for {} columns, got {}",
                         specified_columns.len(),
                         specified_columns.len(),
                         values.len()
-                    ));
+                    )));
                 }
 
                 let mut full_row: Vec<Value> = table_ref
@@ -267,7 +229,7 @@ fn execute_insert(stmt: InsertStatement) -> Result<String, String> {
 
                 Ok(full_row)
             })
-            .collect::<Result<Vec<Vec<Value>>, String>>()?
+            .collect::<Result<Vec<Vec<Value>>, RustqlError>>()?
     } else {
         stmt.values
             .iter()
@@ -292,16 +254,16 @@ fn execute_insert(stmt: InsertStatement) -> Result<String, String> {
                 }
 
                 if values.len() != table_ref.columns.len() {
-                    return Err(format!(
+                    return Err(RustqlError::Internal(format!(
                         "Column count mismatch: expected {}, got {}",
                         table_ref.columns.len(),
                         values.len()
-                    ));
+                    )));
                 }
 
                 Ok(full_row)
             })
-            .collect::<Result<Vec<Vec<Value>>, String>>()?
+            .collect::<Result<Vec<Vec<Value>>, RustqlError>>()?
     };
 
     for values in &mapped_values {
@@ -326,10 +288,14 @@ fn execute_insert(stmt: InsertStatement) -> Result<String, String> {
         let table = db
             .tables
             .get_mut(&stmt.table)
-            .ok_or_else(|| format!("Table '{}' does not exist", stmt.table))?;
+            .ok_or_else(|| RustqlError::TableNotFound(stmt.table.clone()))?;
         for values in &mapped_values {
             let row_idx = table.rows.len();
             table.rows.push(values.clone());
+            wal::record_wal_entry(WalEntry::InsertRow {
+                table: stmt.table.clone(),
+                row_index: row_idx,
+            });
             inserted_rows.push((row_idx, values.clone()));
         }
     }
@@ -340,7 +306,7 @@ fn execute_insert(stmt: InsertStatement) -> Result<String, String> {
     Ok(format!("{} row(s) inserted", row_count))
 }
 
-fn execute_select(stmt: SelectStatement) -> Result<String, String> {
+fn execute_select(stmt: SelectStatement) -> Result<String, RustqlError> {
     let db = get_database_read();
 
     if let Some(ref union_stmt) = stmt.union {
@@ -369,17 +335,14 @@ fn execute_select(stmt: SelectStatement) -> Result<String, String> {
     let table = db_ref
         .tables
         .get(&stmt.from)
-        .ok_or_else(|| format!("Table '{}' does not exist", stmt.from))?;
+        .ok_or_else(|| RustqlError::TableNotFound(stmt.from.clone()))?;
 
     let mut filtered_rows: Vec<&Vec<Value>> = Vec::new();
 
     let candidate_indices: Option<HashSet<usize>> = if let Some(ref where_expr) = stmt.where_clause
     {
         if let Some(index_usage) = find_index_usage(db_ref, &stmt.from, where_expr) {
-            match get_indexed_rows(db_ref, table, &index_usage) {
-                Ok(indices) => Some(indices),
-                Err(_) => None,
-            }
+            get_indexed_rows(db_ref, table, &index_usage).ok()
         } else {
             None
         }
@@ -482,7 +445,7 @@ fn execute_select(stmt: SelectStatement) -> Result<String, String> {
                         .columns
                         .iter()
                         .position(|c| c.name == column_name)
-                        .ok_or_else(|| format!("Column '{}' not found", name))?;
+                        .ok_or_else(|| RustqlError::ColumnNotFound(name.clone()))?;
                     row[idx].clone()
                 }
                 Column::Subquery(subquery) => {
@@ -492,10 +455,10 @@ fn execute_select(stmt: SelectStatement) -> Result<String, String> {
                     evaluate_value_expression(expr, &table.columns, row)?
                 }
                 Column::Function(_) => {
-                    return Err(
+                    return Err(RustqlError::Internal(
                         "Aggregate functions must be used with GROUP BY or without other columns"
                             .to_string(),
-                    );
+                    ));
                 }
             };
             projected.push(val);
@@ -563,7 +526,7 @@ fn execute_union(
     left_stmt: SelectStatement,
     right_stmt: SelectStatement,
     db: &Database,
-) -> Result<String, String> {
+) -> Result<String, RustqlError> {
     let union_all = left_stmt.union_all;
 
     let mut left_stmt_internal = left_stmt;
@@ -640,12 +603,15 @@ struct SelectResult {
     rows: Vec<Vec<Value>>,
 }
 
-fn execute_select_internal(stmt: SelectStatement, db: &Database) -> Result<SelectResult, String> {
+fn execute_select_internal(
+    stmt: SelectStatement,
+    db: &Database,
+) -> Result<SelectResult, RustqlError> {
     let (all_rows, all_columns) = if !stmt.joins.is_empty() {
         let main_table = db
             .tables
             .get(&stmt.from)
-            .ok_or_else(|| format!("Table '{}' does not exist", stmt.from))?;
+            .ok_or_else(|| RustqlError::TableNotFound(stmt.from.clone()))?;
         let (joined_rows, all_cols) =
             perform_multiple_joins(db, main_table, &stmt.from, &stmt.joins)?;
         (joined_rows, all_cols)
@@ -653,7 +619,7 @@ fn execute_select_internal(stmt: SelectStatement, db: &Database) -> Result<Selec
         let table = db
             .tables
             .get(&stmt.from)
-            .ok_or_else(|| format!("Table '{}' does not exist", stmt.from))?;
+            .ok_or_else(|| RustqlError::TableNotFound(stmt.from.clone()))?;
         (table.rows.clone(), table.columns.clone())
     };
 
@@ -663,15 +629,12 @@ fn execute_select_internal(stmt: SelectStatement, db: &Database) -> Result<Selec
         let table = db
             .tables
             .get(&stmt.from)
-            .ok_or_else(|| format!("Table '{}' does not exist", stmt.from))?;
+            .ok_or_else(|| RustqlError::TableNotFound(stmt.from.clone()))?;
 
         let candidate_indices: Option<HashSet<usize>> =
             if let Some(ref where_expr) = stmt.where_clause {
                 if let Some(index_usage) = find_index_usage(db, &stmt.from, where_expr) {
-                    match get_indexed_rows(db, table, &index_usage) {
-                        Ok(indices) => Some(indices),
-                        Err(_) => None,
-                    }
+                    get_indexed_rows(db, table, &index_usage).ok()
                 } else {
                     None
                 }
@@ -714,16 +677,16 @@ fn execute_select_internal(stmt: SelectStatement, db: &Database) -> Result<Selec
         }
     }
 
-    if let Some(_) = stmt.group_by {
+    if stmt.group_by.is_some() {
         let temp_table = Table {
             columns: all_columns.clone(),
             rows: Vec::new(),
         };
-        let row_refs: Vec<&Vec<Value>> = filtered_rows.iter().map(|r| *r).collect();
+        let row_refs: Vec<&Vec<Value>> = filtered_rows.to_vec();
         let grouping_result = execute_select_with_grouping(stmt.clone(), &temp_table, row_refs)?;
         let lines: Vec<&str> = grouping_result.lines().collect();
         if lines.len() < 2 {
-            return Err("Invalid grouping result".to_string());
+            return Err(RustqlError::Internal("Invalid grouping result".to_string()));
         }
         let headers: Vec<String> = lines[0]
             .split('\t')
@@ -738,7 +701,7 @@ fn execute_select_internal(stmt: SelectStatement, db: &Database) -> Result<Selec
             let values: Vec<Value> = line
                 .split('\t')
                 .filter(|s| !s.is_empty())
-                .map(|s| parse_value_from_string(s))
+                .map(parse_value_from_string)
                 .collect();
             rows.push(values);
         }
@@ -754,11 +717,13 @@ fn execute_select_internal(stmt: SelectStatement, db: &Database) -> Result<Selec
             columns: all_columns.clone(),
             rows: Vec::new(),
         };
-        let row_refs: Vec<&Vec<Value>> = filtered_rows.iter().map(|r| *r).collect();
+        let row_refs: Vec<&Vec<Value>> = filtered_rows.to_vec();
         let agg_result = execute_select_with_aggregates(stmt.clone(), &temp_table, row_refs)?;
         let lines: Vec<&str> = agg_result.lines().collect();
         if lines.len() < 2 {
-            return Err("Invalid aggregate result".to_string());
+            return Err(RustqlError::Internal(
+                "Invalid aggregate result".to_string(),
+            ));
         }
         let headers: Vec<String> = lines[0]
             .split('\t')
@@ -770,7 +735,7 @@ fn execute_select_internal(stmt: SelectStatement, db: &Database) -> Result<Selec
             let values: Vec<Value> = lines[2]
                 .split('\t')
                 .filter(|s| !s.is_empty())
-                .map(|s| parse_value_from_string(s))
+                .map(parse_value_from_string)
                 .collect();
             rows.push(values);
         }
@@ -817,11 +782,13 @@ fn execute_select_internal(stmt: SelectStatement, db: &Database) -> Result<Selec
                         let idx = all_columns
                             .iter()
                             .position(|c| c.name == column_name)
-                            .ok_or_else(|| format!("Column '{}' not found", name))?;
+                            .ok_or_else(|| RustqlError::ColumnNotFound(name.clone()))?;
                         row[idx].clone()
                     }
                     Column::Function(_) => {
-                        return Err("Aggregate functions in UNION must use GROUP BY".to_string());
+                        return Err(RustqlError::Internal(
+                            "Aggregate functions in UNION must use GROUP BY".to_string(),
+                        ));
                     }
                     Column::Subquery(subquery) => {
                         eval_scalar_subquery_with_outer(db, subquery, &all_columns, row)?
@@ -867,7 +834,7 @@ fn execute_select_with_aggregates(
     stmt: SelectStatement,
     table: &Table,
     rows: Vec<&Vec<Value>>,
-) -> Result<String, String> {
+) -> Result<String, RustqlError> {
     let mut result = String::new();
     for col in &stmt.columns {
         match col {
@@ -898,9 +865,9 @@ fn execute_select_with_aggregates(
                 result.push_str(&format!("{}\t", format_value(&value)));
             }
             _ => {
-                return Err(
+                return Err(RustqlError::Internal(
                     "Cannot mix aggregate and non-aggregate columns without GROUP BY".to_string(),
-                );
+                ));
             }
         }
     }
@@ -912,7 +879,7 @@ fn execute_select_with_grouping(
     stmt: SelectStatement,
     table: &Table,
     rows: Vec<&Vec<Value>>,
-) -> Result<String, String> {
+) -> Result<String, RustqlError> {
     let raw_group_by = stmt.group_by.as_ref().unwrap();
     let mut group_by_normalized_with_indices: Vec<(String, usize)> =
         Vec::with_capacity(raw_group_by.len());
@@ -926,7 +893,7 @@ fn execute_select_with_grouping(
             .columns
             .iter()
             .position(|c| c.name == normalized)
-            .ok_or_else(|| format!("Column '{}' not found", name))?;
+            .ok_or_else(|| RustqlError::ColumnNotFound(name.clone()))?;
         group_by_normalized_with_indices.push((normalized.to_string(), idx));
     }
     let group_by_indices: Vec<usize> = group_by_normalized_with_indices
@@ -1004,7 +971,10 @@ fn execute_select_with_grouping(
                     {
                         projected_row.push(group_rows[0][*group_idx].clone());
                     } else {
-                        return Err(format!("Column '{}' must appear in GROUP BY clause", name));
+                        return Err(RustqlError::Internal(format!(
+                            "Column '{}' must appear in GROUP BY clause",
+                            name
+                        )));
                     }
                 }
                 Column::Expression { expr, .. } => {
@@ -1090,7 +1060,7 @@ fn evaluate_select_order_expression(
     column_specs: &[(String, Column)],
     projected_row: &[Value],
     allow_ordinal: bool,
-) -> Result<Value, String> {
+) -> Result<Value, RustqlError> {
     match expr {
         Expression::Column(name) => {
             for (idx, (header, col_spec)) in column_specs.iter().enumerate() {
@@ -1101,17 +1071,15 @@ fn evaluate_select_order_expression(
                     name: original_name,
                     alias,
                 } = col_spec
-                {
-                    if alias.as_ref().map(|a| a == name).unwrap_or(false)
+                    && (alias.as_ref().map(|a| a == name).unwrap_or(false)
                         || original_name == name
                         || original_name
                             .split('.')
                             .next_back()
                             .map(|n| n == name)
-                            .unwrap_or(false)
-                    {
-                        return Ok(projected_row[idx].clone());
-                    }
+                            .unwrap_or(false))
+                {
+                    return Ok(projected_row[idx].clone());
                 }
             }
 
@@ -1124,16 +1092,16 @@ fn evaluate_select_order_expression(
             let idx = columns
                 .iter()
                 .position(|c| c.name == column_name)
-                .ok_or_else(|| format!("ORDER BY column '{}' not found", name))?;
+                .ok_or_else(|| RustqlError::ColumnNotFound(format!("{} (ORDER BY)", name)))?;
             Ok(row[idx].clone())
         }
         Expression::Value(val) => {
-            if allow_ordinal {
-                if let Value::Integer(ord) = val {
-                    if *ord >= 1 && (*ord as usize) <= projected_row.len() {
-                        return Ok(projected_row[*ord as usize - 1].clone());
-                    }
-                }
+            if allow_ordinal
+                && let Value::Integer(ord) = val
+                && *ord >= 1
+                && (*ord as usize) <= projected_row.len()
+            {
+                return Ok(projected_row[*ord as usize - 1].clone());
             }
             Ok(val.clone())
         }
@@ -1160,9 +1128,13 @@ fn evaluate_select_order_expression(
                 )?;
                 apply_arithmetic(&left_val, &right_val, op)
             }
-            _ => Err("Unsupported operator in ORDER BY".to_string()),
+            _ => Err(RustqlError::Internal(
+                "Unsupported operator in ORDER BY".to_string(),
+            )),
         },
-        _ => Err("Unsupported expression in ORDER BY".to_string()),
+        _ => Err(RustqlError::Internal(
+            "Unsupported expression in ORDER BY".to_string(),
+        )),
     }
 }
 
@@ -1174,7 +1146,7 @@ fn evaluate_group_order_expression(
     projected_row: &[Value],
     group_by_indices: &[(String, usize)],
     allow_ordinal: bool,
-) -> Result<Value, String> {
+) -> Result<Value, RustqlError> {
     match expr {
         Expression::Column(name) => {
             for (idx, (header, col_spec)) in column_specs.iter().enumerate() {
@@ -1185,17 +1157,15 @@ fn evaluate_group_order_expression(
                     name: original_name,
                     alias,
                 } = col_spec
-                {
-                    if alias.as_ref().map(|a| a == name).unwrap_or(false)
+                    && (alias.as_ref().map(|a| a == name).unwrap_or(false)
                         || original_name == name
                         || original_name
                             .split('.')
                             .next_back()
                             .map(|n| n == name)
-                            .unwrap_or(false)
-                    {
-                        return Ok(projected_row[idx].clone());
-                    }
+                            .unwrap_or(false))
+                {
+                    return Ok(projected_row[idx].clone());
                 }
                 if let Column::Function(agg) = col_spec {
                     let default_alias = agg
@@ -1217,27 +1187,26 @@ fn evaluate_group_order_expression(
             if let Some((_, idx)) = group_by_indices
                 .iter()
                 .find(|(normalized_name, _)| normalized_name == normalized)
+                && let Some(first_row) = group_rows.first()
             {
-                if let Some(first_row) = group_rows.first() {
-                    return Ok(first_row[*idx].clone());
-                }
+                return Ok(first_row[*idx].clone());
             }
 
-            Err(format!(
-                "ORDER BY column '{}' not found in grouped result",
+            Err(RustqlError::ColumnNotFound(format!(
+                "{} (ORDER BY grouped)",
                 name
-            ))
+            )))
         }
         Expression::Function(agg) => {
             compute_aggregate(&agg.function, &agg.expr, table, group_rows, agg.distinct)
         }
         Expression::Value(val) => {
-            if allow_ordinal {
-                if let Value::Integer(ord) = val {
-                    if *ord >= 1 && (*ord as usize) <= projected_row.len() {
-                        return Ok(projected_row[*ord as usize - 1].clone());
-                    }
-                }
+            if allow_ordinal
+                && let Value::Integer(ord) = val
+                && *ord >= 1
+                && (*ord as usize) <= projected_row.len()
+            {
+                return Ok(projected_row[*ord as usize - 1].clone());
             }
             Ok(val.clone())
         }
@@ -1266,19 +1235,29 @@ fn evaluate_group_order_expression(
                 )?;
                 apply_arithmetic(&left_val, &right_val, op)
             }
-            _ => Err("Unsupported operator in ORDER BY for grouped results".to_string()),
+            _ => Err(RustqlError::Internal(
+                "Unsupported operator in ORDER BY for grouped results".to_string(),
+            )),
         },
-        _ => Err("Unsupported expression in ORDER BY for grouped results".to_string()),
+        _ => Err(RustqlError::Internal(
+            "Unsupported expression in ORDER BY for grouped results".to_string(),
+        )),
     }
 }
 
-fn apply_arithmetic(left: &Value, right: &Value, op: &BinaryOperator) -> Result<Value, String> {
-    let to_float = |value: &Value| -> Result<f64, String> {
+fn apply_arithmetic(
+    left: &Value,
+    right: &Value,
+    op: &BinaryOperator,
+) -> Result<Value, RustqlError> {
+    let to_float = |value: &Value| -> Result<f64, RustqlError> {
         match value {
             Value::Integer(i) => Ok(*i as f64),
             Value::Float(f) => Ok(*f),
             Value::Null => Ok(0.0),
-            _ => Err("Arithmetic in ORDER BY requires numeric values".to_string()),
+            _ => Err(RustqlError::TypeMismatch(
+                "Arithmetic in ORDER BY requires numeric values".to_string(),
+            )),
         }
     };
 
@@ -1289,7 +1268,7 @@ fn apply_arithmetic(left: &Value, right: &Value, op: &BinaryOperator) -> Result<
             BinaryOperator::Multiply => Ok(Value::Integer(l * r)),
             BinaryOperator::Divide => {
                 if *r == 0 {
-                    Err("Division by zero in ORDER BY".to_string())
+                    Err(RustqlError::DivisionByZero)
                 } else if l % r == 0 {
                     Ok(Value::Integer(l / r))
                 } else {
@@ -1307,7 +1286,7 @@ fn apply_arithmetic(left: &Value, right: &Value, op: &BinaryOperator) -> Result<
                 BinaryOperator::Multiply => Ok(Value::Float(l * r)),
                 BinaryOperator::Divide => {
                     if r.abs() < f64::EPSILON {
-                        Err("Division by zero in ORDER BY".to_string())
+                        Err(RustqlError::DivisionByZero)
                     } else {
                         Ok(Value::Float(l / r))
                     }
@@ -1357,12 +1336,14 @@ fn compute_aggregate(
     table: &Table,
     rows: &[&Vec<Value>],
     distinct: bool,
-) -> Result<Value, String> {
+) -> Result<Value, RustqlError> {
     match func {
         AggregateFunctionType::Count => {
             if matches!(expr, Expression::Column(name) if name == "*") {
                 if distinct {
-                    return Err("COUNT(DISTINCT *) is not supported".to_string());
+                    return Err(RustqlError::AggregateError(
+                        "COUNT(DISTINCT *) is not supported".to_string(),
+                    ));
                 }
                 Ok(Value::Integer(rows.len() as i64))
             } else {
@@ -1402,7 +1383,11 @@ fn compute_aggregate(
                         sum += *f;
                         has_value = true;
                     }
-                    _ => return Err("SUM requires numeric values".to_string()),
+                    _ => {
+                        return Err(RustqlError::AggregateError(
+                            "SUM requires numeric values".to_string(),
+                        ));
+                    }
                 };
             }
             if has_value {
@@ -1432,7 +1417,11 @@ fn compute_aggregate(
                         sum += *f;
                         count += 1;
                     }
-                    _ => return Err("AVG requires numeric values".to_string()),
+                    _ => {
+                        return Err(RustqlError::AggregateError(
+                            "AVG requires numeric values".to_string(),
+                        ));
+                    }
                 };
             }
             if count > 0 {
@@ -1497,7 +1486,7 @@ fn evaluate_having(
     _columns: &[Column],
     table: &Table,
     rows: &[&Vec<Value>],
-) -> Result<bool, String> {
+) -> Result<bool, RustqlError> {
     match expr {
         Expression::BinaryOp { left, op, right } => match op {
             BinaryOperator::And => Ok(evaluate_having(left, _columns, table, rows)?
@@ -1517,9 +1506,13 @@ fn evaluate_having(
         }
         Expression::UnaryOp { op, expr } => match op {
             UnaryOperator::Not => Ok(!evaluate_having(expr, _columns, table, rows)?),
-            _ => Err("Unsupported unary operation in HAVING clause".to_string()),
+            _ => Err(RustqlError::Internal(
+                "Unsupported unary operation in HAVING clause".to_string(),
+            )),
         },
-        _ => Err("Invalid expression in HAVING clause".to_string()),
+        _ => Err(RustqlError::Internal(
+            "Invalid expression in HAVING clause".to_string(),
+        )),
     }
 }
 
@@ -1528,7 +1521,7 @@ fn evaluate_having_value(
     _columns: &[Column],
     table: &Table,
     rows: &[&Vec<Value>],
-) -> Result<Value, String> {
+) -> Result<Value, RustqlError> {
     match expr {
         Expression::Function(agg) => {
             compute_aggregate(&agg.function, &agg.expr, table, rows, agg.distinct)
@@ -1544,31 +1537,35 @@ fn evaluate_having_value(
                 if let Some(idx) = table.columns.iter().position(|c| c.name == normalized) {
                     Ok(rows[0][idx].clone())
                 } else {
-                    Err(format!("Column '{}' not found in HAVING clause", name))
+                    Err(RustqlError::ColumnNotFound(format!(
+                        "{} (HAVING clause)",
+                        name
+                    )))
                 }
             } else {
-                Err("No rows in group for HAVING clause".to_string())
+                Err(RustqlError::Internal(
+                    "No rows in group for HAVING clause".to_string(),
+                ))
             }
         }
-        _ => Err("Complex expressions not yet supported in HAVING".to_string()),
+        _ => Err(RustqlError::Internal(
+            "Complex expressions not yet supported in HAVING".to_string(),
+        )),
     }
 }
 
-fn execute_update(stmt: UpdateStatement) -> Result<String, String> {
+fn execute_update(stmt: UpdateStatement) -> Result<String, RustqlError> {
     let mut db = get_database_write();
 
     let candidate_indices: Option<HashSet<usize>> = {
         let table_ref_immut = db
             .tables
             .get(&stmt.table)
-            .ok_or_else(|| format!("Table '{}' does not exist", stmt.table))?;
+            .ok_or_else(|| RustqlError::TableNotFound(stmt.table.clone()))?;
 
         if let Some(ref where_expr) = stmt.where_clause {
             if let Some(index_usage) = find_index_usage(&db, &stmt.table, where_expr) {
-                match get_indexed_rows(&db, table_ref_immut, &index_usage) {
-                    Ok(indices) => Some(indices),
-                    Err(_) => None,
-                }
+                get_indexed_rows(&db, table_ref_immut, &index_usage).ok()
             } else {
                 None
             }
@@ -1580,7 +1577,7 @@ fn execute_update(stmt: UpdateStatement) -> Result<String, String> {
     let table_ref = db
         .tables
         .get(&stmt.table)
-        .ok_or_else(|| format!("Table '{}' does not exist", stmt.table))?;
+        .ok_or_else(|| RustqlError::TableNotFound(stmt.table.clone()))?;
 
     let mut rows_to_update: Vec<(usize, Vec<Value>)> = Vec::new();
 
@@ -1612,7 +1609,7 @@ fn execute_update(stmt: UpdateStatement) -> Result<String, String> {
                 {
                     updated_row[idx] = assignment.value.clone();
                 } else {
-                    return Err(format!("Column '{}' not found", assignment.column));
+                    return Err(RustqlError::ColumnNotFound(assignment.column.clone()));
                 }
             }
             validate_not_null_constraints(&table_ref.columns, &updated_row)?;
@@ -1634,10 +1631,15 @@ fn execute_update(stmt: UpdateStatement) -> Result<String, String> {
         let table = db
             .tables
             .get_mut(&stmt.table)
-            .ok_or_else(|| format!("Table '{}' does not exist", stmt.table))?;
+            .ok_or_else(|| RustqlError::TableNotFound(stmt.table.clone()))?;
         for (row_idx, updated_row) in rows_to_update {
             let old_row = table.rows[row_idx].clone();
             table.rows[row_idx] = updated_row.clone();
+            wal::record_wal_entry(WalEntry::UpdateRow {
+                table: stmt.table.clone(),
+                row_index: row_idx,
+                old_row: old_row.clone(),
+            });
             update_info.push((row_idx, old_row, updated_row));
         }
     }
@@ -1648,24 +1650,21 @@ fn execute_update(stmt: UpdateStatement) -> Result<String, String> {
     Ok(format!("{} row(s) updated", updated_count))
 }
 
-fn execute_delete(stmt: DeleteStatement) -> Result<String, String> {
+fn execute_delete(stmt: DeleteStatement) -> Result<String, RustqlError> {
     let mut db = get_database_write();
 
     let (columns, rows_to_delete) = {
         let table_ref = db
             .tables
             .get(&stmt.table)
-            .ok_or_else(|| format!("Table '{}' does not exist", stmt.table))?;
+            .ok_or_else(|| RustqlError::TableNotFound(stmt.table.clone()))?;
 
         let mut rows: Vec<Vec<Value>> = Vec::new();
 
         let candidate_indices: Option<HashSet<usize>> =
             if let Some(ref where_expr) = stmt.where_clause {
                 if let Some(index_usage) = find_index_usage(&db, &stmt.table, where_expr) {
-                    match get_indexed_rows(&db, table_ref, &index_usage) {
-                        Ok(indices) => Some(indices),
-                        Err(_) => None,
-                    }
+                    get_indexed_rows(&db, table_ref, &index_usage).ok()
                 } else {
                     None
                 }
@@ -1705,15 +1704,12 @@ fn execute_delete(stmt: DeleteStatement) -> Result<String, String> {
     let table_ref = db
         .tables
         .get(&stmt.table)
-        .ok_or_else(|| format!("Table '{}' does not exist", stmt.table))?;
+        .ok_or_else(|| RustqlError::TableNotFound(stmt.table.clone()))?;
 
     let candidate_indices: Option<HashSet<usize>> = if let Some(ref where_expr) = stmt.where_clause
     {
         if let Some(index_usage) = find_index_usage(&db, &stmt.table, where_expr) {
-            match get_indexed_rows(&db, table_ref, &index_usage) {
-                Ok(indices) => Some(indices),
-                Err(_) => None,
-            }
+            get_indexed_rows(&db, table_ref, &index_usage).ok()
         } else {
             None
         }
@@ -1725,7 +1721,7 @@ fn execute_delete(stmt: DeleteStatement) -> Result<String, String> {
         let table = db
             .tables
             .get_mut(&stmt.table)
-            .ok_or_else(|| format!("Table '{}' does not exist", stmt.table))?;
+            .ok_or_else(|| RustqlError::TableNotFound(stmt.table.clone()))?;
         let initial_count = table.rows.len();
 
         let mut rows_to_delete_indices = Vec::new();
@@ -1754,6 +1750,12 @@ fn execute_delete(stmt: DeleteStatement) -> Result<String, String> {
         rows_to_delete_indices.sort();
         rows_to_delete_indices.reverse();
         for idx in &rows_to_delete_indices {
+            let old_row = table.rows[*idx].clone();
+            wal::record_wal_entry(WalEntry::DeleteRow {
+                table: stmt.table.clone(),
+                row_index: *idx,
+                old_row,
+            });
             table.rows.remove(*idx);
         }
 
@@ -1773,7 +1775,7 @@ fn evaluate_expression(
     expr: &Expression,
     columns: &[ColumnDefinition],
     row: &[Value],
-) -> Result<bool, String> {
+) -> Result<bool, RustqlError> {
     match expr {
         Expression::BinaryOp { left, op, right } => match op {
             BinaryOperator::And => Ok(evaluate_expression(db, left, columns, row)?
@@ -1785,7 +1787,9 @@ fn evaluate_expression(
                 let right_val = evaluate_value_expression(right, columns, row)?;
                 match (left_val, right_val) {
                     (Value::Text(text), Value::Text(pattern)) => Ok(match_like(&text, &pattern)),
-                    _ => Err("LIKE operator requires text values".to_string()),
+                    _ => Err(RustqlError::TypeMismatch(
+                        "LIKE operator requires text values".to_string(),
+                    )),
                 }
             }
             BinaryOperator::Between => {
@@ -1800,7 +1804,9 @@ fn evaluate_expression(
                         let upper = evaluate_value_expression(rb, columns, row)?;
                         Ok(is_between(&left_val, &lower, &upper))
                     }
-                    _ => Err("BETWEEN requires two values".to_string()),
+                    _ => Err(RustqlError::TypeMismatch(
+                        "BETWEEN requires two values".to_string(),
+                    )),
                 }
             }
             BinaryOperator::In => {
@@ -1840,9 +1846,13 @@ fn evaluate_expression(
         }
         Expression::UnaryOp { op, expr } => match op {
             UnaryOperator::Not => Ok(!evaluate_expression(db, expr, columns, row)?),
-            _ => Err("Unsupported unary operation in WHERE clause".to_string()),
+            _ => Err(RustqlError::Internal(
+                "Unsupported unary operation in WHERE clause".to_string(),
+            )),
         },
-        _ => Err("Invalid expression in WHERE clause".to_string()),
+        _ => Err(RustqlError::Internal(
+            "Invalid expression in WHERE clause".to_string(),
+        )),
     }
 }
 
@@ -1912,7 +1922,7 @@ fn evaluate_value_expression(
     expr: &Expression,
     columns: &[ColumnDefinition],
     row: &[Value],
-) -> Result<Value, String> {
+) -> Result<Value, RustqlError> {
     match expr {
         Expression::Column(name) => {
             if name == "*" {
@@ -1926,7 +1936,7 @@ fn evaluate_value_expression(
             let idx = columns
                 .iter()
                 .position(|c| c.name == col_name)
-                .ok_or_else(|| format!("Column '{}' not found", name))?;
+                .ok_or_else(|| RustqlError::ColumnNotFound(name.clone()))?;
             Ok(row[idx].clone())
         }
         Expression::Value(val) => Ok(val.clone()),
@@ -1938,9 +1948,9 @@ fn evaluate_value_expression(
                 | BinaryOperator::Minus
                 | BinaryOperator::Multiply
                 | BinaryOperator::Divide => apply_arithmetic(&left_val, &right_val, op),
-                _ => {
-                    Err("Only arithmetic operators are supported in SELECT expressions".to_string())
-                }
+                _ => Err(RustqlError::Internal(
+                    "Only arithmetic operators are supported in SELECT expressions".to_string(),
+                )),
             }
         }
         Expression::UnaryOp { op, expr } => {
@@ -1949,16 +1959,22 @@ fn evaluate_value_expression(
                 UnaryOperator::Minus => match val {
                     Value::Integer(n) => Ok(Value::Integer(-n)),
                     Value::Float(f) => Ok(Value::Float(-f)),
-                    _ => Err("Unary minus only supported for numeric types".to_string()),
+                    _ => Err(RustqlError::Internal(
+                        "Unary minus only supported for numeric types".to_string(),
+                    )),
                 },
-                _ => Err("Unsupported unary operator in SELECT expression".to_string()),
+                _ => Err(RustqlError::Internal(
+                    "Unsupported unary operator in SELECT expression".to_string(),
+                )),
             }
         }
-        _ => Err("Complex expressions not yet supported in SELECT".to_string()),
+        _ => Err(RustqlError::Internal(
+            "Complex expressions not yet supported in SELECT".to_string(),
+        )),
     }
 }
 
-fn compare_values(left: &Value, op: &BinaryOperator, right: &Value) -> Result<bool, String> {
+fn compare_values(left: &Value, op: &BinaryOperator, right: &Value) -> Result<bool, RustqlError> {
     if matches!(left, Value::Null) || matches!(right, Value::Null) {
         return Ok(false);
     }
@@ -1978,14 +1994,22 @@ fn compare_values(left: &Value, op: &BinaryOperator, right: &Value) -> Result<bo
             BinaryOperator::LessThanOrEqual => l <= r,
             BinaryOperator::GreaterThan => l > r,
             BinaryOperator::GreaterThanOrEqual => l >= r,
-            _ => return Err("Invalid operator for numeric comparison".to_string()),
+            _ => {
+                return Err(RustqlError::TypeMismatch(
+                    "Invalid operator for numeric comparison".to_string(),
+                ));
+            }
         })
     } else {
         match (left, right, op) {
             (Value::Text(l), Value::Text(r), op) => Ok(match op {
                 BinaryOperator::Equal => l == r,
                 BinaryOperator::NotEqual => l != r,
-                _ => return Err("Invalid operator for strings".to_string()),
+                _ => {
+                    return Err(RustqlError::TypeMismatch(
+                        "Invalid operator for strings".to_string(),
+                    ));
+                }
             }),
             (Value::Date(l), Value::Date(r), op) => Ok(match op {
                 BinaryOperator::Equal => l == r,
@@ -1994,7 +2018,11 @@ fn compare_values(left: &Value, op: &BinaryOperator, right: &Value) -> Result<bo
                 BinaryOperator::LessThanOrEqual => l <= r,
                 BinaryOperator::GreaterThan => l > r,
                 BinaryOperator::GreaterThanOrEqual => l >= r,
-                _ => return Err("Invalid operator for dates".to_string()),
+                _ => {
+                    return Err(RustqlError::TypeMismatch(
+                        "Invalid operator for dates".to_string(),
+                    ));
+                }
             }),
             (Value::Time(l), Value::Time(r), op) => Ok(match op {
                 BinaryOperator::Equal => l == r,
@@ -2003,7 +2031,11 @@ fn compare_values(left: &Value, op: &BinaryOperator, right: &Value) -> Result<bo
                 BinaryOperator::LessThanOrEqual => l <= r,
                 BinaryOperator::GreaterThan => l > r,
                 BinaryOperator::GreaterThanOrEqual => l >= r,
-                _ => return Err("Invalid operator for times".to_string()),
+                _ => {
+                    return Err(RustqlError::TypeMismatch(
+                        "Invalid operator for times".to_string(),
+                    ));
+                }
             }),
             (Value::DateTime(l), Value::DateTime(r), op) => Ok(match op {
                 BinaryOperator::Equal => l == r,
@@ -2012,9 +2044,15 @@ fn compare_values(left: &Value, op: &BinaryOperator, right: &Value) -> Result<bo
                 BinaryOperator::LessThanOrEqual => l <= r,
                 BinaryOperator::GreaterThan => l > r,
                 BinaryOperator::GreaterThanOrEqual => l >= r,
-                _ => return Err("Invalid operator for datetimes".to_string()),
+                _ => {
+                    return Err(RustqlError::TypeMismatch(
+                        "Invalid operator for datetimes".to_string(),
+                    ));
+                }
             }),
-            _ => Err("Type mismatch in comparison".to_string()),
+            _ => Err(RustqlError::TypeMismatch(
+                "Type mismatch in comparison".to_string(),
+            )),
         }
     }
 }
@@ -2032,14 +2070,19 @@ pub fn format_value(value: &Value) -> String {
     }
 }
 
-fn eval_subquery_values(db: &Database, subquery: &SelectStatement) -> Result<Vec<Value>, String> {
+fn eval_subquery_values(
+    db: &Database,
+    subquery: &SelectStatement,
+) -> Result<Vec<Value>, RustqlError> {
     if subquery.columns.len() != 1 {
-        return Err("Subquery in IN must select exactly one column".to_string());
+        return Err(RustqlError::Internal(
+            "Subquery in IN must select exactly one column".to_string(),
+        ));
     }
     let table = db
         .tables
         .get(&subquery.from)
-        .ok_or_else(|| format!("Table '{}' does not exist", subquery.from))?;
+        .ok_or_else(|| RustqlError::TableNotFound(subquery.from.clone()))?;
 
     let mut filtered_rows: Vec<&Vec<Value>> = Vec::new();
 
@@ -2047,10 +2090,7 @@ fn eval_subquery_values(db: &Database, subquery: &SelectStatement) -> Result<Vec
         let candidate_indices: Option<HashSet<usize>> =
             if let Some(ref where_expr) = subquery.where_clause {
                 if let Some(index_usage) = find_index_usage(db, &subquery.from, where_expr) {
-                    match get_indexed_rows(db, table, &index_usage) {
-                        Ok(indices) => Some(indices),
-                        Err(_) => None,
-                    }
+                    get_indexed_rows(db, table, &index_usage).ok()
                 } else {
                     None
                 }
@@ -2094,8 +2134,12 @@ fn eval_subquery_values(db: &Database, subquery: &SelectStatement) -> Result<Vec
     }
 
     match &subquery.columns[0] {
-        Column::All => Err("Subquery in IN cannot use *".to_string()),
-        Column::Expression { .. } => Err("Subquery in IN cannot use expressions".to_string()),
+        Column::All => Err(RustqlError::Internal(
+            "Subquery in IN cannot use *".to_string(),
+        )),
+        Column::Expression { .. } => Err(RustqlError::Internal(
+            "Subquery in IN cannot use expressions".to_string(),
+        )),
         Column::Subquery(scalar_subquery) => {
             let mut values = Vec::with_capacity(filtered_rows.len());
             for row in &filtered_rows {
@@ -2128,10 +2172,10 @@ fn eval_subquery_values(db: &Database, subquery: &SelectStatement) -> Result<Vec
                 }
                 let mut values = Vec::with_capacity(groups.len());
                 for (_k, rows) in groups {
-                    if let Some(ref having_expr) = subquery.having {
-                        if !evaluate_having(having_expr, &subquery.columns, table, &rows)? {
-                            continue;
-                        }
+                    if let Some(ref having_expr) = subquery.having
+                        && !evaluate_having(having_expr, &subquery.columns, table, &rows)?
+                    {
+                        continue;
                     }
                     let v =
                         compute_aggregate(&agg.function, &agg.expr, table, &rows, agg.distinct)?;
@@ -2176,9 +2220,12 @@ fn eval_subquery_values(db: &Database, subquery: &SelectStatement) -> Result<Vec
                     .columns
                     .iter()
                     .position(|c| &c.name == name)
-                    .ok_or_else(|| format!("Column '{}' not found", name))?;
+                    .ok_or_else(|| RustqlError::ColumnNotFound(name.clone()))?;
                 if !group_by_indices.contains(&named_idx) {
-                    return Err(format!("Column '{}' must appear in GROUP BY clause", name));
+                    return Err(RustqlError::Internal(format!(
+                        "Column '{}' must appear in GROUP BY clause",
+                        name
+                    )));
                 }
                 let mut values = Vec::with_capacity(groups.len());
                 for (_k, rows) in groups {
@@ -2190,7 +2237,7 @@ fn eval_subquery_values(db: &Database, subquery: &SelectStatement) -> Result<Vec
                     .columns
                     .iter()
                     .position(|c| &c.name == name)
-                    .ok_or_else(|| format!("Column '{}' not found", name))?;
+                    .ok_or_else(|| RustqlError::ColumnNotFound(name.clone()))?;
                 let mut values = Vec::with_capacity(filtered_rows.len());
                 for row in filtered_rows {
                     values.push(row[idx].clone());
@@ -2206,7 +2253,7 @@ fn eval_subquery_exists_with_outer(
     subquery: &SelectStatement,
     outer_columns: &[ColumnDefinition],
     outer_row: &[Value],
-) -> Result<bool, String> {
+) -> Result<bool, RustqlError> {
     if !subquery.joins.is_empty() {
         return eval_subquery_exists_with_joins(db, subquery, outer_columns, outer_row);
     }
@@ -2214,7 +2261,7 @@ fn eval_subquery_exists_with_outer(
     let table = db
         .tables
         .get(&subquery.from)
-        .ok_or_else(|| format!("Table '{}' does not exist", subquery.from))?;
+        .ok_or_else(|| RustqlError::TableNotFound(subquery.from.clone()))?;
 
     let mut combined_columns: Vec<ColumnDefinition> = outer_columns.to_vec();
     combined_columns.extend(table.columns.clone());
@@ -2240,11 +2287,11 @@ fn eval_subquery_exists_with_joins(
     subquery: &SelectStatement,
     outer_columns: &[ColumnDefinition],
     outer_row: &[Value],
-) -> Result<bool, String> {
+) -> Result<bool, RustqlError> {
     let main_table = db
         .tables
         .get(&subquery.from)
-        .ok_or_else(|| format!("Table '{}' does not exist", subquery.from))?;
+        .ok_or_else(|| RustqlError::TableNotFound(subquery.from.clone()))?;
 
     let (joined_rows, all_subquery_columns) =
         perform_multiple_joins(db, main_table, &subquery.from, &subquery.joins)?;
@@ -2273,7 +2320,7 @@ fn perform_multiple_joins(
     from_table: &Table,
     from_table_name: &str,
     joins: &[Join],
-) -> Result<(Vec<Vec<Value>>, Vec<ColumnDefinition>), String> {
+) -> Result<(Vec<Vec<Value>>, Vec<ColumnDefinition>), RustqlError> {
     let mut current_rows: Vec<Vec<Value>> = from_table.rows.clone();
     let mut all_columns = from_table.columns.clone();
     let mut table_names = vec![from_table_name.to_string()];
@@ -2283,7 +2330,7 @@ fn perform_multiple_joins(
         let join_table = db
             .tables
             .get(&join.table)
-            .ok_or_else(|| format!("Table '{}' does not exist", join.table))?;
+            .ok_or_else(|| RustqlError::TableNotFound(join.table.clone()))?;
 
         let join_table_name = join.table.clone();
         table_names.push(join_table_name.clone());
@@ -2293,68 +2340,61 @@ fn perform_multiple_joins(
         let mut matched_pairs = HashSet::new();
 
         let check_join_match = |current_row: &Vec<Value>, join_row: &Vec<Value>| -> bool {
-            if let Expression::BinaryOp { left, op, right } = &join.on {
-                if *op == BinaryOperator::Equal {
-                    if let (Expression::Column(left_col), Expression::Column(right_col)) =
-                        (left.as_ref(), right.as_ref())
-                    {
-                        let get_col_idx = |col_name: &str| -> Option<usize> {
-                            if col_name.contains('.') {
-                                let parts: Vec<&str> = col_name.split('.').collect();
-                                if parts.len() == 2 {
-                                    let table_name = parts[0];
-                                    let col_name = parts[1];
-                                    if let Some(tbl_idx) =
-                                        table_names.iter().position(|n| n == table_name)
-                                    {
-                                        let mut col_offset = 0;
-                                        for (idx, &col_count) in
-                                            table_column_counts.iter().enumerate()
+            if let Expression::BinaryOp { left, op, right } = &join.on
+                && *op == BinaryOperator::Equal
+                && let (Expression::Column(left_col), Expression::Column(right_col)) =
+                    (left.as_ref(), right.as_ref())
+            {
+                let get_col_idx = |col_name: &str| -> Option<usize> {
+                    if col_name.contains('.') {
+                        let parts: Vec<&str> = col_name.split('.').collect();
+                        if parts.len() == 2 {
+                            let table_name = parts[0];
+                            let col_name = parts[1];
+                            if let Some(tbl_idx) = table_names.iter().position(|n| n == table_name)
+                            {
+                                let mut col_offset = 0;
+                                for (idx, &col_count) in table_column_counts.iter().enumerate() {
+                                    if idx == tbl_idx {
+                                        let table = if idx == 0 {
+                                            from_table
+                                        } else {
+                                            db.tables.get(&joins[idx - 1].table).unwrap()
+                                        };
+                                        if let Some(col_idx) =
+                                            table.columns.iter().position(|c| c.name == col_name)
                                         {
-                                            if idx == tbl_idx {
-                                                let table = if idx == 0 {
-                                                    from_table
-                                                } else {
-                                                    db.tables.get(&joins[idx - 1].table).unwrap()
-                                                };
-                                                if let Some(col_idx) = table
-                                                    .columns
-                                                    .iter()
-                                                    .position(|c| c.name == col_name)
-                                                {
-                                                    return Some(col_offset + col_idx);
-                                                }
-                                            }
-                                            col_offset += col_count;
+                                            return Some(col_offset + col_idx);
                                         }
                                     }
+                                    col_offset += col_count;
                                 }
                             }
-                            None
-                        };
-
-                        let left_col_idx = get_col_idx(left_col);
-                        let right_col_idx = get_col_idx(right_col);
-
-                        let left_val = left_col_idx.and_then(|idx| {
-                            if idx < current_row.len() {
-                                current_row.get(idx).cloned()
-                            } else {
-                                join_row.get(idx - current_row.len()).cloned()
-                            }
-                        });
-                        let right_val = right_col_idx.and_then(|idx| {
-                            if idx < current_row.len() {
-                                current_row.get(idx).cloned()
-                            } else {
-                                join_row.get(idx - current_row.len()).cloned()
-                            }
-                        });
-
-                        if let (Some(lv), Some(rv)) = (left_val, right_val) {
-                            return lv == rv;
                         }
                     }
+                    None
+                };
+
+                let left_col_idx = get_col_idx(left_col);
+                let right_col_idx = get_col_idx(right_col);
+
+                let left_val = left_col_idx.and_then(|idx| {
+                    if idx < current_row.len() {
+                        current_row.get(idx).cloned()
+                    } else {
+                        join_row.get(idx - current_row.len()).cloned()
+                    }
+                });
+                let right_val = right_col_idx.and_then(|idx| {
+                    if idx < current_row.len() {
+                        current_row.get(idx).cloned()
+                    } else {
+                        join_row.get(idx - current_row.len()).cloned()
+                    }
+                });
+
+                if let (Some(lv), Some(rv)) = (left_val, right_val) {
+                    return lv == rv;
                 }
             }
             false
@@ -2418,16 +2458,18 @@ fn eval_scalar_subquery_with_outer(
     subquery: &SelectStatement,
     outer_columns: &[ColumnDefinition],
     outer_row: &[Value],
-) -> Result<Value, String> {
+) -> Result<Value, RustqlError> {
     if subquery.columns.len() != 1 {
-        return Err("Scalar subquery must select exactly one column".to_string());
+        return Err(RustqlError::Internal(
+            "Scalar subquery must select exactly one column".to_string(),
+        ));
     }
 
     if !subquery.joins.is_empty() {
         let main_table = db
             .tables
             .get(&subquery.from)
-            .ok_or_else(|| format!("Table '{}' does not exist", subquery.from))?;
+            .ok_or_else(|| RustqlError::TableNotFound(subquery.from.clone()))?;
 
         let (joined_rows, all_subquery_columns) =
             perform_multiple_joins(db, main_table, &subquery.from, &subquery.joins)?;
@@ -2448,7 +2490,7 @@ fn eval_scalar_subquery_with_outer(
             }
         }
 
-        let apply_order_and_slice = |rows: &mut Vec<Vec<Value>>| -> Result<(), String> {
+        let apply_order_and_slice = |rows: &mut Vec<Vec<Value>>| -> Result<(), RustqlError> {
             if let Some(order_by) = &subquery.order_by {
                 rows.sort_by(|a, b| {
                     for ob in order_by {
@@ -2482,8 +2524,12 @@ fn eval_scalar_subquery_with_outer(
         apply_order_and_slice(&mut candidate_rows)?;
 
         return match &subquery.columns[0] {
-            Column::All => Err("Scalar subquery cannot use *".to_string()),
-            Column::Expression { .. } => Err("Scalar subquery cannot use expressions".to_string()),
+            Column::All => Err(RustqlError::Internal(
+                "Scalar subquery cannot use *".to_string(),
+            )),
+            Column::Expression { .. } => Err(RustqlError::Internal(
+                "Scalar subquery cannot use expressions".to_string(),
+            )),
             Column::Named { name, .. } => {
                 let col_idx = combined_columns
                     .iter()
@@ -2495,13 +2541,15 @@ fn eval_scalar_subquery_with_outer(
                                 name
                             })
                     })
-                    .ok_or_else(|| format!("Column '{}' not found", name))?;
+                    .ok_or_else(|| RustqlError::ColumnNotFound(name.clone()))?;
                 if candidate_rows.is_empty() {
                     Ok(Value::Null)
                 } else if candidate_rows.len() == 1 {
                     Ok(candidate_rows[0][col_idx].clone())
                 } else {
-                    Err("Scalar subquery returned more than one row".to_string())
+                    Err(RustqlError::Internal(
+                        "Scalar subquery returned more than one row".to_string(),
+                    ))
                 }
             }
             Column::Subquery(nested) => {
@@ -2520,7 +2568,9 @@ fn eval_scalar_subquery_with_outer(
                 } else if results.len() == 1 {
                     Ok(results[0].clone())
                 } else {
-                    Err("Scalar subquery returned more than one row".to_string())
+                    Err(RustqlError::Internal(
+                        "Scalar subquery returned more than one row".to_string(),
+                    ))
                 }
             }
             Column::Function(agg) => {
@@ -2552,12 +2602,12 @@ fn eval_scalar_subquery_with_outer(
     let table = db
         .tables
         .get(&subquery.from)
-        .ok_or_else(|| format!("Table '{}' does not exist", subquery.from))?;
+        .ok_or_else(|| RustqlError::TableNotFound(subquery.from.clone()))?;
 
     let mut combined_columns: Vec<ColumnDefinition> = outer_columns.to_vec();
     combined_columns.extend(table.columns.clone());
 
-    let apply_order_and_slice = |rows: &mut Vec<Vec<Value>>| -> Result<(), String> {
+    let apply_order_and_slice = |rows: &mut Vec<Vec<Value>>| -> Result<(), RustqlError> {
         if let Some(order_by) = &subquery.order_by {
             rows.sort_by(|a, b| {
                 for ob in order_by {
@@ -2645,7 +2695,9 @@ fn eval_scalar_subquery_with_outer(
         match results.len() {
             0 => Ok(Value::Null),
             1 => Ok(results[0].clone()),
-            _ => Err("Scalar subquery returned more than one row".to_string()),
+            _ => Err(RustqlError::Internal(
+                "Scalar subquery returned more than one row".to_string(),
+            )),
         }
     } else {
         let mut candidate_rows: Vec<Vec<Value>> = Vec::new();
@@ -2668,15 +2720,25 @@ fn eval_scalar_subquery_with_outer(
         let mut results = Vec::new();
         for combined_row in &candidate_rows {
             let val = match &subquery.columns[0] {
-                Column::All => return Err("Scalar subquery cannot use *".to_string()),
+                Column::All => {
+                    return Err(RustqlError::Internal(
+                        "Scalar subquery cannot use *".to_string(),
+                    ));
+                }
                 Column::Expression { .. } => {
-                    return Err("Scalar subquery cannot use expressions".to_string());
+                    return Err(RustqlError::Internal(
+                        "Scalar subquery cannot use expressions".to_string(),
+                    ));
                 }
                 Column::Function(_) => {
-                    return Err("Scalar subquery cannot use aggregate functions".to_string());
+                    return Err(RustqlError::Internal(
+                        "Scalar subquery cannot use aggregate functions".to_string(),
+                    ));
                 }
                 Column::Subquery(_) => {
-                    return Err("Scalar subquery cannot use nested subqueries".to_string());
+                    return Err(RustqlError::Internal(
+                        "Scalar subquery cannot use nested subqueries".to_string(),
+                    ));
                 }
                 Column::Named { name, .. } => {
                     let col_idx = combined_columns
@@ -2689,7 +2751,7 @@ fn eval_scalar_subquery_with_outer(
                                     name
                                 })
                         })
-                        .ok_or_else(|| format!("Column '{}' not found", name))?;
+                        .ok_or_else(|| RustqlError::ColumnNotFound(name.clone()))?;
                     combined_row[col_idx].clone()
                 }
             };
@@ -2699,7 +2761,9 @@ fn eval_scalar_subquery_with_outer(
         match results.len() {
             0 => Ok(Value::Null),
             1 => Ok(results[0].clone()),
-            _ => Err("Scalar subquery returned more than one row".to_string()),
+            _ => Err(RustqlError::Internal(
+                "Scalar subquery returned more than one row".to_string(),
+            )),
         }
     }
 }
@@ -2748,11 +2812,11 @@ fn compare_values_for_sort(left: &Value, right: &Value) -> Ordering {
     }
 }
 
-fn execute_select_with_joins(stmt: SelectStatement, db: &Database) -> Result<String, String> {
+fn execute_select_with_joins(stmt: SelectStatement, db: &Database) -> Result<String, RustqlError> {
     let main_table = db
         .tables
         .get(&stmt.from)
-        .ok_or_else(|| format!("Table '{}' does not exist", stmt.from))?;
+        .ok_or_else(|| RustqlError::TableNotFound(stmt.from.clone()))?;
 
     let (joined_rows, all_columns) =
         perform_multiple_joins(db, main_table, &stmt.from, &stmt.joins)?;
@@ -2828,16 +2892,16 @@ fn execute_select_with_joins(stmt: SelectStatement, db: &Database) -> Result<Str
                         let idx = all_columns
                             .iter()
                             .position(|c| c.name == target_name)
-                            .ok_or_else(|| format!("Column '{}' not found", name))?;
+                            .ok_or_else(|| RustqlError::ColumnNotFound(name.clone()))?;
                         let header = alias.clone().unwrap_or_else(|| name.clone());
                         specs.push((header, idx));
                     }
-                    _ => return Err("Invalid column type".to_string()),
+                    _ => return Err(RustqlError::TypeMismatch("Invalid column type".to_string())),
                 }
             }
             specs
         }
-        _ => return Err("Invalid column type".to_string()),
+        _ => return Err(RustqlError::TypeMismatch("Invalid column type".to_string())),
     };
 
     let mut result = String::new();
@@ -2880,17 +2944,20 @@ fn execute_select_with_joins(stmt: SelectStatement, db: &Database) -> Result<Str
     Ok(result)
 }
 
-fn execute_alter_table(stmt: AlterTableStatement) -> Result<String, String> {
+fn execute_alter_table(stmt: AlterTableStatement) -> Result<String, RustqlError> {
     let mut db = get_database_write();
     let table = db
         .tables
         .get_mut(&stmt.table)
-        .ok_or_else(|| format!("Table '{}' does not exist", stmt.table))?;
+        .ok_or_else(|| RustqlError::TableNotFound(stmt.table.clone()))?;
 
     match stmt.operation {
         AlterOperation::AddColumn(col_def) => {
             if table.columns.iter().any(|c| c.name == col_def.name) {
-                return Err(format!("Column '{}' already exists", col_def.name));
+                return Err(RustqlError::Internal(format!(
+                    "Column '{}' already exists",
+                    col_def.name
+                )));
             }
             table.columns.push(col_def.clone());
             let default_value = match col_def.data_type {
@@ -2905,6 +2972,10 @@ fn execute_alter_table(stmt: AlterTableStatement) -> Result<String, String> {
             for row in &mut table.rows {
                 row.push(default_value.clone());
             }
+            wal::record_wal_entry(WalEntry::AlterAddColumn {
+                table: stmt.table.clone(),
+                column_name: col_def.name.clone(),
+            });
             save_if_not_in_transaction(&db)?;
             Ok(format!(
                 "Column '{}' added to table '{}'",
@@ -2917,12 +2988,19 @@ fn execute_alter_table(stmt: AlterTableStatement) -> Result<String, String> {
                 .iter()
                 .position(|c| c.name == col_name)
                 .ok_or_else(|| format!("Column '{}' does not exist", col_name))?;
-            table.columns.remove(col_index);
+            let removed_col = table.columns.remove(col_index);
+            let mut removed_values = Vec::new();
             for row in &mut table.rows {
                 if col_index < row.len() {
-                    row.remove(col_index);
+                    removed_values.push(row.remove(col_index));
                 }
             }
+            wal::record_wal_entry(WalEntry::AlterDropColumn {
+                table: stmt.table.clone(),
+                col_index,
+                column: removed_col,
+                values: removed_values,
+            });
             save_if_not_in_transaction(&db)?;
             Ok(format!(
                 "Column '{}' dropped from table '{}'",
@@ -2932,10 +3010,13 @@ fn execute_alter_table(stmt: AlterTableStatement) -> Result<String, String> {
         AlterOperation::RenameColumn { old, new } => {
             let col_exists = table.columns.iter().any(|c| c.name == old);
             if !col_exists {
-                return Err(format!("Column '{}' does not exist", old));
+                return Err(RustqlError::ColumnNotFound(old.clone()));
             }
             if table.columns.iter().any(|c| c.name == new && c.name != old) {
-                return Err(format!("Column '{}' already exists", new));
+                return Err(RustqlError::Internal(format!(
+                    "Column '{}' already exists",
+                    new
+                )));
             }
             for column in &mut table.columns {
                 if column.name == old {
@@ -2943,6 +3024,11 @@ fn execute_alter_table(stmt: AlterTableStatement) -> Result<String, String> {
                     break;
                 }
             }
+            wal::record_wal_entry(WalEntry::AlterRenameColumn {
+                table: stmt.table.clone(),
+                old_name: old.clone(),
+                new_name: new.clone(),
+            });
             save_if_not_in_transaction(&db)?;
             Ok(format!(
                 "Column '{}' renamed to '{}' in table '{}'",
@@ -2955,15 +3041,16 @@ fn execute_alter_table(stmt: AlterTableStatement) -> Result<String, String> {
 fn validate_not_null_constraints(
     columns: &[ColumnDefinition],
     row: &[Value],
-) -> Result<(), String> {
+) -> Result<(), RustqlError> {
     for (col_idx, col_def) in columns.iter().enumerate() {
-        if !col_def.nullable && col_idx < row.len() {
-            if matches!(row[col_idx], Value::Null) {
-                return Err(format!(
+        if !col_def.nullable && col_idx < row.len() && matches!(row[col_idx], Value::Null) {
+            return Err(RustqlError::ConstraintViolation {
+                kind: ConstraintKind::NotNull,
+                message: format!(
                     "NOT NULL constraint violation: Column '{}' cannot be NULL",
                     col_def.name
-                ));
-            }
+                ),
+            });
         }
     }
     Ok(())
@@ -2974,29 +3061,35 @@ fn validate_primary_keys_for_insert(
     columns: &[ColumnDefinition],
     row: &[Value],
     table_name: &str,
-) -> Result<(), String> {
+) -> Result<(), RustqlError> {
     for (col_idx, col_def) in columns.iter().enumerate() {
         if col_def.primary_key {
             let pk_value = &row[col_idx];
 
             if matches!(pk_value, Value::Null) {
-                return Err(format!(
-                    "Primary key constraint violation: Column '{}' cannot be NULL",
-                    col_def.name
-                ));
+                return Err(RustqlError::ConstraintViolation {
+                    kind: ConstraintKind::PrimaryKey,
+                    message: format!(
+                        "Primary key constraint violation: Column '{}' cannot be NULL",
+                        col_def.name
+                    ),
+                });
             }
 
             let table = db
                 .tables
                 .get(table_name)
-                .ok_or_else(|| format!("Table '{}' does not exist", table_name))?;
+                .ok_or_else(|| RustqlError::TableNotFound(table_name.to_string()))?;
 
             for existing_row in &table.rows {
                 if existing_row[col_idx] == *pk_value {
-                    return Err(format!(
-                        "Primary key constraint violation: Duplicate value for column '{}'",
-                        col_def.name
-                    ));
+                    return Err(RustqlError::ConstraintViolation {
+                        kind: ConstraintKind::PrimaryKey,
+                        message: format!(
+                            "Primary key constraint violation: Duplicate value for column '{}'",
+                            col_def.name
+                        ),
+                    });
                 }
             }
         }
@@ -3010,7 +3103,7 @@ fn validate_unique_constraints_for_insert(
     row: &[Value],
     table_name: &str,
     exclude_row_idx: Option<usize>,
-) -> Result<(), String> {
+) -> Result<(), RustqlError> {
     for (col_idx, col_def) in columns.iter().enumerate() {
         if col_def.unique {
             let unique_value = &row[col_idx];
@@ -3023,20 +3116,22 @@ fn validate_unique_constraints_for_insert(
             let table = db
                 .tables
                 .get(table_name)
-                .ok_or_else(|| format!("Table '{}' does not exist", table_name))?;
+                .ok_or_else(|| RustqlError::TableNotFound(table_name.to_string()))?;
 
             for (row_idx, existing_row) in table.rows.iter().enumerate() {
-                // Skip the row being updated if this is an update operation
-                if let Some(exclude_idx) = exclude_row_idx {
-                    if row_idx == exclude_idx {
-                        continue;
-                    }
+                if let Some(exclude_idx) = exclude_row_idx
+                    && row_idx == exclude_idx
+                {
+                    continue;
                 }
                 if existing_row[col_idx] == *unique_value {
-                    return Err(format!(
-                        "Unique constraint violation: Duplicate value for column '{}'",
-                        col_def.name
-                    ));
+                    return Err(RustqlError::ConstraintViolation {
+                        kind: ConstraintKind::Unique,
+                        message: format!(
+                            "Unique constraint violation: Duplicate value for column '{}'",
+                            col_def.name
+                        ),
+                    });
                 }
             }
         }
@@ -3048,7 +3143,7 @@ fn validate_foreign_keys_for_insert(
     db: &Database,
     columns: &[ColumnDefinition],
     row: &[Value],
-) -> Result<(), String> {
+) -> Result<(), RustqlError> {
     for (col_idx, col_def) in columns.iter().enumerate() {
         if let Some(ref fk) = col_def.foreign_key {
             let fk_value = &row[col_idx];
@@ -3083,10 +3178,13 @@ fn validate_foreign_keys_for_insert(
             });
 
             if !value_exists {
-                return Err(format!(
-                    "Foreign key constraint violation: Value {:?} does not exist in referenced table '{}'.{}",
-                    fk_value, fk.referenced_table, fk.referenced_column
-                ));
+                return Err(RustqlError::ConstraintViolation {
+                    kind: ConstraintKind::ForeignKey,
+                    message: format!(
+                        "Foreign key constraint violation: Value {:?} does not exist in referenced table '{}'.{}",
+                        fk_value, fk.referenced_table, fk.referenced_column
+                    ),
+                });
             }
         }
     }
@@ -3097,7 +3195,7 @@ fn validate_foreign_keys_for_update(
     db: &Database,
     columns: &[ColumnDefinition],
     row: &[Value],
-) -> Result<(), String> {
+) -> Result<(), RustqlError> {
     validate_foreign_keys_for_insert(db, columns, row)
 }
 
@@ -3106,16 +3204,17 @@ fn handle_foreign_keys_for_delete(
     table_name: &str,
     columns: &[ColumnDefinition],
     row_to_delete: &[Value],
-) -> Result<(), String> {
+) -> Result<(), RustqlError> {
     for (other_table_name, other_table) in db.tables.iter_mut() {
         if other_table_name == table_name {
             continue;
         }
 
         for (col_idx, col_def) in other_table.columns.iter().enumerate() {
-            if let Some(ref fk) = col_def.foreign_key {
-                if fk.referenced_table == table_name {
-                    let ref_col_idx = columns
+            if let Some(ref fk) = col_def.foreign_key
+                && fk.referenced_table == table_name
+            {
+                let ref_col_idx = columns
                         .iter()
                         .position(|c| c.name == fk.referenced_column)
                         .ok_or_else(|| {
@@ -3125,40 +3224,53 @@ fn handle_foreign_keys_for_delete(
                             )
                         })?;
 
-                    let ref_value = &row_to_delete[ref_col_idx];
+                let ref_value = &row_to_delete[ref_col_idx];
 
-                    let mut rows_to_modify: Vec<usize> = Vec::new();
-                    for (row_idx, other_row) in other_table.rows.iter().enumerate() {
-                        if other_row
-                            .get(col_idx)
-                            .map(|v| v == ref_value)
-                            .unwrap_or(false)
-                        {
-                            rows_to_modify.push(row_idx);
-                        }
+                let mut rows_to_modify: Vec<usize> = Vec::new();
+                for (row_idx, other_row) in other_table.rows.iter().enumerate() {
+                    if other_row
+                        .get(col_idx)
+                        .map(|v| v == ref_value)
+                        .unwrap_or(false)
+                    {
+                        rows_to_modify.push(row_idx);
                     }
+                }
 
-                    match fk.on_delete {
-                        ForeignKeyAction::Restrict | ForeignKeyAction::NoAction => {
-                            if !rows_to_modify.is_empty() {
-                                return Err(format!(
+                match fk.on_delete {
+                    ForeignKeyAction::Restrict | ForeignKeyAction::NoAction => {
+                        if !rows_to_modify.is_empty() {
+                            return Err(RustqlError::ConstraintViolation {
+                                kind: ConstraintKind::ForeignKey,
+                                message: format!(
                                     "Foreign key constraint violation: Cannot delete row from '{}' because it is referenced by '{}'",
                                     table_name, other_table_name
-                                ));
-                            }
+                                ),
+                            });
                         }
-                        ForeignKeyAction::Cascade => {
-                            rows_to_modify.sort();
-                            rows_to_modify.reverse();
-                            for row_idx in rows_to_modify {
-                                other_table.rows.remove(row_idx);
-                            }
+                    }
+                    ForeignKeyAction::Cascade => {
+                        rows_to_modify.sort();
+                        rows_to_modify.reverse();
+                        for row_idx in &rows_to_modify {
+                            let old_row = other_table.rows[*row_idx].clone();
+                            wal::record_wal_entry(WalEntry::DeleteRow {
+                                table: other_table_name.clone(),
+                                row_index: *row_idx,
+                                old_row,
+                            });
+                            other_table.rows.remove(*row_idx);
                         }
-                        ForeignKeyAction::SetNull => {
-                            for row_idx in rows_to_modify {
-                                if let Some(row) = other_table.rows.get_mut(row_idx) {
-                                    row[col_idx] = Value::Null;
-                                }
+                    }
+                    ForeignKeyAction::SetNull => {
+                        for row_idx in rows_to_modify {
+                            if let Some(row) = other_table.rows.get_mut(row_idx) {
+                                wal::record_wal_entry(WalEntry::UpdateRow {
+                                    table: other_table_name.clone(),
+                                    row_index: row_idx,
+                                    old_row: row.clone(),
+                                });
+                                row[col_idx] = Value::Null;
                             }
                         }
                     }
@@ -3169,17 +3281,20 @@ fn handle_foreign_keys_for_delete(
     Ok(())
 }
 
-fn execute_create_index(stmt: CreateIndexStatement) -> Result<String, String> {
+fn execute_create_index(stmt: CreateIndexStatement) -> Result<String, RustqlError> {
     let mut db = get_database_write();
 
     if db.indexes.contains_key(&stmt.name) {
-        return Err(format!("Index '{}' already exists", stmt.name));
+        return Err(RustqlError::IndexError(format!(
+            "Index '{}' already exists",
+            stmt.name
+        )));
     }
 
     let table = db
         .tables
         .get(&stmt.table)
-        .ok_or_else(|| format!("Table '{}' does not exist", stmt.table))?;
+        .ok_or_else(|| RustqlError::TableNotFound(stmt.table.clone()))?;
 
     let col_idx = table
         .columns
@@ -3201,14 +3316,13 @@ fn execute_create_index(stmt: CreateIndexStatement) -> Result<String, String> {
 
     for (row_idx, row) in table.rows.iter().enumerate() {
         let value = row.get(col_idx).cloned().unwrap_or(Value::Null);
-        index
-            .entries
-            .entry(value)
-            .or_insert_with(Vec::new)
-            .push(row_idx);
+        index.entries.entry(value).or_default().push(row_idx);
     }
 
     db.indexes.insert(stmt.name.clone(), index);
+    wal::record_wal_entry(WalEntry::CreateIndex {
+        name: stmt.name.clone(),
+    });
     save_if_not_in_transaction(&db)?;
     Ok(format!(
         "Index '{}' created on {}.{}",
@@ -3216,13 +3330,20 @@ fn execute_create_index(stmt: CreateIndexStatement) -> Result<String, String> {
     ))
 }
 
-fn execute_drop_index(stmt: DropIndexStatement) -> Result<String, String> {
+fn execute_drop_index(stmt: DropIndexStatement) -> Result<String, RustqlError> {
     let mut db = get_database_write();
-    if db.indexes.remove(&stmt.name).is_some() {
+    if let Some(removed) = db.indexes.remove(&stmt.name) {
+        wal::record_wal_entry(WalEntry::DropIndex {
+            name: stmt.name.clone(),
+            index: removed,
+        });
         save_if_not_in_transaction(&db)?;
         Ok(format!("Index '{}' dropped", stmt.name))
     } else {
-        Err(format!("Index '{}' does not exist", stmt.name))
+        Err(RustqlError::IndexError(format!(
+            "Index '{}' does not exist",
+            stmt.name
+        )))
     }
 }
 
@@ -3231,13 +3352,13 @@ fn update_indexes_on_insert(
     table_name: &str,
     row_idx: usize,
     row: &[Value],
-) -> Result<(), String> {
+) -> Result<(), RustqlError> {
     for index in db.indexes.values_mut() {
         if index.table == table_name {
             let table = db
                 .tables
                 .get(table_name)
-                .ok_or_else(|| format!("Table '{}' does not exist", table_name))?;
+                .ok_or_else(|| RustqlError::TableNotFound(table_name.to_string()))?;
 
             let col_idx = table
                 .columns
@@ -3246,11 +3367,7 @@ fn update_indexes_on_insert(
                 .ok_or_else(|| format!("Column '{}' not found", index.column))?;
 
             let value = row.get(col_idx).cloned().unwrap_or(Value::Null);
-            index
-                .entries
-                .entry(value)
-                .or_insert_with(Vec::new)
-                .push(row_idx);
+            index.entries.entry(value).or_default().push(row_idx);
         }
     }
     Ok(())
@@ -3260,7 +3377,7 @@ fn update_indexes_on_delete(
     db: &mut Database,
     table_name: &str,
     deleted_row_indices: &[usize],
-) -> Result<(), String> {
+) -> Result<(), RustqlError> {
     for index in db.indexes.values_mut() {
         if index.table == table_name {
             for entry in index.entries.values_mut() {
@@ -3284,13 +3401,13 @@ fn update_indexes_on_update(
     row_idx: usize,
     old_row: &[Value],
     new_row: &[Value],
-) -> Result<(), String> {
+) -> Result<(), RustqlError> {
     for index in db.indexes.values_mut() {
         if index.table == table_name {
             let table = db
                 .tables
                 .get(table_name)
-                .ok_or_else(|| format!("Table '{}' does not exist", table_name))?;
+                .ok_or_else(|| RustqlError::TableNotFound(table_name.to_string()))?;
 
             let col_idx = table
                 .columns
@@ -3309,11 +3426,7 @@ fn update_indexes_on_update(
                     }
                 }
 
-                index
-                    .entries
-                    .entry(new_value)
-                    .or_insert_with(Vec::new)
-                    .push(row_idx);
+                index.entries.entry(new_value).or_default().push(row_idx);
             }
         }
     }
@@ -3352,95 +3465,82 @@ fn find_index_usage(db: &Database, table_name: &str, expr: &Expression) -> Optio
         Expression::BinaryOp { left, op, right } => match op {
             BinaryOperator::Equal => {
                 if let (Expression::Column(col_name), Expression::Value(val)) = (&**left, &**right)
+                    && let Some(index) = find_index_for_column(db, table_name, col_name)
                 {
-                    if let Some(index) = find_index_for_column(db, table_name, col_name) {
-                        return Some(IndexUsage::Equality {
-                            index_name: index.name.clone(),
-                            value: val.clone(),
-                        });
-                    }
+                    return Some(IndexUsage::Equality {
+                        index_name: index.name.clone(),
+                        value: val.clone(),
+                    });
                 } else if let (Expression::Value(val), Expression::Column(col_name)) =
                     (&**left, &**right)
+                    && let Some(index) = find_index_for_column(db, table_name, col_name)
                 {
-                    if let Some(index) = find_index_for_column(db, table_name, col_name) {
-                        return Some(IndexUsage::Equality {
-                            index_name: index.name.clone(),
-                            value: val.clone(),
-                        });
-                    }
+                    return Some(IndexUsage::Equality {
+                        index_name: index.name.clone(),
+                        value: val.clone(),
+                    });
                 }
             }
             BinaryOperator::GreaterThan => {
                 if let (Expression::Column(col_name), Expression::Value(val)) = (&**left, &**right)
+                    && let Some(index) = find_index_for_column(db, table_name, col_name)
                 {
-                    if let Some(index) = find_index_for_column(db, table_name, col_name) {
-                        return Some(IndexUsage::RangeGreater {
-                            index_name: index.name.clone(),
-                            value: val.clone(),
-                            inclusive: false,
-                        });
-                    }
+                    return Some(IndexUsage::RangeGreater {
+                        index_name: index.name.clone(),
+                        value: val.clone(),
+                        inclusive: false,
+                    });
                 }
             }
             BinaryOperator::GreaterThanOrEqual => {
                 if let (Expression::Column(col_name), Expression::Value(val)) = (&**left, &**right)
+                    && let Some(index) = find_index_for_column(db, table_name, col_name)
                 {
-                    if let Some(index) = find_index_for_column(db, table_name, col_name) {
-                        return Some(IndexUsage::RangeGreater {
-                            index_name: index.name.clone(),
-                            value: val.clone(),
-                            inclusive: true,
-                        });
-                    }
+                    return Some(IndexUsage::RangeGreater {
+                        index_name: index.name.clone(),
+                        value: val.clone(),
+                        inclusive: true,
+                    });
                 }
             }
             BinaryOperator::LessThan => {
                 if let (Expression::Column(col_name), Expression::Value(val)) = (&**left, &**right)
+                    && let Some(index) = find_index_for_column(db, table_name, col_name)
                 {
-                    if let Some(index) = find_index_for_column(db, table_name, col_name) {
-                        return Some(IndexUsage::RangeLess {
-                            index_name: index.name.clone(),
-                            value: val.clone(),
-                            inclusive: false,
-                        });
-                    }
+                    return Some(IndexUsage::RangeLess {
+                        index_name: index.name.clone(),
+                        value: val.clone(),
+                        inclusive: false,
+                    });
                 }
             }
             BinaryOperator::LessThanOrEqual => {
                 if let (Expression::Column(col_name), Expression::Value(val)) = (&**left, &**right)
+                    && let Some(index) = find_index_for_column(db, table_name, col_name)
                 {
-                    if let Some(index) = find_index_for_column(db, table_name, col_name) {
-                        return Some(IndexUsage::RangeLess {
-                            index_name: index.name.clone(),
-                            value: val.clone(),
-                            inclusive: true,
-                        });
-                    }
+                    return Some(IndexUsage::RangeLess {
+                        index_name: index.name.clone(),
+                        value: val.clone(),
+                        inclusive: true,
+                    });
                 }
             }
             BinaryOperator::Between => {
-                if let Expression::Column(col_name) = &**left {
-                    if let Expression::BinaryOp {
+                if let Expression::Column(col_name) = &**left
+                    && let Expression::BinaryOp {
                         left: lb,
                         op: lb_op,
                         right: rb,
                     } = &**right
-                    {
-                        if *lb_op == BinaryOperator::And {
-                            if let (Expression::Value(lower), Expression::Value(upper)) =
-                                (&**lb, &**rb)
-                            {
-                                if let Some(index) = find_index_for_column(db, table_name, col_name)
-                                {
-                                    return Some(IndexUsage::RangeBetween {
-                                        index_name: index.name.clone(),
-                                        lower: lower.clone(),
-                                        upper: upper.clone(),
-                                    });
-                                }
-                            }
-                        }
-                    }
+                    && *lb_op == BinaryOperator::And
+                    && let (Expression::Value(lower), Expression::Value(upper)) = (&**lb, &**rb)
+                    && let Some(index) = find_index_for_column(db, table_name, col_name)
+                {
+                    return Some(IndexUsage::RangeBetween {
+                        index_name: index.name.clone(),
+                        lower: lower.clone(),
+                        upper: upper.clone(),
+                    });
                 }
             }
             BinaryOperator::And => {
@@ -3454,13 +3554,13 @@ fn find_index_usage(db: &Database, table_name: &str, expr: &Expression) -> Optio
             _ => {}
         },
         Expression::In { left, values } => {
-            if let Expression::Column(col_name) = &**left {
-                if let Some(index) = find_index_for_column(db, table_name, col_name) {
-                    return Some(IndexUsage::In {
-                        index_name: index.name.clone(),
-                        values: values.clone(),
-                    });
-                }
+            if let Expression::Column(col_name) = &**left
+                && let Some(index) = find_index_for_column(db, table_name, col_name)
+            {
+                return Some(IndexUsage::In {
+                    index_name: index.name.clone(),
+                    values: values.clone(),
+                });
             }
         }
         Expression::UnaryOp {
@@ -3494,7 +3594,7 @@ fn get_indexed_rows(
     db: &Database,
     table: &Table,
     usage: &IndexUsage,
-) -> Result<HashSet<usize>, String> {
+) -> Result<HashSet<usize>, RustqlError> {
     let index = db
         .indexes
         .get(match usage {
@@ -3504,7 +3604,7 @@ fn get_indexed_rows(
             IndexUsage::RangeLess { index_name, .. } => index_name,
             IndexUsage::RangeBetween { index_name, .. } => index_name,
         })
-        .ok_or_else(|| format!("Index not found"))?;
+        .ok_or_else(|| "Index not found".to_string())?;
 
     let mut row_indices = HashSet::new();
 

@@ -1,5 +1,6 @@
 use crate::ast::*;
 use crate::database::Database;
+use crate::error::RustqlError;
 use crate::planner::PlanNode;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashSet};
@@ -23,7 +24,7 @@ impl<'a> PlanExecutor<'a> {
         &self,
         plan: &PlanNode,
         select_stmt: &SelectStatement,
-    ) -> Result<ExecutionResult, String> {
+    ) -> Result<ExecutionResult, RustqlError> {
         let result = self.execute_plan_node(plan)?;
 
         let projected = self.apply_projection(&result, select_stmt)?;
@@ -36,7 +37,7 @@ impl<'a> PlanExecutor<'a> {
         Ok(distincted)
     }
 
-    fn execute_plan_node(&self, plan: &PlanNode) -> Result<ExecutionResult, String> {
+    fn execute_plan_node(&self, plan: &PlanNode) -> Result<ExecutionResult, RustqlError> {
         match plan {
             PlanNode::SeqScan { table, filter, .. } => {
                 self.execute_seq_scan(table, filter.as_ref())
@@ -105,7 +106,7 @@ impl<'a> PlanExecutor<'a> {
         &self,
         table_name: &str,
         filter: Option<&Expression>,
-    ) -> Result<ExecutionResult, String> {
+    ) -> Result<ExecutionResult, RustqlError> {
         let table = self
             .db
             .tables
@@ -136,7 +137,7 @@ impl<'a> PlanExecutor<'a> {
         table_name: &str,
         index_name: &str,
         filter: Option<&Expression>,
-    ) -> Result<ExecutionResult, String> {
+    ) -> Result<ExecutionResult, RustqlError> {
         let table = self
             .db
             .tables
@@ -203,7 +204,7 @@ impl<'a> PlanExecutor<'a> {
         &self,
         input: ExecutionResult,
         condition: &Expression,
-    ) -> Result<ExecutionResult, String> {
+    ) -> Result<ExecutionResult, RustqlError> {
         let mut filtered_rows = Vec::new();
 
         for row in &input.rows {
@@ -238,7 +239,7 @@ impl<'a> PlanExecutor<'a> {
         left: ExecutionResult,
         right: ExecutionResult,
         condition: &Expression,
-    ) -> Result<ExecutionResult, String> {
+    ) -> Result<ExecutionResult, RustqlError> {
         let mut joined_rows = Vec::new();
         let mut joined_columns = left.columns.clone();
         joined_columns.extend(right.columns.iter().map(|c| format!("{}.{}", "right", c)));
@@ -268,7 +269,7 @@ impl<'a> PlanExecutor<'a> {
         left: ExecutionResult,
         right: ExecutionResult,
         condition: &Expression,
-    ) -> Result<ExecutionResult, String> {
+    ) -> Result<ExecutionResult, RustqlError> {
         let (build, probe, build_cols, probe_cols) = if left.rows.len() <= right.rows.len() {
             (&left, &right, &left.columns, &right.columns)
         } else {
@@ -316,7 +317,7 @@ impl<'a> PlanExecutor<'a> {
         &self,
         input: ExecutionResult,
         order_by: &[OrderByExpr],
-    ) -> Result<ExecutionResult, String> {
+    ) -> Result<ExecutionResult, RustqlError> {
         let mut rows = input.rows;
 
         rows.sort_by(|a, b| {
@@ -346,7 +347,7 @@ impl<'a> PlanExecutor<'a> {
         input: ExecutionResult,
         limit: usize,
         offset: usize,
-    ) -> Result<ExecutionResult, String> {
+    ) -> Result<ExecutionResult, RustqlError> {
         let mut rows = input.rows;
 
         if offset < rows.len() {
@@ -371,7 +372,7 @@ impl<'a> PlanExecutor<'a> {
         group_by: &[String],
         aggregates: &[AggregateFunction],
         having: Option<&Expression>,
-    ) -> Result<ExecutionResult, String> {
+    ) -> Result<ExecutionResult, RustqlError> {
         let group_by_indices: Vec<usize> = group_by
             .iter()
             .filter_map(|col| input.columns.iter().position(|c| c == col))
@@ -459,7 +460,7 @@ impl<'a> PlanExecutor<'a> {
         expr: &Expression,
         columns: &[ColumnDefinition],
         row: &[Value],
-    ) -> Result<bool, String> {
+    ) -> Result<bool, RustqlError> {
         match expr {
             Expression::BinaryOp { left, op, right } => match op {
                 BinaryOperator::And => Ok(self.evaluate_expression(left, columns, row)?
@@ -473,7 +474,9 @@ impl<'a> PlanExecutor<'a> {
                         (Value::Text(text), Value::Text(pattern)) => {
                             Ok(self.match_like(&text, &pattern))
                         }
-                        _ => Err("LIKE operator requires text values".to_string()),
+                        _ => Err(RustqlError::TypeMismatch(
+                            "LIKE operator requires text values".to_string(),
+                        )),
                     }
                 }
                 BinaryOperator::Between => {
@@ -488,7 +491,9 @@ impl<'a> PlanExecutor<'a> {
                             let upper = self.evaluate_value_expression(rb, columns, row)?;
                             Ok(self.is_between(&left_val, &lower, &upper))
                         }
-                        _ => Err("BETWEEN requires two values".to_string()),
+                        _ => Err(RustqlError::TypeMismatch(
+                            "BETWEEN requires two values".to_string(),
+                        )),
                     }
                 }
                 BinaryOperator::In => {
@@ -518,9 +523,13 @@ impl<'a> PlanExecutor<'a> {
             }
             Expression::UnaryOp { op, expr } => match op {
                 UnaryOperator::Not => Ok(!self.evaluate_expression(expr, columns, row)?),
-                _ => Err("Unsupported unary operation in WHERE clause".to_string()),
+                _ => Err(RustqlError::Internal(
+                    "Unsupported unary operation in WHERE clause".to_string(),
+                )),
             },
-            _ => Err("Invalid expression in WHERE clause".to_string()),
+            _ => Err(RustqlError::Internal(
+                "Invalid expression in WHERE clause".to_string(),
+            )),
         }
     }
 
@@ -529,7 +538,7 @@ impl<'a> PlanExecutor<'a> {
         expr: &Expression,
         columns: &[ColumnDefinition],
         row: &[Value],
-    ) -> Result<Value, String> {
+    ) -> Result<Value, RustqlError> {
         match expr {
             Expression::Column(name) => {
                 if name == "*" {
@@ -543,7 +552,7 @@ impl<'a> PlanExecutor<'a> {
                 let idx = columns
                     .iter()
                     .position(|c| c.name == col_name)
-                    .ok_or_else(|| format!("Column '{}' not found", name))?;
+                    .ok_or_else(|| RustqlError::ColumnNotFound(name.to_string()))?;
                 Ok(row.get(idx).cloned().unwrap_or(Value::Null))
             }
             Expression::Value(val) => Ok(val.clone()),
@@ -555,9 +564,9 @@ impl<'a> PlanExecutor<'a> {
                     | BinaryOperator::Minus
                     | BinaryOperator::Multiply
                     | BinaryOperator::Divide => self.apply_arithmetic(&left_val, &right_val, op),
-                    _ => Err(
+                    _ => Err(RustqlError::Internal(
                         "Only arithmetic operators are supported in SELECT expressions".to_string(),
-                    ),
+                    )),
                 }
             }
             Expression::UnaryOp { op, expr } => {
@@ -566,12 +575,18 @@ impl<'a> PlanExecutor<'a> {
                     UnaryOperator::Minus => match val {
                         Value::Integer(n) => Ok(Value::Integer(-n)),
                         Value::Float(f) => Ok(Value::Float(-f)),
-                        _ => Err("Unary minus only supported for numeric types".to_string()),
+                        _ => Err(RustqlError::Internal(
+                            "Unary minus only supported for numeric types".to_string(),
+                        )),
                     },
-                    _ => Err("Unsupported unary operator in SELECT expression".to_string()),
+                    _ => Err(RustqlError::Internal(
+                        "Unsupported unary operator in SELECT expression".to_string(),
+                    )),
                 }
             }
-            _ => Err("Complex expressions not yet supported in SELECT".to_string()),
+            _ => Err(RustqlError::Internal(
+                "Complex expressions not yet supported in SELECT".to_string(),
+            )),
         }
     }
 
@@ -580,13 +595,15 @@ impl<'a> PlanExecutor<'a> {
         left: &Value,
         right: &Value,
         op: &BinaryOperator,
-    ) -> Result<Value, String> {
-        let to_float = |value: &Value| -> Result<f64, String> {
+    ) -> Result<Value, RustqlError> {
+        let to_float = |value: &Value| -> Result<f64, RustqlError> {
             match value {
                 Value::Integer(i) => Ok(*i as f64),
                 Value::Float(f) => Ok(*f),
                 Value::Null => Ok(0.0),
-                _ => Err("Arithmetic requires numeric values".to_string()),
+                _ => Err(RustqlError::TypeMismatch(
+                    "Arithmetic requires numeric values".to_string(),
+                )),
             }
         };
 
@@ -597,7 +614,7 @@ impl<'a> PlanExecutor<'a> {
                 BinaryOperator::Multiply => Ok(Value::Integer(l * r)),
                 BinaryOperator::Divide => {
                     if *r == 0 {
-                        Err("Division by zero".to_string())
+                        Err(RustqlError::DivisionByZero)
                     } else if l % r == 0 {
                         Ok(Value::Integer(l / r))
                     } else {
@@ -615,7 +632,7 @@ impl<'a> PlanExecutor<'a> {
                     BinaryOperator::Multiply => Ok(Value::Float(l * r)),
                     BinaryOperator::Divide => {
                         if r.abs() < f64::EPSILON {
-                            Err("Division by zero".to_string())
+                            Err(RustqlError::DivisionByZero)
                         } else {
                             Ok(Value::Float(l / r))
                         }
@@ -631,7 +648,7 @@ impl<'a> PlanExecutor<'a> {
         left: &Value,
         op: &BinaryOperator,
         right: &Value,
-    ) -> Result<bool, String> {
+    ) -> Result<bool, RustqlError> {
         if matches!(left, Value::Null) || matches!(right, Value::Null) {
             return Ok(false);
         }
@@ -651,7 +668,11 @@ impl<'a> PlanExecutor<'a> {
                 BinaryOperator::LessThanOrEqual => l <= r,
                 BinaryOperator::GreaterThan => l > r,
                 BinaryOperator::GreaterThanOrEqual => l >= r,
-                _ => return Err("Invalid operator for numeric comparison".to_string()),
+                _ => {
+                    return Err(RustqlError::TypeMismatch(
+                        "Invalid operator for numeric comparison".to_string(),
+                    ));
+                }
             })
         } else {
             match (left, right, op) {
@@ -662,12 +683,20 @@ impl<'a> PlanExecutor<'a> {
                     BinaryOperator::LessThanOrEqual => l <= r,
                     BinaryOperator::GreaterThan => l > r,
                     BinaryOperator::GreaterThanOrEqual => l >= r,
-                    _ => return Err("Invalid operator for strings".to_string()),
+                    _ => {
+                        return Err(RustqlError::TypeMismatch(
+                            "Invalid operator for strings".to_string(),
+                        ));
+                    }
                 }),
                 (Value::Boolean(l), Value::Boolean(r), op) => Ok(match op {
                     BinaryOperator::Equal => l == r,
                     BinaryOperator::NotEqual => l != r,
-                    _ => return Err("Invalid operator for booleans".to_string()),
+                    _ => {
+                        return Err(RustqlError::TypeMismatch(
+                            "Invalid operator for booleans".to_string(),
+                        ));
+                    }
                 }),
                 (Value::Date(l), Value::Date(r), op) => Ok(match op {
                     BinaryOperator::Equal => l == r,
@@ -676,7 +705,11 @@ impl<'a> PlanExecutor<'a> {
                     BinaryOperator::LessThanOrEqual => l <= r,
                     BinaryOperator::GreaterThan => l > r,
                     BinaryOperator::GreaterThanOrEqual => l >= r,
-                    _ => return Err("Invalid operator for dates".to_string()),
+                    _ => {
+                        return Err(RustqlError::TypeMismatch(
+                            "Invalid operator for dates".to_string(),
+                        ));
+                    }
                 }),
                 (Value::Time(l), Value::Time(r), op) => Ok(match op {
                     BinaryOperator::Equal => l == r,
@@ -685,7 +718,11 @@ impl<'a> PlanExecutor<'a> {
                     BinaryOperator::LessThanOrEqual => l <= r,
                     BinaryOperator::GreaterThan => l > r,
                     BinaryOperator::GreaterThanOrEqual => l >= r,
-                    _ => return Err("Invalid operator for times".to_string()),
+                    _ => {
+                        return Err(RustqlError::TypeMismatch(
+                            "Invalid operator for times".to_string(),
+                        ));
+                    }
                 }),
                 (Value::DateTime(l), Value::DateTime(r), op) => Ok(match op {
                     BinaryOperator::Equal => l == r,
@@ -694,9 +731,15 @@ impl<'a> PlanExecutor<'a> {
                     BinaryOperator::LessThanOrEqual => l <= r,
                     BinaryOperator::GreaterThan => l > r,
                     BinaryOperator::GreaterThanOrEqual => l >= r,
-                    _ => return Err("Invalid operator for datetimes".to_string()),
+                    _ => {
+                        return Err(RustqlError::TypeMismatch(
+                            "Invalid operator for datetimes".to_string(),
+                        ));
+                    }
                 }),
-                _ => Err("Cannot compare incompatible types".to_string()),
+                _ => Err(RustqlError::TypeMismatch(
+                    "Cannot compare incompatible types".to_string(),
+                )),
             }
         }
     }
@@ -776,14 +819,11 @@ impl<'a> PlanExecutor<'a> {
             op: BinaryOperator::Equal,
             right,
         } = expr
+            && let Expression::Column(col) = left.as_ref()
+            && (col.ends_with(column) || col == column)
+            && let Expression::Value(v) = right.as_ref()
         {
-            if let Expression::Column(col) = left.as_ref() {
-                if col.ends_with(column) || col == column {
-                    if let Expression::Value(v) = right.as_ref() {
-                        return Some(v.clone());
-                    }
-                }
-            }
+            return Some(v.clone());
         }
         None
     }
@@ -795,7 +835,7 @@ impl<'a> PlanExecutor<'a> {
         right: &ExecutionResult,
         left_row: &[Value],
         right_row: &[Value],
-    ) -> Result<bool, String> {
+    ) -> Result<bool, RustqlError> {
         let mut combined_columns: Vec<ColumnDefinition> = left
             .columns
             .iter()
@@ -829,29 +869,29 @@ impl<'a> PlanExecutor<'a> {
         condition: &Expression,
         build_cols: &[String],
         probe_cols: &[String],
-    ) -> Result<(usize, usize), String> {
+    ) -> Result<(usize, usize), RustqlError> {
         if let Expression::BinaryOp {
             left,
             op: BinaryOperator::Equal,
             right,
         } = condition
-        {
-            if let (Expression::Column(left_col), Expression::Column(right_col)) =
+            && let (Expression::Column(left_col), Expression::Column(right_col)) =
                 (left.as_ref(), right.as_ref())
-            {
-                let build_idx = build_cols
-                    .iter()
-                    .position(|c| c.ends_with(left_col.split('.').last().unwrap_or(left_col)));
-                let probe_idx = probe_cols
-                    .iter()
-                    .position(|c| c.ends_with(right_col.split('.').last().unwrap_or(right_col)));
+        {
+            let build_idx = build_cols
+                .iter()
+                .position(|c| c.ends_with(left_col.split('.').next_back().unwrap_or(left_col)));
+            let probe_idx = probe_cols
+                .iter()
+                .position(|c| c.ends_with(right_col.split('.').next_back().unwrap_or(right_col)));
 
-                if let (Some(bi), Some(pi)) = (build_idx, probe_idx) {
-                    return Ok((bi, pi));
-                }
+            if let (Some(bi), Some(pi)) = (build_idx, probe_idx) {
+                return Ok((bi, pi));
             }
         }
-        Err("Could not extract join keys from condition".to_string())
+        Err(RustqlError::Internal(
+            "Could not extract join keys from condition".to_string(),
+        ))
     }
 
     fn get_sort_value(
@@ -861,7 +901,7 @@ impl<'a> PlanExecutor<'a> {
         row: &[Value],
     ) -> Option<Value> {
         if let Expression::Column(col) = expr {
-            let col_name = col.split('.').last().unwrap_or(col);
+            let col_name = col.split('.').next_back().unwrap_or(col);
             if let Some(idx) = columns
                 .iter()
                 .position(|c| c == col_name || c.ends_with(col_name))
@@ -887,7 +927,7 @@ impl<'a> PlanExecutor<'a> {
         agg: &AggregateFunction,
         rows: &[Vec<Value>],
         columns: &[String],
-    ) -> Result<Value, String> {
+    ) -> Result<Value, RustqlError> {
         use std::collections::BTreeSet;
 
         let column_defs: Vec<ColumnDefinition> = columns
@@ -903,7 +943,7 @@ impl<'a> PlanExecutor<'a> {
             })
             .collect();
 
-        let eval_expr_for_row = |row: &Vec<Value>| -> Result<Value, String> {
+        let eval_expr_for_row = |row: &Vec<Value>| -> Result<Value, RustqlError> {
             self.evaluate_value_expression(&agg.expr, &column_defs, row)
         };
 
@@ -911,13 +951,15 @@ impl<'a> PlanExecutor<'a> {
 
         match agg.function {
             AggregateFunctionType::Count => {
-                if let Expression::Column(name) = agg.expr.as_ref() {
-                    if name == "*" {
-                        if agg.distinct {
-                            return Err("COUNT(DISTINCT *) is not supported".to_string());
-                        }
-                        return Ok(Value::Integer(rows.len() as i64));
+                if let Expression::Column(name) = agg.expr.as_ref()
+                    && name == "*"
+                {
+                    if agg.distinct {
+                        return Err(RustqlError::AggregateError(
+                            "COUNT(DISTINCT *) is not supported".to_string(),
+                        ));
                     }
+                    return Ok(Value::Integer(rows.len() as i64));
                 }
 
                 let mut count = 0i64;
@@ -954,7 +996,11 @@ impl<'a> PlanExecutor<'a> {
                             sum += f;
                             has_value = true;
                         }
-                        _ => return Err("SUM requires numeric values".to_string()),
+                        _ => {
+                            return Err(RustqlError::AggregateError(
+                                "SUM requires numeric values".to_string(),
+                            ));
+                        }
                     }
                 }
 
@@ -985,7 +1031,11 @@ impl<'a> PlanExecutor<'a> {
                             sum += f;
                             count += 1;
                         }
-                        _ => return Err("AVG requires numeric values".to_string()),
+                        _ => {
+                            return Err(RustqlError::AggregateError(
+                                "AVG requires numeric values".to_string(),
+                            ));
+                        }
                     }
                 }
 
@@ -1055,7 +1105,7 @@ impl<'a> PlanExecutor<'a> {
         result_row: &[Value],
         input_columns: &[ColumnDefinition],
         group_rows: &[Vec<Value>],
-    ) -> Result<bool, String> {
+    ) -> Result<bool, RustqlError> {
         match expr {
             Expression::BinaryOp { left, op, right } => match op {
                 BinaryOperator::And => Ok(self.evaluate_having(
@@ -1121,9 +1171,13 @@ impl<'a> PlanExecutor<'a> {
                     input_columns,
                     group_rows,
                 )?),
-                _ => Err("Unsupported unary operation in HAVING clause".to_string()),
+                _ => Err(RustqlError::Internal(
+                    "Unsupported unary operation in HAVING clause".to_string(),
+                )),
             },
-            _ => Err("Invalid expression in HAVING clause".to_string()),
+            _ => Err(RustqlError::Internal(
+                "Invalid expression in HAVING clause".to_string(),
+            )),
         }
     }
 
@@ -1134,10 +1188,10 @@ impl<'a> PlanExecutor<'a> {
         result_row: &[Value],
         input_columns: &[ColumnDefinition],
         group_rows: &[Vec<Value>],
-    ) -> Result<Value, String> {
+    ) -> Result<Value, RustqlError> {
         match expr {
             Expression::Function(agg) => {
-                let group_rows_vec: Vec<Vec<Value>> = group_rows.iter().cloned().collect();
+                let group_rows_vec: Vec<Vec<Value>> = group_rows.to_vec();
 
                 let col_names: Vec<String> = input_columns.iter().map(|c| c.name.clone()).collect();
                 self.compute_aggregate(agg, &group_rows_vec, &col_names)
@@ -1182,12 +1236,14 @@ impl<'a> PlanExecutor<'a> {
                     | BinaryOperator::Minus
                     | BinaryOperator::Multiply
                     | BinaryOperator::Divide => self.apply_arithmetic(&left_val, &right_val, op),
-                    _ => Err(
+                    _ => Err(RustqlError::Internal(
                         "Only arithmetic operators are supported in HAVING expressions".to_string(),
-                    ),
+                    )),
                 }
             }
-            _ => Err("Complex expressions not yet supported in HAVING".to_string()),
+            _ => Err(RustqlError::Internal(
+                "Complex expressions not yet supported in HAVING".to_string(),
+            )),
         }
     }
 
@@ -1195,7 +1251,7 @@ impl<'a> PlanExecutor<'a> {
         &self,
         result: &ExecutionResult,
         select_stmt: &SelectStatement,
-    ) -> Result<ExecutionResult, String> {
+    ) -> Result<ExecutionResult, RustqlError> {
         let column_defs: Vec<ColumnDefinition> = result
             .columns
             .iter()
@@ -1211,7 +1267,7 @@ impl<'a> PlanExecutor<'a> {
             .collect();
 
         let column_specs: Vec<(String, Column)> =
-            if matches!(select_stmt.columns.get(0), Some(Column::All)) {
+            if matches!(select_stmt.columns.first(), Some(Column::All)) {
                 result
                     .columns
                     .iter()
@@ -1275,22 +1331,22 @@ impl<'a> PlanExecutor<'a> {
                                 };
                                 c_name == column_name || c.ends_with(column_name)
                             })
-                            .ok_or_else(|| format!("Column '{}' not found", name))?;
+                            .ok_or_else(|| RustqlError::ColumnNotFound(name.to_string()))?;
                         row.get(idx).cloned().unwrap_or(Value::Null)
                     }
                     Column::Expression { expr, .. } => {
                         self.evaluate_value_expression(expr, &column_defs, row)?
                     }
                     Column::Function(_) => {
-                        return Err(
-                            "Aggregate functions should be handled before projection".to_string()
-                        );
+                        return Err(RustqlError::Internal(
+                            "Aggregate functions should be handled before projection".to_string(),
+                        ));
                     }
                     Column::Subquery(_) => {
-                        return Err(
+                        return Err(RustqlError::Internal(
                             "Subqueries in SELECT list not yet supported in plan executor"
                                 .to_string(),
-                        );
+                        ));
                     }
                 };
                 projected_row.push(val);
@@ -1307,7 +1363,7 @@ impl<'a> PlanExecutor<'a> {
         })
     }
 
-    fn apply_distinct(&self, input: ExecutionResult) -> Result<ExecutionResult, String> {
+    fn apply_distinct(&self, input: ExecutionResult) -> Result<ExecutionResult, RustqlError> {
         use std::collections::BTreeSet;
         let mut seen = BTreeSet::new();
         let mut unique_rows = Vec::new();
