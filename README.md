@@ -1,555 +1,121 @@
 # RustQL
 
-A lightweight SQL database engine written in Rust. RustQL is an educational implementation of a SQL database with support for DDL, DML, and basic query features.
+A SQL database engine written in Rust with an interactive REPL. RustQL supports a broad subset of SQL including DDL, DML, joins, subqueries, aggregates, transactions, indexing, and cost-based query optimization, backed by pluggable storage engines.
 
 ## Features
 
-### ✅ Implemented Features
+**DDL**
+- `CREATE TABLE` / `DROP TABLE`
+- `ALTER TABLE` &mdash; `ADD COLUMN`, `DROP COLUMN`, `RENAME COLUMN`
+- `CREATE INDEX` / `DROP INDEX`
 
-- **Data Definition Language (DDL)**
-  - `CREATE TABLE` - Create tables with column definitions
-  - `DROP TABLE` - Delete tables
-  - `ALTER TABLE` - Add, drop, and rename columns
-  - **NOT NULL Constraints** - Enforce non-nullable columns
-  - **PRIMARY KEY Constraints** - Enforce unique, non-null primary keys
-  - **UNIQUE Constraints** - Enforce unique values (allows NULL values)
-  - **DEFAULT Values** - Set default values for columns
-  - **Foreign Key Constraints** - Enforce referential integrity with ON DELETE and ON UPDATE actions
-  - **Indexes** - Create and drop indexes on table columns for improved query performance
-  - `DESCRIBE table_name` - Show table schema
-  - `SHOW TABLES` - List all tables in the database
+**DML**
+- `SELECT`, `INSERT`, `UPDATE`, `DELETE`
 
-- **Data Manipulation Language (DML)**
-  - `INSERT` - Insert single or multiple rows
-  - `UPDATE` - Update rows with WHERE clause
-  - `DELETE` - Delete rows with WHERE clause
-  - `SELECT` - Query data with various clauses
+**Queries**
+- `INNER` / `LEFT` / `RIGHT` / `FULL` JOIN
+- Scalar subqueries, `IN` subqueries, `EXISTS` / `NOT EXISTS`
+- Aggregates: `COUNT`, `SUM`, `AVG`, `MIN`, `MAX` (with `DISTINCT`)
+- `GROUP BY` / `HAVING`
+- `ORDER BY` (ASC / DESC)
+- `LIMIT` / `OFFSET`
+- `UNION` / `UNION ALL`
+- `DISTINCT`
 
-- **SELECT Features**
-  - Column selection (SELECT *)
-  - **Arithmetic Expressions**: `SELECT price * quantity AS total FROM products` - Perform calculations in SELECT (+, -, *, /)
-  - **SELECT DISTINCT**: `SELECT DISTINCT column FROM table` - Remove duplicate rows
-  - WHERE clause with comparison operators (=, !=, <, <=, >, >=)
-  - Logical operators (AND, OR, NOT)
-  - **IN operator**: `WHERE column IN (value1, value2, ...)`
-  - **LIKE operator**: `WHERE column LIKE 'pattern'` (supports % and _ wildcards)
-  - **BETWEEN operator**: `WHERE column BETWEEN value1 AND value2`
-  - **IS NULL / IS NOT NULL**: `WHERE column IS NULL` or `WHERE column IS NOT NULL`
-  - ORDER BY (ASC/DESC)
-  - LIMIT and OFFSET
-  - Aggregate functions: COUNT, SUM, AVG, MIN, MAX (with DISTINCT support: `COUNT(DISTINCT column)`)
-  - GROUP BY with HAVING clause
-  - **JOIN operations** (INNER, LEFT, RIGHT, FULL) - All join types now supported!
-  - **UNION / UNION ALL** - Combine results from multiple SELECT statements
-  - **Subqueries**: 
-    - `IN (SELECT single_column FROM table [WHERE ...])` - Subquery in WHERE clause
-    - `WHERE EXISTS (SELECT ...)` - EXISTS subquery (supports correlated subqueries)
-    - `WHERE NOT EXISTS (SELECT ...)` - NOT EXISTS subquery
-    - `SELECT ..., (SELECT ...) FROM ...` - Scalar subqueries in SELECT clause (correlated subqueries supported)
+**WHERE operators**
+- Comparison: `=`, `<>`, `<`, `>`, `<=`, `>=`
+- Logical: `AND`, `OR`, `NOT`
+- `IN`, `LIKE`, `BETWEEN`, `IS NULL` / `IS NOT NULL`
 
-- **Data Types**
-  - INTEGER
-  - FLOAT
-  - TEXT
-  - BOOLEAN
-  - DATE
-  - TIME
-  - DATETIME
+**Arithmetic**
+- `+`, `-`, `*`, `/`
 
-- **Storage**
-  - Persistent JSON-based storage
-  - Automatic database state management
+**Constraints**
+- `PRIMARY KEY`, `UNIQUE`, `NOT NULL`, `DEFAULT`
+- `FOREIGN KEY` with `ON DELETE` actions (`RESTRICT`, `CASCADE`, `SET NULL`, `NO ACTION`)
 
-- **Transactions**
-  - `BEGIN TRANSACTION` - Start a new transaction
-  - `COMMIT TRANSACTION` - Commit all changes in the current transaction
-  - `ROLLBACK TRANSACTION` - Rollback all changes in the current transaction
+**Transactions**
+- `BEGIN` / `COMMIT` / `ROLLBACK` with write-ahead log (WAL)
 
-## Installation
+**Other**
+- `EXPLAIN` &mdash; display query execution plan
+- `DESCRIBE` *table* &mdash; show table schema
+- `SHOW TABLES`
+- Backtick-quoted identifiers
+- Cost-based query planner with index scan and predicate pushdown
 
-```bash
-# Clone the repository
-git clone https://github.com/your-username/rustql.git
-cd rustql
+## Quick start
 
-# Build the project
+```sh
 cargo build --release
-
-# Run the interactive SQL shell
-./target/release/rustql
-
-# Or run tests
-cargo test
+cargo run --release
 ```
 
-## Usage
+An interactive REPL session:
 
-### Interactive SQL Shell
+```
+rustql> CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL, email TEXT UNIQUE);
+Table created: users
 
-```bash
-cargo run
+rustql> INSERT INTO users VALUES (1, 'Alice', 'alice@example.com'), (2, 'Bob', 'bob@example.com');
+Inserted 2 row(s)
 
-# Or run the release binary
-./target/release/rustql
+rustql> SELECT * FROM users WHERE name LIKE 'A%';
+id | name | email
+---+------+-----------------
+1  | Alice | alice@example.com
+
+rustql> exit
 ```
 
-### From Command Line
+You can also pipe queries through stdin:
 
-```bash
-echo "SELECT * FROM users" | ./target/release/rustql
+```sh
+echo "SHOW TABLES" | cargo run --release
 ```
 
-## Examples
+## Storage backends
 
-### Creating Tables
+| Backend | File | Activation |
+|---------|------|------------|
+| JSON (default) | `rustql_data.json` | default |
+| B-tree | `rustql_btree.dat` | `RUSTQL_STORAGE=btree` |
 
-```sql
--- Basic table creation
-CREATE TABLE users (
-    id INTEGER,
-    name TEXT,
-    age INTEGER,
-    email TEXT
-);
+The **JSON** backend serializes the entire database to a single JSON file on every write. It is human-readable and simple to debug.
 
--- With NOT NULL constraints
-CREATE TABLE users (
-    id INTEGER NOT NULL,
-    name TEXT NOT NULL,
-    age INTEGER,
-    email TEXT
-);
+The **B-tree** backend stores data in a page-based binary format (4 KB pages) with an LRU page cache, making it more efficient for larger datasets.
 
--- With primary key (automatically NOT NULL)
-CREATE TABLE users (
-    id INTEGER PRIMARY KEY,
-    name TEXT NOT NULL,
-    age INTEGER
-);
-
--- With DEFAULT values
-CREATE TABLE users (
-    id INTEGER,
-    name TEXT DEFAULT 'Unknown',
-    age INTEGER DEFAULT 0,
-    email TEXT
-);
-
--- With primary key and DEFAULT values
-CREATE TABLE users (
-    id INTEGER PRIMARY KEY,
-    name TEXT DEFAULT 'User',
-    age INTEGER DEFAULT 0
-);
-
--- With UNIQUE constraint
-CREATE TABLE users (
-    id INTEGER,
-    email TEXT UNIQUE,
-    name TEXT
-);
-
--- With UNIQUE and NOT NULL
-CREATE TABLE users (
-    id INTEGER,
-    email TEXT UNIQUE NOT NULL,
-    name TEXT
-);
-
--- With foreign keys
-CREATE TABLE orders (
-    id INTEGER,
-    user_id INTEGER,
-    product TEXT,
-    amount FLOAT
-);
+```sh
+RUSTQL_STORAGE=btree cargo run --release
 ```
 
-### Inserting Data
+## Project structure
 
-```sql
-INSERT INTO users VALUES (1, 'Alice', 25, 'alice@example.com');
-INSERT INTO users VALUES (2, 'Bob', 30, 'bob@example.com'), (3, 'Charlie', 35, 'charlie@example.com');
-
--- Insert with column names (columns not specified will use DEFAULT values)
-INSERT INTO users (id, name) VALUES (4, 'David');
--- If age has DEFAULT 0, David will have age = 0
-
--- Insert with DEFAULT values
-INSERT INTO users (id) VALUES (5);
--- If name has DEFAULT 'Unknown' and age has DEFAULT 0, this will insert (5, 'Unknown', 0)
-
--- UNIQUE constraint examples
-INSERT INTO users VALUES (1, 'alice@example.com', 'Alice');
-INSERT INTO users VALUES (2, 'bob@example.com', 'Bob');
--- This will fail: INSERT INTO users VALUES (3, 'alice@example.com', 'Charlie');
--- UNIQUE allows multiple NULL values
-INSERT INTO users VALUES (4, NULL, 'David');
-INSERT INTO users VALUES (5, NULL, 'Eve');  -- This is allowed
-```
-
-### Querying Data
-
-```sql
--- Simple select
-SELECT * FROM users;
-SELECT name, email FROM users;
-
--- With WHERE clause
-SELECT * FROM users WHERE age > 30;
-SELECT * FROM users WHERE age > 25 AND age < 35;
-SELECT * FROM users WHERE name = 'Alice' OR name = 'Bob';
-
--- With IN operator
-SELECT * FROM users WHERE age IN (25, 30, 35);
-
--- With LIKE operator
-SELECT * FROM users WHERE email LIKE '%@gmail.com';
-SELECT * FROM products WHERE name LIKE 'Laptop%';
-
--- With BETWEEN operator
-SELECT * FROM employees WHERE salary BETWEEN 50000 AND 100000;
-SELECT * FROM products WHERE price BETWEEN 10.99 AND 29.99;
-
--- With NOT (inverts conditions)
-SELECT * FROM users WHERE NOT (age IN (25, 30));
-SELECT * FROM products WHERE NOT (name LIKE '%old%');
-SELECT * FROM employees WHERE NOT (salary BETWEEN 40000 AND 60000);
-
--- With IS NULL / IS NOT NULL
-SELECT * FROM users WHERE email IS NULL;
-SELECT * FROM products WHERE description IS NOT NULL;
-SELECT * FROM employees WHERE name IS NULL AND salary IS NOT NULL;
-
--- Ordering
-SELECT * FROM users ORDER BY age ASC;
-SELECT * FROM users ORDER BY name DESC;
-
--- Limit and Offset
-SELECT * FROM users LIMIT 5;
-SELECT * FROM users OFFSET 2 LIMIT 3;
-
--- SELECT DISTINCT
-SELECT DISTINCT age FROM users;
-SELECT DISTINCT name, email FROM users;
-
--- Arithmetic expressions in SELECT
-SELECT id, price * quantity AS total FROM products;
-SELECT id, price - discount AS final_price FROM products;
-SELECT id, price / quantity AS unit_price FROM products;
-SELECT id, price + tax AS total_cost FROM products;
-```
-
-### Aggregate Functions
-
-```sql
-SELECT COUNT(*) FROM users;
-SELECT AVG(age) FROM users;
-SELECT MIN(age) FROM users;
-SELECT MAX(age) FROM users;
-SELECT SUM(amount) FROM orders;
-
--- With DISTINCT
-SELECT COUNT(DISTINCT age) FROM users;
-SELECT SUM(DISTINCT amount) FROM orders;
-SELECT AVG(DISTINCT score) FROM grades;
-SELECT MIN(DISTINCT price) FROM products;
-SELECT MAX(DISTINCT salary) FROM employees;
-```
-
-### GROUP BY
-
-```sql
--- Group by department
-SELECT department, COUNT(*) FROM employees GROUP BY department;
-
--- With HAVING
-SELECT department, AVG(salary) FROM employees 
-GROUP BY department 
-HAVING AVG(salary) > 60000;
-```
-
-### JOIN Operations
-
-```sql
--- INNER JOIN
-SELECT users.name, orders.product 
-FROM users 
-JOIN orders ON users.id = orders.user_id;
-
--- LEFT JOIN
-SELECT users.name, orders.product 
-FROM users 
-LEFT JOIN orders ON users.id = orders.user_id;
-
--- With WHERE clause
-SELECT users.name, orders.amount 
-FROM users 
-JOIN orders ON users.id = orders.user_id 
-WHERE orders.amount > 100;
-```
-
-### UNION Operations
-
-```sql
--- UNION (removes duplicates)
-SELECT name FROM users WHERE age < 30
-UNION
-SELECT name FROM users WHERE age > 50;
-
--- UNION ALL (keeps duplicates)
-SELECT name FROM users WHERE age < 30
-UNION ALL
-SELECT name FROM users WHERE age > 50;
-```
-
-### Subqueries
-
-```sql
--- EXISTS subquery
-SELECT * FROM users 
-WHERE EXISTS (SELECT * FROM orders WHERE orders.user_id = users.id);
-
--- NOT EXISTS subquery
-SELECT * FROM users 
-WHERE NOT EXISTS (SELECT * FROM orders WHERE orders.user_id = users.id);
-
--- Correlated EXISTS subquery
-SELECT * FROM users 
-WHERE EXISTS (
-    SELECT * FROM orders 
-    WHERE orders.user_id = users.id 
-    AND orders.amount > 100
-);
-
--- IN with subquery
-SELECT * FROM users 
-WHERE id IN (SELECT user_id FROM orders WHERE amount > 100);
-
--- Scalar subquery in SELECT clause
-SELECT name, (SELECT amount FROM orders WHERE orders.user_id = users.id) AS order_amount
-FROM users;
-```
-
-### Updating Data
-
-```sql
-UPDATE users SET age = 26 WHERE name = 'Alice';
-UPDATE users SET email = 'newemail@example.com' WHERE id = 1;
-```
-
-### Deleting Data
-
-```sql
-DELETE FROM users WHERE age < 18;
-DELETE FROM users WHERE name = 'Charlie';
-```
-
-### Transactions
-
-```sql
--- Begin a transaction
-BEGIN TRANSACTION;
-
--- Perform multiple operations
-INSERT INTO users VALUES (1, 'Alice', 25);
-INSERT INTO users VALUES (2, 'Bob', 30);
-UPDATE users SET age = 26 WHERE name = 'Alice';
-
--- Commit all changes
-COMMIT TRANSACTION;
-
--- Or rollback to discard changes
-BEGIN TRANSACTION;
-INSERT INTO users VALUES (3, 'Charlie', 35);
-DELETE FROM users WHERE name = 'Bob';
-ROLLBACK TRANSACTION;
-```
-
-### Foreign Key Constraints
-
-```sql
-CREATE TABLE orders (
-    id INTEGER,
-    user_id INTEGER FOREIGN KEY REFERENCES users(id)
-);
-
-CREATE TABLE order_items (
-    id INTEGER,
-    order_id INTEGER FOREIGN KEY REFERENCES orders(id) ON DELETE CASCADE
-);
-
-CREATE TABLE payments (
-    id INTEGER,
-    order_id INTEGER FOREIGN KEY REFERENCES orders(id) ON DELETE RESTRICT
-);
-
-CREATE TABLE comments (
-    id INTEGER,
-    post_id INTEGER FOREIGN KEY REFERENCES posts(id) ON DELETE SET NULL
-);
-
-CREATE TABLE order_history (
-    id INTEGER,
-    order_id INTEGER FOREIGN KEY REFERENCES orders(id) ON UPDATE CASCADE
-);
-```
-
-### Altering Tables
-
-```sql
-ALTER TABLE users ADD COLUMN city TEXT;
-
-ALTER TABLE users RENAME COLUMN email TO email_address;
-
-ALTER TABLE users DROP COLUMN city;
-```
-
-### Dropping Tables
-
-```sql
-DROP TABLE users;
-DROP TABLE orders;
-```
-
-### Inspecting Database Schema
-
-```sql
--- Show all tables
-SHOW TABLES;
-
--- Describe a specific table
-DESCRIBE users;
-DESCRIBE orders;
-```
-
-## Architecture
-
-The project is organized into several key modules:
-
-- **`lexer.rs`** - Tokenizes SQL input into tokens
-- **`parser.rs`** - Parses tokens into an Abstract Syntax Tree (AST)
-- **`ast.rs`** - Defines the AST structures for all SQL statements
-- **`executor.rs`** - Executes parsed statements and returns results (original execution engine)
-- **`planner.rs`** - Cost-based query planner that generates optimized execution plans
-- **`plan_executor.rs`** - Executes optimized query plans generated by the planner
-- **`database.rs`** - Handles database persistence and management
-- **`main.rs`** - Interactive REPL interface
-- **`lib.rs`** - Library entry point
+| File | Purpose |
+|------|---------|
+| `main.rs` | Interactive REPL |
+| `lib.rs` | Library entry point; tokenize &rarr; parse &rarr; execute pipeline |
+| `lexer.rs` | Tokenizer |
+| `parser.rs` | Recursive-descent SQL parser |
+| `ast.rs` | Abstract syntax tree types |
+| `database.rs` | Core `Database`, `Table`, and `Index` structures |
+| `executor.rs` | Statement executor (DDL, DML, constraints, foreign keys) |
+| `planner.rs` | Cost-based query planner |
+| `plan_executor.rs` | Executes optimized query plans |
+| `storage.rs` | Pluggable storage engines (JSON and B-tree) |
+| `wal.rs` | Write-ahead log for transaction rollback |
+| `error.rs` | Error types |
 
 ## Testing
 
-The project includes comprehensive tests in the `tests/` directory:
+Run the full test suite with the default JSON backend:
 
-```bash
+```sh
 cargo test
-
-cargo test integration_tests
-cargo test alter
-cargo test select
 ```
 
-## Limitations
+Run tests against the B-tree backend:
 
-- Limited to single-file JSON storage
-- No concurrent access support
-
-### Indexes
-
-```sql
--- Create an index on a column
-CREATE INDEX idx_age ON users (age);
-
--- Drop an index
-DROP INDEX idx_age;
+```sh
+RUSTQL_STORAGE=btree cargo test
 ```
-
-Indexes are automatically maintained on INSERT, UPDATE, and DELETE operations.
-
-**Index Optimization**: Indexes are now used to optimize query performance! When a WHERE clause contains conditions on an indexed column (equality, range comparisons, IN, BETWEEN), the database will use the index to quickly locate matching rows instead of scanning all rows. This significantly improves query performance, especially for large tables.
-
-### Transactions
-
-```sql
-BEGIN TRANSACTION;
-INSERT INTO users VALUES (1, 'Alice');
-INSERT INTO users VALUES (2, 'Bob');
-COMMIT TRANSACTION;
-
-BEGIN TRANSACTION;
-INSERT INTO users VALUES (3, 'Charlie');
-ROLLBACK TRANSACTION;
-```
-
-Transactions allow you to group multiple operations together. All changes within a transaction are temporary until you `COMMIT`. If you `ROLLBACK`, all changes are discarded and the database returns to its state before the transaction began.
-
-## Query Planner and Plan Executor
-
-RustQL now includes a complete query optimization and execution system:
-
-### Query Planner (`planner.rs`)
-
-A cost-based query planner that optimizes query execution:
-
-- **Cost Estimation**: Estimates the cost of different query execution strategies
-- **Index Selection**: Automatically chooses between sequential scans and index scans based on cost
-- **Join Optimization**: Optimizes join order and selects between hash joins and nested loop joins
-- **Statistics Collection**: Collects table and column statistics for better cost estimation
-- **Plan Generation**: Creates optimized execution plans with proper operator ordering
-
-### Plan Executor (`plan_executor.rs`)
-
-A complete execution engine that executes optimized query plans:
-
-- **Expression Evaluation**: Full support for WHERE clause conditions, including:
-  - Comparison operators (=, !=, <, <=, >, >=)
-  - Logical operators (AND, OR, NOT)
-  - LIKE pattern matching with % and _ wildcards
-  - BETWEEN and IN operators
-  - IS NULL / IS NOT NULL checks
-  
-- **Join Execution**: Efficient join algorithms:
-  - **Hash Join**: For equality joins, builds a hash table for faster lookups
-  - **Nested Loop Join**: General-purpose join for any join condition
-  
-- **Aggregation**: Complete GROUP BY and aggregate function support:
-  - COUNT, SUM, AVG, MIN, MAX
-  - HAVING clause filtering on aggregate results
-  
-- **Projection**: Column selection and aliasing
-- **Sorting**: ORDER BY with ASC/DESC support
-- **Limit/Offset**: Result pagination
-- **DISTINCT**: Duplicate row elimination
-
-The planner analyzes queries and generates optimized execution plans, which are then executed by the plan executor. You can view the execution plan for any SELECT query using the `EXPLAIN` command (see EXPLAIN Command section below).
-
-## EXPLAIN Command
-
-The `EXPLAIN` command allows you to view the query execution plan for a SELECT statement. This helps you understand how the database will execute your query and can be useful for query optimization.
-
-```sql
--- Explain a simple query
-EXPLAIN SELECT * FROM users WHERE age > 25;
-
--- Explain a query with joins
-EXPLAIN SELECT users.name, orders.amount 
-FROM users 
-JOIN orders ON users.id = orders.user_id;
-
--- Explain a query with indexes
-CREATE INDEX idx_age ON users (age);
-EXPLAIN SELECT * FROM users WHERE age = 30;
-```
-
-The EXPLAIN output shows:
-- The execution plan tree
-- Cost estimates for each operation
-- Estimated number of rows
-- Whether indexes are being used
-- Join algorithms (Hash Join, Nested Loop Join)
-
-
-## License
-
-This project is open source and available under the MIT License.
-
