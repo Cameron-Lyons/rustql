@@ -219,6 +219,8 @@ impl<'a> PlanExecutor<'a> {
                     unique: false,
                     default_value: None,
                     foreign_key: None,
+                    check: None,
+                    auto_increment: false,
                 })
                 .collect();
 
@@ -411,6 +413,8 @@ impl<'a> PlanExecutor<'a> {
                         unique: false,
                         default_value: None,
                         foreign_key: None,
+                        check: None,
+                        auto_increment: false,
                     })
                     .collect();
 
@@ -425,6 +429,8 @@ impl<'a> PlanExecutor<'a> {
                         unique: false,
                         default_value: None,
                         foreign_key: None,
+                        check: None,
+                        auto_increment: false,
                     })
                     .collect();
 
@@ -847,6 +853,8 @@ impl<'a> PlanExecutor<'a> {
                 unique: false,
                 default_value: None,
                 foreign_key: None,
+                check: None,
+                auto_increment: false,
             })
             .collect();
         combined_columns.extend(right.columns.iter().map(|name| ColumnDefinition {
@@ -857,6 +865,8 @@ impl<'a> PlanExecutor<'a> {
             unique: false,
             default_value: None,
             foreign_key: None,
+            check: None,
+            auto_increment: false,
         }));
 
         let combined_row: Vec<Value> = left_row.iter().chain(right_row.iter()).cloned().collect();
@@ -940,6 +950,8 @@ impl<'a> PlanExecutor<'a> {
                 unique: false,
                 default_value: None,
                 foreign_key: None,
+                check: None,
+                auto_increment: false,
             })
             .collect();
 
@@ -1263,6 +1275,8 @@ impl<'a> PlanExecutor<'a> {
                 unique: false,
                 default_value: None,
                 foreign_key: None,
+                check: None,
+                auto_increment: false,
             })
             .collect();
 

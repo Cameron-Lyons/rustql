@@ -1515,6 +1515,8 @@ mod tests {
                 unique: false,
                 default_value: None,
                 foreign_key: None,
+                check: None,
+                auto_increment: false,
             },
             ColumnDefinition {
                 name: "name".to_string(),
@@ -1524,6 +1526,8 @@ mod tests {
                 unique: false,
                 default_value: None,
                 foreign_key: None,
+                check: None,
+                auto_increment: false,
             },
         ];
 
@@ -1678,6 +1682,8 @@ mod tests {
             unique: false,
             default_value: None,
             foreign_key: None,
+            check: None,
+            auto_increment: false,
         }];
         let table = Table {
             columns,
@@ -1730,6 +1736,8 @@ mod tests {
             unique: false,
             default_value: None,
             foreign_key: None,
+            check: None,
+            auto_increment: false,
         }];
         let table = Table {
             columns,

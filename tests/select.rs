@@ -25,6 +25,8 @@ fn test_select_all() {
                 unique: false,
                 default_value: None,
                 foreign_key: None,
+                check: None,
+                auto_increment: false,
             },
             ColumnDefinition {
                 name: "name".into(),
@@ -34,6 +36,8 @@ fn test_select_all() {
                 unique: false,
                 default_value: None,
                 foreign_key: None,
+                check: None,
+                auto_increment: false,
             },
         ],
     }))
@@ -46,10 +50,12 @@ fn test_select_all() {
             vec![Value::Integer(1), Value::Text("Alice".into())],
             vec![Value::Integer(2), Value::Text("Bob".into())],
         ],
+        source_query: None,
     }))
     .unwrap();
 
     let select = Statement::Select(SelectStatement {
+        ctes: Vec::new(),
         union: None,
         union_all: false,
         distinct: false,
@@ -81,6 +87,8 @@ fn test_count_distinct_values() {
                 unique: false,
                 default_value: None,
                 foreign_key: None,
+                check: None,
+                auto_increment: false,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
@@ -90,6 +98,8 @@ fn test_count_distinct_values() {
                 unique: false,
                 default_value: None,
                 foreign_key: None,
+                check: None,
+                auto_increment: false,
                 name: "city".into(),
                 data_type: DataType::Text,
                 nullable: false,
@@ -106,10 +116,12 @@ fn test_count_distinct_values() {
             vec![Value::Integer(2), Value::Text("Paris".into())],
             vec![Value::Integer(3), Value::Text("London".into())],
         ],
+        source_query: None,
     }))
     .unwrap();
 
     let stmt = Statement::Select(SelectStatement {
+        ctes: Vec::new(),
         union: None,
         union_all: false,
         distinct: false,
@@ -145,6 +157,8 @@ fn test_sum_distinct_values() {
                 unique: false,
                 default_value: None,
                 foreign_key: None,
+                check: None,
+                auto_increment: false,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
@@ -154,6 +168,8 @@ fn test_sum_distinct_values() {
                 unique: false,
                 default_value: None,
                 foreign_key: None,
+                check: None,
+                auto_increment: false,
                 name: "amount".into(),
                 data_type: DataType::Float,
                 nullable: true,
@@ -171,10 +187,12 @@ fn test_sum_distinct_values() {
             vec![Value::Integer(3), Value::Float(20.0)],
             vec![Value::Integer(4), Value::Null],
         ],
+        source_query: None,
     }))
     .unwrap();
 
     let stmt = Statement::Select(SelectStatement {
+        ctes: Vec::new(),
         union: None,
         union_all: false,
         distinct: false,
@@ -210,6 +228,8 @@ fn test_min_distinct_values() {
                 unique: false,
                 default_value: None,
                 foreign_key: None,
+                check: None,
+                auto_increment: false,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
@@ -219,6 +239,8 @@ fn test_min_distinct_values() {
                 unique: false,
                 default_value: None,
                 foreign_key: None,
+                check: None,
+                auto_increment: false,
                 name: "score".into(),
                 data_type: DataType::Integer,
                 nullable: true,
@@ -237,10 +259,12 @@ fn test_min_distinct_values() {
             vec![Value::Integer(4), Value::Integer(75)],
             vec![Value::Integer(5), Value::Null],
         ],
+        source_query: None,
     }))
     .unwrap();
 
     let stmt = Statement::Select(SelectStatement {
+        ctes: Vec::new(),
         union: None,
         union_all: false,
         distinct: false,
@@ -277,6 +301,8 @@ fn test_max_distinct_values() {
                 unique: false,
                 default_value: None,
                 foreign_key: None,
+                check: None,
+                auto_increment: false,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
@@ -286,6 +312,8 @@ fn test_max_distinct_values() {
                 unique: false,
                 default_value: None,
                 foreign_key: None,
+                check: None,
+                auto_increment: false,
                 name: "price".into(),
                 data_type: DataType::Float,
                 nullable: true,
@@ -304,10 +332,12 @@ fn test_max_distinct_values() {
             vec![Value::Integer(4), Value::Float(30.0)],
             vec![Value::Integer(5), Value::Null],
         ],
+        source_query: None,
     }))
     .unwrap();
 
     let stmt = Statement::Select(SelectStatement {
+        ctes: Vec::new(),
         union: None,
         union_all: false,
         distinct: false,
@@ -344,6 +374,8 @@ fn test_avg_distinct_values() {
                 unique: false,
                 default_value: None,
                 foreign_key: None,
+                check: None,
+                auto_increment: false,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
@@ -353,6 +385,8 @@ fn test_avg_distinct_values() {
                 unique: false,
                 default_value: None,
                 foreign_key: None,
+                check: None,
+                auto_increment: false,
                 name: "grade".into(),
                 data_type: DataType::Float,
                 nullable: true,
@@ -371,10 +405,12 @@ fn test_avg_distinct_values() {
             vec![Value::Integer(4), Value::Float(95.0)],
             vec![Value::Integer(5), Value::Null],
         ],
+        source_query: None,
     }))
     .unwrap();
 
     let stmt = Statement::Select(SelectStatement {
+        ctes: Vec::new(),
         union: None,
         union_all: false,
         distinct: false,

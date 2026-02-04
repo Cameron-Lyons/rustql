@@ -253,10 +253,18 @@ impl<'a> QueryPlanner<'a> {
                 db,
             )?;
 
-            let join_plan = if self.is_equality_join(&join.on) {
-                self.plan_hash_join(current_plan, right_plan, join.on.clone())
+            let join_plan = if let Some(ref on_expr) = join.on {
+                if self.is_equality_join(on_expr) {
+                    self.plan_hash_join(current_plan, right_plan, on_expr.clone())
+                } else {
+                    self.plan_nested_loop_join(current_plan, right_plan, on_expr.clone())
+                }
             } else {
-                self.plan_nested_loop_join(current_plan, right_plan, join.on.clone())
+                self.plan_nested_loop_join(
+                    current_plan,
+                    right_plan,
+                    Expression::Value(Value::Boolean(true)),
+                )
             };
 
             current_plan = join_plan;
@@ -702,6 +710,39 @@ impl<'a> QueryPlanner<'a> {
             }
             Expression::Function(agg) => {
                 self.collect_table_refs(&agg.expr, tables);
+            }
+            Expression::Case {
+                operand,
+                when_clauses,
+                else_clause,
+            } => {
+                if let Some(op) = operand {
+                    self.collect_table_refs(op, tables);
+                }
+                for (cond, result) in when_clauses {
+                    self.collect_table_refs(cond, tables);
+                    self.collect_table_refs(result, tables);
+                }
+                if let Some(el) = else_clause {
+                    self.collect_table_refs(el, tables);
+                }
+            }
+            Expression::ScalarFunction { args, .. } => {
+                for arg in args {
+                    self.collect_table_refs(arg, tables);
+                }
+            }
+            Expression::WindowFunction {
+                partition_by,
+                order_by,
+                ..
+            } => {
+                for expr in partition_by {
+                    self.collect_table_refs(expr, tables);
+                }
+                for ob in order_by {
+                    self.collect_table_refs(&ob.expr, tables);
+                }
             }
             Expression::Subquery(_) | Expression::Exists(_) | Expression::Value(_) => {}
         }

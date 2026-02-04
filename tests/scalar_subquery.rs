@@ -21,6 +21,8 @@ fn test_scalar_subquery_basic() {
                 unique: false,
                 default_value: None,
                 foreign_key: None,
+                check: None,
+                auto_increment: false,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
@@ -30,6 +32,8 @@ fn test_scalar_subquery_basic() {
                 unique: false,
                 default_value: None,
                 foreign_key: None,
+                check: None,
+                auto_increment: false,
                 name: "name".into(),
                 data_type: DataType::Text,
                 nullable: false,
@@ -45,6 +49,7 @@ fn test_scalar_subquery_basic() {
             vec![Value::Integer(1), Value::Text("Alice".into())],
             vec![Value::Integer(2), Value::Text("Bob".into())],
         ],
+        source_query: None,
     }))
     .unwrap();
 
@@ -56,6 +61,8 @@ fn test_scalar_subquery_basic() {
                 unique: false,
                 default_value: None,
                 foreign_key: None,
+                check: None,
+                auto_increment: false,
                 name: "user_id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
@@ -65,6 +72,8 @@ fn test_scalar_subquery_basic() {
                 unique: false,
                 default_value: None,
                 foreign_key: None,
+                check: None,
+                auto_increment: false,
                 name: "amount".into(),
                 data_type: DataType::Float,
                 nullable: false,
@@ -80,10 +89,12 @@ fn test_scalar_subquery_basic() {
             vec![Value::Integer(1), Value::Float(150.0)],
             vec![Value::Integer(2), Value::Float(50.0)],
         ],
+        source_query: None,
     }))
     .unwrap();
 
     let stmt = Statement::Select(SelectStatement {
+        ctes: Vec::new(),
         union: None,
         union_all: false,
         distinct: false,
@@ -94,6 +105,7 @@ fn test_scalar_subquery_basic() {
                 alias: None,
             },
             Column::Subquery(Box::new(SelectStatement {
+                ctes: Vec::new(),
                 union: None,
                 union_all: false,
                 distinct: false,
@@ -141,6 +153,8 @@ fn test_scalar_subquery_null() {
                 unique: false,
                 default_value: None,
                 foreign_key: None,
+                check: None,
+                auto_increment: false,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
@@ -150,6 +164,8 @@ fn test_scalar_subquery_null() {
                 unique: false,
                 default_value: None,
                 foreign_key: None,
+                check: None,
+                auto_increment: false,
                 name: "name".into(),
                 data_type: DataType::Text,
                 nullable: false,
@@ -162,6 +178,7 @@ fn test_scalar_subquery_null() {
         table: "users_scalar2".to_string(),
         columns: Some(vec!["id".into(), "name".into()]),
         values: vec![vec![Value::Integer(1), Value::Text("Alice".into())]],
+        source_query: None,
     }))
     .unwrap();
 
@@ -173,6 +190,8 @@ fn test_scalar_subquery_null() {
                 unique: false,
                 default_value: None,
                 foreign_key: None,
+                check: None,
+                auto_increment: false,
                 name: "user_id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
@@ -182,6 +201,8 @@ fn test_scalar_subquery_null() {
                 unique: false,
                 default_value: None,
                 foreign_key: None,
+                check: None,
+                auto_increment: false,
                 name: "amount".into(),
                 data_type: DataType::Float,
                 nullable: false,
@@ -191,6 +212,7 @@ fn test_scalar_subquery_null() {
     .unwrap();
 
     let stmt = Statement::Select(SelectStatement {
+        ctes: Vec::new(),
         union: None,
         union_all: false,
         distinct: false,
@@ -201,6 +223,7 @@ fn test_scalar_subquery_null() {
                 alias: None,
             },
             Column::Subquery(Box::new(SelectStatement {
+                ctes: Vec::new(),
                 union: None,
                 union_all: false,
                 distinct: false,
@@ -248,6 +271,8 @@ fn test_scalar_subquery_aggregate() {
                 unique: false,
                 default_value: None,
                 foreign_key: None,
+                check: None,
+                auto_increment: false,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
@@ -257,6 +282,8 @@ fn test_scalar_subquery_aggregate() {
                 unique: false,
                 default_value: None,
                 foreign_key: None,
+                check: None,
+                auto_increment: false,
                 name: "name".into(),
                 data_type: DataType::Text,
                 nullable: false,
@@ -272,6 +299,7 @@ fn test_scalar_subquery_aggregate() {
             vec![Value::Integer(1), Value::Text("Alice".into())],
             vec![Value::Integer(2), Value::Text("Bob".into())],
         ],
+        source_query: None,
     }))
     .unwrap();
 
@@ -283,6 +311,8 @@ fn test_scalar_subquery_aggregate() {
                 unique: false,
                 default_value: None,
                 foreign_key: None,
+                check: None,
+                auto_increment: false,
                 name: "user_id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
@@ -292,6 +322,8 @@ fn test_scalar_subquery_aggregate() {
                 unique: false,
                 default_value: None,
                 foreign_key: None,
+                check: None,
+                auto_increment: false,
                 name: "amount".into(),
                 data_type: DataType::Float,
                 nullable: false,
@@ -308,10 +340,12 @@ fn test_scalar_subquery_aggregate() {
             vec![Value::Integer(1), Value::Float(50.0)],
             vec![Value::Integer(2), Value::Float(200.0)],
         ],
+        source_query: None,
     }))
     .unwrap();
 
     let stmt = Statement::Select(SelectStatement {
+        ctes: Vec::new(),
         union: None,
         union_all: false,
         distinct: false,
@@ -322,6 +356,7 @@ fn test_scalar_subquery_aggregate() {
                 alias: None,
             },
             Column::Subquery(Box::new(SelectStatement {
+                ctes: Vec::new(),
                 union: None,
                 union_all: false,
                 distinct: false,
@@ -372,6 +407,8 @@ fn test_scalar_subquery_aggregate_sum() {
                 unique: false,
                 default_value: None,
                 foreign_key: None,
+                check: None,
+                auto_increment: false,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
@@ -381,6 +418,8 @@ fn test_scalar_subquery_aggregate_sum() {
                 unique: false,
                 default_value: None,
                 foreign_key: None,
+                check: None,
+                auto_increment: false,
                 name: "name".into(),
                 data_type: DataType::Text,
                 nullable: false,
@@ -393,6 +432,7 @@ fn test_scalar_subquery_aggregate_sum() {
         table: "users_sum".to_string(),
         columns: Some(vec!["id".into(), "name".into()]),
         values: vec![vec![Value::Integer(1), Value::Text("Alice".into())]],
+        source_query: None,
     }))
     .unwrap();
 
@@ -404,6 +444,8 @@ fn test_scalar_subquery_aggregate_sum() {
                 unique: false,
                 default_value: None,
                 foreign_key: None,
+                check: None,
+                auto_increment: false,
                 name: "user_id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
@@ -413,6 +455,8 @@ fn test_scalar_subquery_aggregate_sum() {
                 unique: false,
                 default_value: None,
                 foreign_key: None,
+                check: None,
+                auto_increment: false,
                 name: "amount".into(),
                 data_type: DataType::Float,
                 nullable: false,
@@ -429,10 +473,12 @@ fn test_scalar_subquery_aggregate_sum() {
             vec![Value::Integer(1), Value::Float(50.0)],
             vec![Value::Integer(1), Value::Float(25.0)],
         ],
+        source_query: None,
     }))
     .unwrap();
 
     let stmt = Statement::Select(SelectStatement {
+        ctes: Vec::new(),
         union: None,
         union_all: false,
         distinct: false,
@@ -443,6 +489,7 @@ fn test_scalar_subquery_aggregate_sum() {
                 alias: None,
             },
             Column::Subquery(Box::new(SelectStatement {
+                ctes: Vec::new(),
                 union: None,
                 union_all: false,
                 distinct: false,
@@ -491,6 +538,8 @@ fn test_scalar_subquery_nested() {
                 unique: false,
                 default_value: None,
                 foreign_key: None,
+                check: None,
+                auto_increment: false,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
@@ -500,6 +549,8 @@ fn test_scalar_subquery_nested() {
                 unique: false,
                 default_value: None,
                 foreign_key: None,
+                check: None,
+                auto_increment: false,
                 name: "name".into(),
                 data_type: DataType::Text,
                 nullable: false,
@@ -512,6 +563,7 @@ fn test_scalar_subquery_nested() {
         table: "users_nested".to_string(),
         columns: Some(vec!["id".into(), "name".into()]),
         values: vec![vec![Value::Integer(1), Value::Text("Alice".into())]],
+        source_query: None,
     }))
     .unwrap();
 
@@ -523,6 +575,8 @@ fn test_scalar_subquery_nested() {
                 unique: false,
                 default_value: None,
                 foreign_key: None,
+                check: None,
+                auto_increment: false,
                 name: "user_id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
@@ -532,6 +586,8 @@ fn test_scalar_subquery_nested() {
                 unique: false,
                 default_value: None,
                 foreign_key: None,
+                check: None,
+                auto_increment: false,
                 name: "amount".into(),
                 data_type: DataType::Float,
                 nullable: false,
@@ -544,6 +600,7 @@ fn test_scalar_subquery_nested() {
         table: "orders_nested".to_string(),
         columns: Some(vec!["user_id".into(), "amount".into()]),
         values: vec![vec![Value::Integer(1), Value::Float(150.0)]],
+        source_query: None,
     }))
     .unwrap();
 
@@ -555,6 +612,8 @@ fn test_scalar_subquery_nested() {
                 unique: false,
                 default_value: None,
                 foreign_key: None,
+                check: None,
+                auto_increment: false,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
@@ -564,6 +623,8 @@ fn test_scalar_subquery_nested() {
                 unique: false,
                 default_value: None,
                 foreign_key: None,
+                check: None,
+                auto_increment: false,
                 name: "order_id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
@@ -573,6 +634,8 @@ fn test_scalar_subquery_nested() {
                 unique: false,
                 default_value: None,
                 foreign_key: None,
+                check: None,
+                auto_increment: false,
                 name: "price".into(),
                 data_type: DataType::Float,
                 nullable: false,
@@ -589,10 +652,12 @@ fn test_scalar_subquery_nested() {
             Value::Integer(1),
             Value::Float(50.0),
         ]],
+        source_query: None,
     }))
     .unwrap();
 
     let stmt = Statement::Select(SelectStatement {
+        ctes: Vec::new(),
         union: None,
         union_all: false,
         distinct: false,
@@ -603,10 +668,12 @@ fn test_scalar_subquery_nested() {
                 alias: None,
             },
             Column::Subquery(Box::new(SelectStatement {
+                ctes: Vec::new(),
                 union: None,
                 union_all: false,
                 distinct: false,
                 columns: vec![Column::Subquery(Box::new(SelectStatement {
+                    ctes: Vec::new(),
                     union: None,
                     union_all: false,
                     distinct: false,
@@ -668,6 +735,8 @@ fn test_scalar_subquery_with_join() {
                 unique: false,
                 default_value: None,
                 foreign_key: None,
+                check: None,
+                auto_increment: false,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
@@ -677,6 +746,8 @@ fn test_scalar_subquery_with_join() {
                 unique: false,
                 default_value: None,
                 foreign_key: None,
+                check: None,
+                auto_increment: false,
                 name: "name".into(),
                 data_type: DataType::Text,
                 nullable: false,
@@ -692,6 +763,7 @@ fn test_scalar_subquery_with_join() {
             vec![Value::Integer(1), Value::Text("Alice".into())],
             vec![Value::Integer(2), Value::Text("Bob".into())],
         ],
+        source_query: None,
     }))
     .unwrap();
 
@@ -703,6 +775,8 @@ fn test_scalar_subquery_with_join() {
                 unique: false,
                 default_value: None,
                 foreign_key: None,
+                check: None,
+                auto_increment: false,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
@@ -712,6 +786,8 @@ fn test_scalar_subquery_with_join() {
                 unique: false,
                 default_value: None,
                 foreign_key: None,
+                check: None,
+                auto_increment: false,
                 name: "user_id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
@@ -721,6 +797,8 @@ fn test_scalar_subquery_with_join() {
                 unique: false,
                 default_value: None,
                 foreign_key: None,
+                check: None,
+                auto_increment: false,
                 name: "amount".into(),
                 data_type: DataType::Float,
                 nullable: false,
@@ -736,10 +814,12 @@ fn test_scalar_subquery_with_join() {
             vec![Value::Integer(10), Value::Integer(1), Value::Float(150.0)],
             vec![Value::Integer(11), Value::Integer(2), Value::Float(50.0)],
         ],
+        source_query: None,
     }))
     .unwrap();
 
     let stmt = Statement::Select(SelectStatement {
+        ctes: Vec::new(),
         union: None,
         union_all: false,
         distinct: false,
@@ -750,6 +830,7 @@ fn test_scalar_subquery_with_join() {
                 alias: None,
             },
             Column::Subquery(Box::new(SelectStatement {
+                ctes: Vec::new(),
                 union: None,
                 union_all: false,
                 distinct: false,
@@ -761,11 +842,11 @@ fn test_scalar_subquery_with_join() {
                 joins: vec![Join {
                     join_type: JoinType::Inner,
                     table: "users_join".into(),
-                    on: Expression::BinaryOp {
+                    on: Some(Expression::BinaryOp {
                         left: Box::new(Expression::Column("orders_join.user_id".into())),
                         op: BinaryOperator::Equal,
                         right: Box::new(Expression::Column("users_join.id".into())),
-                    },
+                    }),
                 }],
                 where_clause: Some(Expression::BinaryOp {
                     left: Box::new(Expression::Column("orders_join.user_id".into())),
@@ -807,6 +888,8 @@ fn test_scalar_subquery_with_join_and_aggregate() {
                 unique: false,
                 default_value: None,
                 foreign_key: None,
+                check: None,
+                auto_increment: false,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
@@ -816,6 +899,8 @@ fn test_scalar_subquery_with_join_and_aggregate() {
                 unique: false,
                 default_value: None,
                 foreign_key: None,
+                check: None,
+                auto_increment: false,
                 name: "name".into(),
                 data_type: DataType::Text,
                 nullable: false,
@@ -831,6 +916,7 @@ fn test_scalar_subquery_with_join_and_aggregate() {
             vec![Value::Integer(1), Value::Text("Alice".into())],
             vec![Value::Integer(2), Value::Text("Bob".into())],
         ],
+        source_query: None,
     }))
     .unwrap();
 
@@ -842,6 +928,8 @@ fn test_scalar_subquery_with_join_and_aggregate() {
                 unique: false,
                 default_value: None,
                 foreign_key: None,
+                check: None,
+                auto_increment: false,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
@@ -851,6 +939,8 @@ fn test_scalar_subquery_with_join_and_aggregate() {
                 unique: false,
                 default_value: None,
                 foreign_key: None,
+                check: None,
+                auto_increment: false,
                 name: "user_id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
@@ -860,6 +950,8 @@ fn test_scalar_subquery_with_join_and_aggregate() {
                 unique: false,
                 default_value: None,
                 foreign_key: None,
+                check: None,
+                auto_increment: false,
                 name: "amount".into(),
                 data_type: DataType::Float,
                 nullable: false,
@@ -876,6 +968,7 @@ fn test_scalar_subquery_with_join_and_aggregate() {
             vec![Value::Integer(11), Value::Integer(1), Value::Float(50.0)],
             vec![Value::Integer(12), Value::Integer(2), Value::Float(200.0)],
         ],
+        source_query: None,
     }))
     .unwrap();
 
@@ -887,6 +980,8 @@ fn test_scalar_subquery_with_join_and_aggregate() {
                 unique: false,
                 default_value: None,
                 foreign_key: None,
+                check: None,
+                auto_increment: false,
                 name: "order_id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
@@ -896,6 +991,8 @@ fn test_scalar_subquery_with_join_and_aggregate() {
                 unique: false,
                 default_value: None,
                 foreign_key: None,
+                check: None,
+                auto_increment: false,
                 name: "price".into(),
                 data_type: DataType::Float,
                 nullable: false,
@@ -912,10 +1009,12 @@ fn test_scalar_subquery_with_join_and_aggregate() {
             vec![Value::Integer(11), Value::Float(20.0)],
             vec![Value::Integer(12), Value::Float(30.0)],
         ],
+        source_query: None,
     }))
     .unwrap();
 
     let stmt = Statement::Select(SelectStatement {
+        ctes: Vec::new(),
         union: None,
         union_all: false,
         distinct: false,
@@ -926,6 +1025,7 @@ fn test_scalar_subquery_with_join_and_aggregate() {
                 alias: None,
             },
             Column::Subquery(Box::new(SelectStatement {
+                ctes: Vec::new(),
                 union: None,
                 union_all: false,
                 distinct: false,
@@ -939,11 +1039,11 @@ fn test_scalar_subquery_with_join_and_aggregate() {
                 joins: vec![Join {
                     join_type: JoinType::Inner,
                     table: "products_join_agg".into(),
-                    on: Expression::BinaryOp {
+                    on: Some(Expression::BinaryOp {
                         left: Box::new(Expression::Column("orders_join_agg.id".into())),
                         op: BinaryOperator::Equal,
                         right: Box::new(Expression::Column("products_join_agg.order_id".into())),
-                    },
+                    }),
                 }],
                 where_clause: Some(Expression::BinaryOp {
                     left: Box::new(Expression::Column("orders_join_agg.user_id".into())),

@@ -49,6 +49,10 @@ pub fn execute(statement: Statement) -> Result<String, RustqlError> {
         Statement::Explain(stmt) => execute_explain(stmt),
         Statement::Describe(table_name) => execute_describe(table_name),
         Statement::ShowTables => execute_show_tables(),
+        Statement::Savepoint(name) => execute_savepoint(name),
+        Statement::ReleaseSavepoint(name) => execute_release_savepoint(name),
+        Statement::RollbackToSavepoint(name) => execute_rollback_to_savepoint(name),
+        Statement::Analyze(table_name) => execute_analyze(table_name),
     }
 }
 
@@ -182,7 +186,25 @@ fn execute_drop_table(stmt: DropTableStatement) -> Result<String, RustqlError> {
     }
 }
 
-fn execute_insert(stmt: InsertStatement) -> Result<String, RustqlError> {
+fn execute_insert(mut stmt: InsertStatement) -> Result<String, RustqlError> {
+    if let Some(source_query) = stmt.source_query.take() {
+        let select_result = execute_select(*source_query.clone())?;
+        let lines: Vec<&str> = select_result.lines().collect();
+        if lines.len() >= 2 {
+            for line in lines.iter().skip(2) {
+                if line.trim().is_empty() {
+                    continue;
+                }
+                let values: Vec<Value> = line
+                    .split('\t')
+                    .filter(|s| !s.is_empty())
+                    .map(parse_value_from_string)
+                    .collect();
+                stmt.values.push(values);
+            }
+        }
+    }
+
     let mut db = get_database_write();
 
     let table_ref = db
@@ -266,6 +288,27 @@ fn execute_insert(stmt: InsertStatement) -> Result<String, RustqlError> {
             .collect::<Result<Vec<Vec<Value>>, RustqlError>>()?
     };
 
+    let mut mapped_values = mapped_values;
+    for values in &mut mapped_values {
+        for (col_idx, col_def) in table_ref.columns.iter().enumerate() {
+            if col_def.auto_increment
+                && col_idx < values.len()
+                && matches!(values[col_idx], Value::Null)
+            {
+                let max_val = table_ref
+                    .rows
+                    .iter()
+                    .filter_map(|row| match row.get(col_idx) {
+                        Some(Value::Integer(i)) => Some(*i),
+                        _ => None,
+                    })
+                    .max()
+                    .unwrap_or(0);
+                values[col_idx] = Value::Integer(max_val + 1);
+            }
+        }
+    }
+
     for values in &mapped_values {
         validate_not_null_constraints(&table_ref.columns, values)?;
     }
@@ -280,6 +323,10 @@ fn execute_insert(stmt: InsertStatement) -> Result<String, RustqlError> {
 
     for values in &mapped_values {
         validate_foreign_keys_for_insert(&db, &table_ref.columns, values)?;
+    }
+
+    for values in &mapped_values {
+        validate_check_constraints(&table_ref.columns, values)?;
     }
 
     let row_count = mapped_values.len();
@@ -307,10 +354,15 @@ fn execute_insert(stmt: InsertStatement) -> Result<String, RustqlError> {
 }
 
 fn execute_select(stmt: SelectStatement) -> Result<String, RustqlError> {
+    if !stmt.ctes.is_empty() {
+        return execute_select_with_ctes(stmt);
+    }
+
     let db = get_database_read();
 
     if let Some(ref union_stmt) = stmt.union {
         let left_stmt = SelectStatement {
+            ctes: Vec::new(),
             distinct: stmt.distinct,
             columns: stmt.columns.clone(),
             from: stmt.from.clone(),
@@ -426,10 +478,29 @@ fn execute_select(stmt: SelectStatement) -> Result<String, RustqlError> {
     result.push_str(&"-".repeat(40));
     result.push('\n');
 
+    let has_window_fn_main = column_specs.iter().any(|(_, col)| {
+        matches!(
+            col,
+            Column::Expression {
+                expr: Expression::WindowFunction { .. },
+                ..
+            }
+        )
+    });
+
+    let window_rows: Option<Vec<Vec<Value>>> = if has_window_fn_main {
+        let mut raw: Vec<Vec<Value>> = filtered_rows.iter().map(|r| (*r).clone()).collect();
+        evaluate_window_functions(&mut raw, &table.columns, &stmt.columns)?;
+        Some(raw)
+    } else {
+        None
+    };
+
     let mut outputs: Vec<(Vec<Value>, Vec<Value>)> = Vec::with_capacity(filtered_rows.len());
-    for row_ref in &filtered_rows {
+    for (row_idx, row_ref) in filtered_rows.iter().enumerate() {
         let row = *row_ref;
         let mut projected: Vec<Value> = Vec::with_capacity(column_specs.len());
+        let mut wf_offset = table.columns.len();
         for (_, col) in &column_specs {
             let val = match col {
                 Column::All => {
@@ -450,6 +521,18 @@ fn execute_select(stmt: SelectStatement) -> Result<String, RustqlError> {
                 }
                 Column::Subquery(subquery) => {
                     eval_scalar_subquery_with_outer(db_ref, subquery, &table.columns, row)?
+                }
+                Column::Expression {
+                    expr: Expression::WindowFunction { .. },
+                    ..
+                } => {
+                    if let Some(ref wr) = window_rows {
+                        let v = wr[row_idx].get(wf_offset).cloned().unwrap_or(Value::Null);
+                        wf_offset += 1;
+                        v
+                    } else {
+                        Value::Null
+                    }
                 }
                 Column::Expression { expr, .. } => {
                     evaluate_value_expression(expr, &table.columns, row)?
@@ -761,6 +844,62 @@ fn execute_select_internal(
             })
             .collect()
     };
+
+    let has_window_fn = stmt.columns.iter().any(|col| {
+        matches!(
+            col,
+            Column::Expression {
+                expr: Expression::WindowFunction { .. },
+                ..
+            }
+        )
+    });
+
+    if has_window_fn {
+        let mut raw_rows: Vec<Vec<Value>> = filtered_rows.iter().map(|r| (*r).clone()).collect();
+        evaluate_window_functions(&mut raw_rows, &all_columns, &stmt.columns)?;
+        let base_len = all_columns.len();
+        let mut rows: Vec<Vec<Value>> = Vec::new();
+        for raw_row in &raw_rows {
+            let mut projected: Vec<Value> = Vec::new();
+            let mut wf_offset = base_len;
+            for col in &stmt.columns {
+                let val = match col {
+                    Column::All => unreachable!(),
+                    Column::Named { name, .. } => {
+                        let column_name = if name.contains('.') {
+                            name.split('.').next_back().unwrap_or(name)
+                        } else {
+                            name.as_str()
+                        };
+                        let idx = all_columns
+                            .iter()
+                            .position(|c| c.name == column_name)
+                            .ok_or_else(|| RustqlError::ColumnNotFound(name.clone()))?;
+                        raw_row[idx].clone()
+                    }
+                    Column::Expression {
+                        expr: Expression::WindowFunction { .. },
+                        ..
+                    } => {
+                        let v = raw_row.get(wf_offset).cloned().unwrap_or(Value::Null);
+                        wf_offset += 1;
+                        v
+                    }
+                    Column::Expression { expr, .. } => {
+                        evaluate_value_expression(expr, &all_columns, raw_row)?
+                    }
+                    Column::Function(_) => Value::Null,
+                    Column::Subquery(subquery) => {
+                        eval_scalar_subquery_with_outer(db, subquery, &all_columns, raw_row)?
+                    }
+                };
+                projected.push(val);
+            }
+            rows.push(projected);
+        }
+        return Ok(SelectResult { headers, rows });
+    }
 
     let mut rows: Vec<Vec<Value>> = Vec::new();
     for row_ref in &filtered_rows {
@@ -1621,6 +1760,7 @@ fn execute_update(stmt: UpdateStatement) -> Result<String, RustqlError> {
                 Some(row_idx),
             )?;
             validate_foreign_keys_for_update(&db, &table_ref.columns, &updated_row)?;
+            validate_check_constraints(&table_ref.columns, &updated_row)?;
             rows_to_update.push((row_idx, updated_row));
         }
     }
@@ -1972,6 +2112,138 @@ fn evaluate_value_expression(
                 )),
             }
         }
+        Expression::Case {
+            operand,
+            when_clauses,
+            else_clause,
+        } => {
+            if let Some(operand_expr) = operand {
+                let operand_val = evaluate_value_expression(operand_expr, columns, row)?;
+                for (when_expr, then_expr) in when_clauses {
+                    let when_val = evaluate_value_expression(when_expr, columns, row)?;
+                    if operand_val == when_val {
+                        return evaluate_value_expression(then_expr, columns, row);
+                    }
+                }
+            } else {
+                for (when_expr, then_expr) in when_clauses {
+                    let is_true = evaluate_expression(None, when_expr, columns, row)?;
+                    if is_true {
+                        return evaluate_value_expression(then_expr, columns, row);
+                    }
+                }
+            }
+            if let Some(else_expr) = else_clause {
+                evaluate_value_expression(else_expr, columns, row)
+            } else {
+                Ok(Value::Null)
+            }
+        }
+        Expression::ScalarFunction { name, args } => {
+            let evaluated_args: Vec<Value> = args
+                .iter()
+                .map(|a| evaluate_value_expression(a, columns, row))
+                .collect::<Result<Vec<_>, _>>()?;
+            match name {
+                ScalarFunctionType::Upper => match evaluated_args.first() {
+                    Some(Value::Text(s)) => Ok(Value::Text(s.to_uppercase())),
+                    Some(Value::Null) => Ok(Value::Null),
+                    _ => Err(RustqlError::TypeMismatch(
+                        "UPPER requires a text argument".to_string(),
+                    )),
+                },
+                ScalarFunctionType::Lower => match evaluated_args.first() {
+                    Some(Value::Text(s)) => Ok(Value::Text(s.to_lowercase())),
+                    Some(Value::Null) => Ok(Value::Null),
+                    _ => Err(RustqlError::TypeMismatch(
+                        "LOWER requires a text argument".to_string(),
+                    )),
+                },
+                ScalarFunctionType::Length => match evaluated_args.first() {
+                    Some(Value::Text(s)) => Ok(Value::Integer(s.len() as i64)),
+                    Some(Value::Null) => Ok(Value::Null),
+                    _ => Err(RustqlError::TypeMismatch(
+                        "LENGTH requires a text argument".to_string(),
+                    )),
+                },
+                ScalarFunctionType::Substring => {
+                    let s = match evaluated_args.first() {
+                        Some(Value::Text(s)) => s.clone(),
+                        Some(Value::Null) => return Ok(Value::Null),
+                        _ => {
+                            return Err(RustqlError::TypeMismatch(
+                                "SUBSTRING requires a text first argument".to_string(),
+                            ));
+                        }
+                    };
+                    let start = match evaluated_args.get(1) {
+                        Some(Value::Integer(i)) => (*i as usize).saturating_sub(1),
+                        _ => {
+                            return Err(RustqlError::TypeMismatch(
+                                "SUBSTRING requires an integer start position".to_string(),
+                            ));
+                        }
+                    };
+                    let chars: Vec<char> = s.chars().collect();
+                    if start >= chars.len() {
+                        return Ok(Value::Text(String::new()));
+                    }
+                    let len = match evaluated_args.get(2) {
+                        Some(Value::Integer(l)) => *l as usize,
+                        None => chars.len() - start,
+                        _ => {
+                            return Err(RustqlError::TypeMismatch(
+                                "SUBSTRING length must be an integer".to_string(),
+                            ));
+                        }
+                    };
+                    let result: String = chars.iter().skip(start).take(len).collect();
+                    Ok(Value::Text(result))
+                }
+                ScalarFunctionType::Abs => match evaluated_args.first() {
+                    Some(Value::Integer(i)) => Ok(Value::Integer(i.abs())),
+                    Some(Value::Float(f)) => Ok(Value::Float(f.abs())),
+                    Some(Value::Null) => Ok(Value::Null),
+                    _ => Err(RustqlError::TypeMismatch(
+                        "ABS requires a numeric argument".to_string(),
+                    )),
+                },
+                ScalarFunctionType::Round => {
+                    let val = match evaluated_args.first() {
+                        Some(Value::Float(f)) => *f,
+                        Some(Value::Integer(i)) => *i as f64,
+                        Some(Value::Null) => return Ok(Value::Null),
+                        _ => {
+                            return Err(RustqlError::TypeMismatch(
+                                "ROUND requires a numeric argument".to_string(),
+                            ));
+                        }
+                    };
+                    let decimals = match evaluated_args.get(1) {
+                        Some(Value::Integer(d)) => *d as i32,
+                        None => 0,
+                        _ => {
+                            return Err(RustqlError::TypeMismatch(
+                                "ROUND decimals must be an integer".to_string(),
+                            ));
+                        }
+                    };
+                    let factor = 10f64.powi(decimals);
+                    Ok(Value::Float((val * factor).round() / factor))
+                }
+                ScalarFunctionType::Coalesce => {
+                    for arg in &evaluated_args {
+                        if !matches!(arg, Value::Null) {
+                            return Ok(arg.clone());
+                        }
+                    }
+                    Ok(Value::Null)
+                }
+            }
+        }
+        Expression::WindowFunction { .. } => Err(RustqlError::Internal(
+            "Window functions must be evaluated in a separate pass".to_string(),
+        )),
         _ => Err(RustqlError::Internal(
             "Complex expressions not yet supported in SELECT".to_string(),
         )),
@@ -2344,7 +2616,7 @@ fn perform_multiple_joins(
         let mut matched_pairs = HashSet::new();
 
         let check_join_match = |current_row: &Vec<Value>, join_row: &Vec<Value>| -> bool {
-            if let Expression::BinaryOp { left, op, right } = &join.on
+            if let Some(Expression::BinaryOp { left, op, right }) = &join.on
                 && *op == BinaryOperator::Equal
                 && let (Expression::Column(left_col), Expression::Column(right_col)) =
                     (left.as_ref(), right.as_ref())
@@ -2418,6 +2690,53 @@ fn perform_multiple_joins(
                         }
                     }
                     if matches!(join.join_type, JoinType::Left | JoinType::Full) && !has_match {
+                        let mut combined = current_row.clone();
+                        combined.extend(vec![Value::Null; join_table.columns.len()]);
+                        joined_rows.push(combined);
+                    }
+                }
+            }
+            JoinType::Cross => {
+                for current_row in current_rows.iter() {
+                    for join_row in join_table.rows.iter() {
+                        let mut combined = current_row.clone();
+                        combined.extend(join_row.clone());
+                        joined_rows.push(combined);
+                    }
+                }
+            }
+            JoinType::Natural => {
+                let common_columns: Vec<(usize, usize)> = all_columns
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(left_idx, left_col)| {
+                        join_table
+                            .columns
+                            .iter()
+                            .position(|right_col| right_col.name == left_col.name)
+                            .map(|right_idx| (left_idx, right_idx))
+                    })
+                    .collect();
+
+                for (curr_idx, current_row) in current_rows.iter().enumerate() {
+                    let mut has_match = false;
+                    for (ji, join_row) in join_table.rows.iter().enumerate() {
+                        let matches = common_columns.iter().all(|(left_idx, right_idx)| {
+                            current_row
+                                .get(*left_idx)
+                                .zip(join_row.get(*right_idx))
+                                .map(|(l, r)| l == r)
+                                .unwrap_or(false)
+                        });
+                        if matches {
+                            let mut combined = current_row.clone();
+                            combined.extend(join_row.clone());
+                            joined_rows.push(combined);
+                            has_match = true;
+                            matched_pairs.insert((curr_idx, ji));
+                        }
+                    }
+                    if !has_match {
                         let mut combined = current_row.clone();
                         combined.extend(vec![Value::Null; join_table.columns.len()]);
                         joined_rows.push(combined);
@@ -3382,42 +3701,84 @@ fn execute_create_index(stmt: CreateIndexStatement) -> Result<String, RustqlErro
         )));
     }
 
-    let table = db
-        .tables
-        .get(&stmt.table)
-        .ok_or_else(|| RustqlError::TableNotFound(stmt.table.clone()))?;
-
-    let col_idx = table
+    let first_column = stmt
         .columns
-        .iter()
-        .position(|col| col.name == stmt.column)
-        .ok_or_else(|| {
-            format!(
-                "Column '{}' does not exist in table '{}'",
-                stmt.column, stmt.table
-            )
-        })?;
+        .first()
+        .ok_or_else(|| RustqlError::Internal("Index must have at least one column".to_string()))?
+        .clone();
 
-    let mut index = crate::database::Index {
-        name: stmt.name.clone(),
-        table: stmt.table.clone(),
-        column: stmt.column.clone(),
-        entries: BTreeMap::new(),
-    };
+    let mut indexes_to_insert: Vec<(String, crate::database::Index)> = Vec::new();
 
-    for (row_idx, row) in table.rows.iter().enumerate() {
-        let value = row.get(col_idx).cloned().unwrap_or(Value::Null);
-        index.entries.entry(value).or_default().push(row_idx);
+    {
+        let table = db
+            .tables
+            .get(&stmt.table)
+            .ok_or_else(|| RustqlError::TableNotFound(stmt.table.clone()))?;
+
+        let col_idx = table
+            .columns
+            .iter()
+            .position(|col| col.name == first_column)
+            .ok_or_else(|| {
+                format!(
+                    "Column '{}' does not exist in table '{}'",
+                    first_column, stmt.table
+                )
+            })?;
+
+        let mut index = crate::database::Index {
+            name: stmt.name.clone(),
+            table: stmt.table.clone(),
+            column: first_column.clone(),
+            entries: BTreeMap::new(),
+        };
+
+        for (row_idx, row) in table.rows.iter().enumerate() {
+            let value = row.get(col_idx).cloned().unwrap_or(Value::Null);
+            index.entries.entry(value).or_default().push(row_idx);
+        }
+
+        indexes_to_insert.push((stmt.name.clone(), index));
+
+        for (i, col_name) in stmt.columns.iter().enumerate().skip(1) {
+            let extra_col_idx = table
+                .columns
+                .iter()
+                .position(|col| col.name == *col_name)
+                .ok_or_else(|| {
+                    format!(
+                        "Column '{}' does not exist in table '{}'",
+                        col_name, stmt.table
+                    )
+                })?;
+
+            let extra_index_name = format!("{}_{}", stmt.name, i + 1);
+            let mut extra_index = crate::database::Index {
+                name: extra_index_name.clone(),
+                table: stmt.table.clone(),
+                column: col_name.clone(),
+                entries: BTreeMap::new(),
+            };
+
+            for (row_idx, row) in table.rows.iter().enumerate() {
+                let value = row.get(extra_col_idx).cloned().unwrap_or(Value::Null);
+                extra_index.entries.entry(value).or_default().push(row_idx);
+            }
+
+            indexes_to_insert.push((extra_index_name, extra_index));
+        }
     }
 
-    db.indexes.insert(stmt.name.clone(), index);
-    wal::record_wal_entry(WalEntry::CreateIndex {
-        name: stmt.name.clone(),
-    });
+    for (index_name, index) in indexes_to_insert {
+        db.indexes.insert(index_name.clone(), index);
+        wal::record_wal_entry(WalEntry::CreateIndex { name: index_name });
+    }
+
     save_if_not_in_transaction(&db)?;
+    let columns_str = stmt.columns.join(", ");
     Ok(format!(
         "Index '{}' created on {}.{}",
-        stmt.name, stmt.table, stmt.column
+        stmt.name, stmt.table, columns_str
     ))
 }
 
@@ -3755,4 +4116,226 @@ fn get_indexed_rows(
         .collect();
 
     Ok(valid_indices)
+}
+
+fn validate_check_constraints(
+    columns: &[ColumnDefinition],
+    row: &[Value],
+) -> Result<(), RustqlError> {
+    for col_def in columns {
+        if let Some(ref check_expr_str) = col_def.check {
+            let wrapped = format!("SELECT * FROM _dummy WHERE {}", check_expr_str);
+            if let Ok(tokens) = crate::lexer::tokenize(&wrapped) {
+                if let Ok(Statement::Select(select_stmt)) = crate::parser::parse(tokens) {
+                    if let Some(where_expr) = select_stmt.where_clause {
+                        let result = evaluate_expression(None, &where_expr, columns, row)?;
+                        if !result {
+                            return Err(RustqlError::ConstraintViolation {
+                                kind: ConstraintKind::NotNull,
+                                message: format!(
+                                    "CHECK constraint violation on column '{}': {}",
+                                    col_def.name, check_expr_str
+                                ),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn execute_savepoint(name: String) -> Result<String, RustqlError> {
+    wal::savepoint(&name)?;
+    Ok(format!("Savepoint '{}' created", name))
+}
+
+fn execute_release_savepoint(name: String) -> Result<String, RustqlError> {
+    wal::release_savepoint(&name)?;
+    Ok(format!("Savepoint '{}' released", name))
+}
+
+fn execute_rollback_to_savepoint(name: String) -> Result<String, RustqlError> {
+    let mut db = get_database_write();
+    wal::rollback_to_savepoint(&name, &mut db)?;
+    Ok(format!("Rolled back to savepoint '{}'", name))
+}
+
+fn execute_select_with_ctes(mut stmt: SelectStatement) -> Result<String, RustqlError> {
+    let ctes = std::mem::take(&mut stmt.ctes);
+    let mut db = get_database_write();
+
+    let mut temp_table_names: Vec<String> = Vec::new();
+    for cte in &ctes {
+        let cte_result = execute_select_internal(cte.query.clone(), &db)?;
+        let columns: Vec<ColumnDefinition> = cte_result
+            .headers
+            .iter()
+            .map(|name| ColumnDefinition {
+                name: name.clone(),
+                data_type: DataType::Text,
+                nullable: true,
+                primary_key: false,
+                unique: false,
+                default_value: None,
+                foreign_key: None,
+                check: None,
+                auto_increment: false,
+            })
+            .collect();
+        db.tables.insert(
+            cte.name.clone(),
+            Table {
+                columns,
+                rows: cte_result.rows,
+            },
+        );
+        temp_table_names.push(cte.name.clone());
+    }
+
+    drop(db);
+
+    let result = execute_select(stmt);
+
+    let mut db = get_database_write();
+    for name in temp_table_names {
+        db.tables.remove(&name);
+    }
+
+    result
+}
+
+fn execute_analyze(table_name: String) -> Result<String, RustqlError> {
+    let db = get_database_read();
+    let table = db
+        .tables
+        .get(&table_name)
+        .ok_or_else(|| RustqlError::TableNotFound(table_name.clone()))?;
+
+    let row_count = table.rows.len();
+    let mut result = format!("Table: {}\nRow count: {}\n", table_name, row_count);
+    result.push_str("Column\tDistinct Count\n");
+    result.push_str(&"-".repeat(40));
+    result.push('\n');
+
+    for (col_idx, col_def) in table.columns.iter().enumerate() {
+        let distinct: std::collections::BTreeSet<&Value> = table
+            .rows
+            .iter()
+            .filter_map(|row| row.get(col_idx))
+            .collect();
+        result.push_str(&format!("{}\t{}\n", col_def.name, distinct.len()));
+    }
+
+    Ok(result)
+}
+
+fn evaluate_window_functions(
+    rows: &mut Vec<Vec<Value>>,
+    columns: &[ColumnDefinition],
+    select_columns: &[Column],
+) -> Result<(), RustqlError> {
+    for col in select_columns {
+        if let Column::Expression {
+            expr:
+                Expression::WindowFunction {
+                    function,
+                    partition_by,
+                    order_by,
+                },
+            ..
+        } = col
+        {
+            let mut partition_groups: BTreeMap<Vec<Value>, Vec<usize>> = BTreeMap::new();
+            for (idx, row) in rows.iter().enumerate() {
+                let key: Vec<Value> = partition_by
+                    .iter()
+                    .map(|expr| {
+                        evaluate_value_expression(expr, columns, row).unwrap_or(Value::Null)
+                    })
+                    .collect();
+                partition_groups.entry(key).or_default().push(idx);
+            }
+
+            for (_key, indices) in &partition_groups {
+                let mut sorted_indices = indices.clone();
+                sorted_indices.sort_by(|&a, &b| {
+                    for ob in order_by {
+                        let va = evaluate_value_expression(&ob.expr, columns, &rows[a])
+                            .unwrap_or(Value::Null);
+                        let vb = evaluate_value_expression(&ob.expr, columns, &rows[b])
+                            .unwrap_or(Value::Null);
+                        let cmp = compare_values_for_sort(&va, &vb);
+                        if cmp != Ordering::Equal {
+                            return if ob.asc { cmp } else { cmp.reverse() };
+                        }
+                    }
+                    Ordering::Equal
+                });
+
+                match function {
+                    WindowFunctionType::RowNumber => {
+                        for (rank, &idx) in sorted_indices.iter().enumerate() {
+                            rows[idx].push(Value::Integer(rank as i64 + 1));
+                        }
+                    }
+                    WindowFunctionType::Rank => {
+                        let mut current_rank = 1i64;
+                        for (i, &idx) in sorted_indices.iter().enumerate() {
+                            if i > 0 {
+                                let prev_idx = sorted_indices[i - 1];
+                                let same = order_by.iter().all(|ob| {
+                                    let va = evaluate_value_expression(
+                                        &ob.expr,
+                                        columns,
+                                        &rows[prev_idx],
+                                    )
+                                    .unwrap_or(Value::Null);
+                                    let vb =
+                                        evaluate_value_expression(&ob.expr, columns, &rows[idx])
+                                            .unwrap_or(Value::Null);
+                                    va == vb
+                                });
+                                if !same {
+                                    current_rank = i as i64 + 1;
+                                }
+                            }
+                            rows[idx].push(Value::Integer(current_rank));
+                        }
+                    }
+                    WindowFunctionType::DenseRank => {
+                        let mut current_rank = 1i64;
+                        for (i, &idx) in sorted_indices.iter().enumerate() {
+                            if i > 0 {
+                                let prev_idx = sorted_indices[i - 1];
+                                let same = order_by.iter().all(|ob| {
+                                    let va = evaluate_value_expression(
+                                        &ob.expr,
+                                        columns,
+                                        &rows[prev_idx],
+                                    )
+                                    .unwrap_or(Value::Null);
+                                    let vb =
+                                        evaluate_value_expression(&ob.expr, columns, &rows[idx])
+                                            .unwrap_or(Value::Null);
+                                    va == vb
+                                });
+                                if !same {
+                                    current_rank += 1;
+                                }
+                            }
+                            rows[idx].push(Value::Integer(current_rank));
+                        }
+                    }
+                    WindowFunctionType::Aggregate(_) => {
+                        for &idx in &sorted_indices {
+                            rows[idx].push(Value::Null);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
 }

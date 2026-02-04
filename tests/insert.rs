@@ -16,6 +16,8 @@ fn test_insert() {
                 data_type: DataType::Integer,
                 nullable: false,
                 foreign_key: None,
+                check: None,
+                auto_increment: false,
             },
             ColumnDefinition {
                 primary_key: false,
@@ -25,6 +27,8 @@ fn test_insert() {
                 data_type: DataType::Text,
                 nullable: false,
                 foreign_key: None,
+                check: None,
+                auto_increment: false,
             },
         ],
     });
@@ -35,6 +39,7 @@ fn test_insert() {
         table: "users".to_string(),
         columns: Some(vec!["id".into(), "name".into()]),
         values: vec![vec![Value::Integer(1), Value::Text("Alice".into())]],
+        source_query: None,
     });
 
     let result = execute(insert).unwrap();

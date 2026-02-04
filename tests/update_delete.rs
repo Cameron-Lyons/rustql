@@ -13,6 +13,8 @@ fn test_update_and_delete() {
                 unique: false,
                 default_value: None,
                 foreign_key: None,
+                check: None,
+                auto_increment: false,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
@@ -22,6 +24,8 @@ fn test_update_and_delete() {
                 unique: false,
                 default_value: None,
                 foreign_key: None,
+                check: None,
+                auto_increment: false,
                 name: "name".into(),
                 data_type: DataType::Text,
                 nullable: false,
@@ -34,6 +38,7 @@ fn test_update_and_delete() {
         table: "users".into(),
         columns: Some(vec!["id".into(), "name".into()]),
         values: vec![vec![Value::Integer(1), Value::Text("Alice".into())]],
+        source_query: None,
     }))
     .unwrap();
 

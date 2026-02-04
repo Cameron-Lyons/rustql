@@ -15,6 +15,8 @@ fn test_alter_table_add_column() {
             data_type: DataType::Integer,
             nullable: false,
             foreign_key: None,
+            check: None,
+            auto_increment: false,
         }],
     }))
     .unwrap();
@@ -29,6 +31,8 @@ fn test_alter_table_add_column() {
             data_type: DataType::Text,
             nullable: false,
             foreign_key: None,
+            check: None,
+            auto_increment: false,
         }),
     });
 

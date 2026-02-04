@@ -14,13 +14,18 @@ pub enum Statement {
     BeginTransaction,
     CommitTransaction,
     RollbackTransaction,
+    Savepoint(String),
+    ReleaseSavepoint(String),
+    RollbackToSavepoint(String),
     Explain(SelectStatement),
     Describe(String),
     ShowTables,
+    Analyze(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SelectStatement {
+    pub ctes: Vec<Cte>,
     pub distinct: bool,
     pub columns: Vec<Column>,
     pub from: String,
@@ -36,10 +41,16 @@ pub struct SelectStatement {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct Cte {
+    pub name: String,
+    pub query: SelectStatement,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct Join {
     pub join_type: JoinType,
     pub table: String,
-    pub on: Expression,
+    pub on: Option<Expression>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -48,6 +59,8 @@ pub enum JoinType {
     Left,
     Right,
     Full,
+    Cross,
+    Natural,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -87,6 +100,7 @@ pub struct InsertStatement {
     pub table: String,
     pub columns: Option<Vec<String>>,
     pub values: Vec<Vec<Value>>,
+    pub source_query: Option<Box<SelectStatement>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -123,6 +137,10 @@ pub struct ColumnDefinition {
     pub unique: bool,
     pub default_value: Option<Value>,
     pub foreign_key: Option<ForeignKeyConstraint>,
+    #[serde(default)]
+    pub check: Option<String>,
+    #[serde(default)]
+    pub auto_increment: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -174,7 +192,7 @@ pub enum AlterOperation {
 pub struct CreateIndexStatement {
     pub name: String,
     pub table: String,
-    pub column: String,
+    pub columns: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -206,6 +224,39 @@ pub enum Expression {
     Column(String),
     Value(Value),
     Function(AggregateFunction),
+    Case {
+        operand: Option<Box<Expression>>,
+        when_clauses: Vec<(Expression, Expression)>,
+        else_clause: Option<Box<Expression>>,
+    },
+    ScalarFunction {
+        name: ScalarFunctionType,
+        args: Vec<Expression>,
+    },
+    WindowFunction {
+        function: WindowFunctionType,
+        partition_by: Vec<Expression>,
+        order_by: Vec<OrderByExpr>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ScalarFunctionType {
+    Upper,
+    Lower,
+    Length,
+    Substring,
+    Abs,
+    Round,
+    Coalesce,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum WindowFunctionType {
+    RowNumber,
+    Rank,
+    DenseRank,
+    Aggregate(AggregateFunctionType),
 }
 
 #[derive(Debug, Clone, PartialEq)]

@@ -11,6 +11,8 @@ fn test_where_exists_true() {
                 unique: false,
                 default_value: None,
                 foreign_key: None,
+                check: None,
+                auto_increment: false,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
@@ -20,6 +22,8 @@ fn test_where_exists_true() {
                 unique: false,
                 default_value: None,
                 foreign_key: None,
+                check: None,
+                auto_increment: false,
                 name: "name".into(),
                 data_type: DataType::Text,
                 nullable: false,
@@ -35,6 +39,7 @@ fn test_where_exists_true() {
             vec![Value::Integer(1), Value::Text("Alice".into())],
             vec![Value::Integer(2), Value::Text("Bob".into())],
         ],
+        source_query: None,
     }))
     .unwrap();
 
@@ -46,6 +51,8 @@ fn test_where_exists_true() {
                 unique: false,
                 default_value: None,
                 foreign_key: None,
+                check: None,
+                auto_increment: false,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
@@ -55,6 +62,8 @@ fn test_where_exists_true() {
                 unique: false,
                 default_value: None,
                 foreign_key: None,
+                check: None,
+                auto_increment: false,
                 name: "amount".into(),
                 data_type: DataType::Float,
                 nullable: false,
@@ -70,10 +79,12 @@ fn test_where_exists_true() {
             vec![Value::Integer(1), Value::Float(150.0)],
             vec![Value::Integer(2), Value::Float(50.0)],
         ],
+        source_query: None,
     }))
     .unwrap();
 
     let sub = SelectStatement {
+        ctes: Vec::new(),
         union: None,
         union_all: false,
         distinct: false,
@@ -93,6 +104,7 @@ fn test_where_exists_true() {
     };
 
     let stmt = Statement::Select(SelectStatement {
+        ctes: Vec::new(),
         union: None,
         union_all: false,
         distinct: false,
@@ -122,6 +134,8 @@ fn test_where_exists_false_filters_all() {
                 unique: false,
                 default_value: None,
                 foreign_key: None,
+                check: None,
+                auto_increment: false,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
@@ -131,6 +145,8 @@ fn test_where_exists_false_filters_all() {
                 unique: false,
                 default_value: None,
                 foreign_key: None,
+                check: None,
+                auto_increment: false,
                 name: "name".into(),
                 data_type: DataType::Text,
                 nullable: false,
@@ -146,6 +162,7 @@ fn test_where_exists_false_filters_all() {
             vec![Value::Integer(1), Value::Text("Alice".into())],
             vec![Value::Integer(2), Value::Text("Bob".into())],
         ],
+        source_query: None,
     }))
     .unwrap();
 
@@ -157,6 +174,8 @@ fn test_where_exists_false_filters_all() {
                 unique: false,
                 default_value: None,
                 foreign_key: None,
+                check: None,
+                auto_increment: false,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
@@ -166,6 +185,8 @@ fn test_where_exists_false_filters_all() {
                 unique: false,
                 default_value: None,
                 foreign_key: None,
+                check: None,
+                auto_increment: false,
                 name: "amount".into(),
                 data_type: DataType::Float,
                 nullable: false,
@@ -181,10 +202,12 @@ fn test_where_exists_false_filters_all() {
             vec![Value::Integer(1), Value::Float(150.0)],
             vec![Value::Integer(2), Value::Float(50.0)],
         ],
+        source_query: None,
     }))
     .unwrap();
 
     let sub = SelectStatement {
+        ctes: Vec::new(),
         union: None,
         union_all: false,
         distinct: false,
@@ -204,6 +227,7 @@ fn test_where_exists_false_filters_all() {
     };
 
     let stmt = Statement::Select(SelectStatement {
+        ctes: Vec::new(),
         union: None,
         union_all: false,
         distinct: false,
@@ -233,6 +257,8 @@ fn test_where_not_exists_true_filters_all() {
                 unique: false,
                 default_value: None,
                 foreign_key: None,
+                check: None,
+                auto_increment: false,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
@@ -242,6 +268,8 @@ fn test_where_not_exists_true_filters_all() {
                 unique: false,
                 default_value: None,
                 foreign_key: None,
+                check: None,
+                auto_increment: false,
                 name: "name".into(),
                 data_type: DataType::Text,
                 nullable: false,
@@ -257,6 +285,7 @@ fn test_where_not_exists_true_filters_all() {
             vec![Value::Integer(1), Value::Text("Alice".into())],
             vec![Value::Integer(2), Value::Text("Bob".into())],
         ],
+        source_query: None,
     }))
     .unwrap();
 
@@ -268,6 +297,8 @@ fn test_where_not_exists_true_filters_all() {
                 unique: false,
                 default_value: None,
                 foreign_key: None,
+                check: None,
+                auto_increment: false,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
@@ -277,6 +308,8 @@ fn test_where_not_exists_true_filters_all() {
                 unique: false,
                 default_value: None,
                 foreign_key: None,
+                check: None,
+                auto_increment: false,
                 name: "amount".into(),
                 data_type: DataType::Float,
                 nullable: false,
@@ -292,10 +325,12 @@ fn test_where_not_exists_true_filters_all() {
             vec![Value::Integer(1), Value::Float(150.0)],
             vec![Value::Integer(2), Value::Float(50.0)],
         ],
+        source_query: None,
     }))
     .unwrap();
 
     let sub = SelectStatement {
+        ctes: Vec::new(),
         union: None,
         union_all: false,
         distinct: false,
@@ -315,6 +350,7 @@ fn test_where_not_exists_true_filters_all() {
     };
 
     let stmt = Statement::Select(SelectStatement {
+        ctes: Vec::new(),
         union: None,
         union_all: false,
         distinct: false,
@@ -347,6 +383,8 @@ fn test_where_exists_correlated_true() {
                 unique: false,
                 default_value: None,
                 foreign_key: None,
+                check: None,
+                auto_increment: false,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
@@ -356,6 +394,8 @@ fn test_where_exists_correlated_true() {
                 unique: false,
                 default_value: None,
                 foreign_key: None,
+                check: None,
+                auto_increment: false,
                 name: "name".into(),
                 data_type: DataType::Text,
                 nullable: false,
@@ -371,6 +411,7 @@ fn test_where_exists_correlated_true() {
             vec![Value::Integer(1), Value::Text("Alice".into())],
             vec![Value::Integer(2), Value::Text("Bob".into())],
         ],
+        source_query: None,
     }))
     .unwrap();
 
@@ -382,6 +423,8 @@ fn test_where_exists_correlated_true() {
                 unique: false,
                 default_value: None,
                 foreign_key: None,
+                check: None,
+                auto_increment: false,
                 name: "user_id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
@@ -391,6 +434,8 @@ fn test_where_exists_correlated_true() {
                 unique: false,
                 default_value: None,
                 foreign_key: None,
+                check: None,
+                auto_increment: false,
                 name: "amount".into(),
                 data_type: DataType::Float,
                 nullable: false,
@@ -406,10 +451,12 @@ fn test_where_exists_correlated_true() {
             vec![Value::Integer(1), Value::Float(150.0)],
             vec![Value::Integer(2), Value::Float(50.0)],
         ],
+        source_query: None,
     }))
     .unwrap();
 
     let sub = SelectStatement {
+        ctes: Vec::new(),
         union: None,
         union_all: false,
         distinct: false,
@@ -437,6 +484,7 @@ fn test_where_exists_correlated_true() {
     };
 
     let stmt = Statement::Select(SelectStatement {
+        ctes: Vec::new(),
         union: None,
         union_all: false,
         distinct: false,
@@ -466,6 +514,8 @@ fn test_where_not_exists_false() {
                 unique: false,
                 default_value: None,
                 foreign_key: None,
+                check: None,
+                auto_increment: false,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
@@ -475,6 +525,8 @@ fn test_where_not_exists_false() {
                 unique: false,
                 default_value: None,
                 foreign_key: None,
+                check: None,
+                auto_increment: false,
                 name: "name".into(),
                 data_type: DataType::Text,
                 nullable: false,
@@ -490,6 +542,7 @@ fn test_where_not_exists_false() {
             vec![Value::Integer(1), Value::Text("Alice".into())],
             vec![Value::Integer(2), Value::Text("Bob".into())],
         ],
+        source_query: None,
     }))
     .unwrap();
 
@@ -501,6 +554,8 @@ fn test_where_not_exists_false() {
                 unique: false,
                 default_value: None,
                 foreign_key: None,
+                check: None,
+                auto_increment: false,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
@@ -510,6 +565,8 @@ fn test_where_not_exists_false() {
                 unique: false,
                 default_value: None,
                 foreign_key: None,
+                check: None,
+                auto_increment: false,
                 name: "amount".into(),
                 data_type: DataType::Float,
                 nullable: false,
@@ -525,10 +582,12 @@ fn test_where_not_exists_false() {
             vec![Value::Integer(1), Value::Float(150.0)],
             vec![Value::Integer(2), Value::Float(50.0)],
         ],
+        source_query: None,
     }))
     .unwrap();
 
     let sub = SelectStatement {
+        ctes: Vec::new(),
         union: None,
         union_all: false,
         distinct: false,
@@ -548,6 +607,7 @@ fn test_where_not_exists_false() {
     };
 
     let stmt = Statement::Select(SelectStatement {
+        ctes: Vec::new(),
         union: None,
         union_all: false,
         distinct: false,
@@ -580,6 +640,8 @@ fn test_where_exists_correlated_false() {
                 unique: false,
                 default_value: None,
                 foreign_key: None,
+                check: None,
+                auto_increment: false,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
@@ -589,6 +651,8 @@ fn test_where_exists_correlated_false() {
                 unique: false,
                 default_value: None,
                 foreign_key: None,
+                check: None,
+                auto_increment: false,
                 name: "name".into(),
                 data_type: DataType::Text,
                 nullable: false,
@@ -604,6 +668,7 @@ fn test_where_exists_correlated_false() {
             vec![Value::Integer(1), Value::Text("Alice".into())],
             vec![Value::Integer(2), Value::Text("Bob".into())],
         ],
+        source_query: None,
     }))
     .unwrap();
 
@@ -615,6 +680,8 @@ fn test_where_exists_correlated_false() {
                 unique: false,
                 default_value: None,
                 foreign_key: None,
+                check: None,
+                auto_increment: false,
                 name: "user_id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
@@ -624,6 +691,8 @@ fn test_where_exists_correlated_false() {
                 unique: false,
                 default_value: None,
                 foreign_key: None,
+                check: None,
+                auto_increment: false,
                 name: "amount".into(),
                 data_type: DataType::Float,
                 nullable: false,
@@ -639,10 +708,12 @@ fn test_where_exists_correlated_false() {
             vec![Value::Integer(1), Value::Float(50.0)],
             vec![Value::Integer(2), Value::Float(30.0)],
         ],
+        source_query: None,
     }))
     .unwrap();
 
     let sub = SelectStatement {
+        ctes: Vec::new(),
         union: None,
         union_all: false,
         distinct: false,
@@ -670,6 +741,7 @@ fn test_where_exists_correlated_false() {
     };
 
     let stmt = Statement::Select(SelectStatement {
+        ctes: Vec::new(),
         union: None,
         union_all: false,
         distinct: false,
@@ -699,6 +771,8 @@ fn test_where_exists_with_join() {
                 unique: false,
                 default_value: None,
                 foreign_key: None,
+                check: None,
+                auto_increment: false,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
@@ -708,6 +782,8 @@ fn test_where_exists_with_join() {
                 unique: false,
                 default_value: None,
                 foreign_key: None,
+                check: None,
+                auto_increment: false,
                 name: "name".into(),
                 data_type: DataType::Text,
                 nullable: false,
@@ -723,6 +799,7 @@ fn test_where_exists_with_join() {
             vec![Value::Integer(1), Value::Text("Alice".into())],
             vec![Value::Integer(2), Value::Text("Bob".into())],
         ],
+        source_query: None,
     }))
     .unwrap();
 
@@ -734,6 +811,8 @@ fn test_where_exists_with_join() {
                 unique: false,
                 default_value: None,
                 foreign_key: None,
+                check: None,
+                auto_increment: false,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
@@ -743,6 +822,8 @@ fn test_where_exists_with_join() {
                 unique: false,
                 default_value: None,
                 foreign_key: None,
+                check: None,
+                auto_increment: false,
                 name: "user_id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
@@ -758,6 +839,7 @@ fn test_where_exists_with_join() {
             vec![Value::Integer(1), Value::Integer(1)],
             vec![Value::Integer(2), Value::Integer(1)],
         ],
+        source_query: None,
     }))
     .unwrap();
 
@@ -769,6 +851,8 @@ fn test_where_exists_with_join() {
                 unique: false,
                 default_value: None,
                 foreign_key: None,
+                check: None,
+                auto_increment: false,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
@@ -778,6 +862,8 @@ fn test_where_exists_with_join() {
                 unique: false,
                 default_value: None,
                 foreign_key: None,
+                check: None,
+                auto_increment: false,
                 name: "order_id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
@@ -790,10 +876,12 @@ fn test_where_exists_with_join() {
         table: "payments_join1".to_string(),
         columns: Some(vec!["id".into(), "order_id".into()]),
         values: vec![vec![Value::Integer(1), Value::Integer(1)]],
+        source_query: None,
     }))
     .unwrap();
 
     let sub = SelectStatement {
+        ctes: Vec::new(),
         union: None,
         union_all: false,
         distinct: false,
@@ -802,11 +890,11 @@ fn test_where_exists_with_join() {
         joins: vec![Join {
             join_type: JoinType::Inner,
             table: "payments_join1".to_string(),
-            on: Expression::BinaryOp {
+            on: Some(Expression::BinaryOp {
                 left: Box::new(Expression::Column("orders_join1.id".into())),
                 op: BinaryOperator::Equal,
                 right: Box::new(Expression::Column("payments_join1.order_id".into())),
-            },
+            }),
         }],
         where_clause: Some(Expression::BinaryOp {
             left: Box::new(Expression::Column("orders_join1.user_id".into())),
@@ -821,6 +909,7 @@ fn test_where_exists_with_join() {
     };
 
     let stmt = Statement::Select(SelectStatement {
+        ctes: Vec::new(),
         union: None,
         union_all: false,
         distinct: false,
