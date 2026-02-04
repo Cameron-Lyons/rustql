@@ -31,7 +31,9 @@ fn test_insert() {
                 auto_increment: false,
             },
         ],
+        constraints: vec![],
         as_query: None,
+        if_not_exists: false,
     });
 
     execute(create).unwrap();
@@ -42,6 +44,7 @@ fn test_insert() {
         values: vec![vec![Value::Integer(1), Value::Text("Alice".into())]],
         source_query: None,
         on_conflict: None,
+        returning: None,
     });
 
     let result = execute(insert).unwrap();

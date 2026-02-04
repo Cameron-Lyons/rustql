@@ -31,11 +31,14 @@ fn test_create_and_drop_table() {
                 nullable: false,
             },
         ],
+        constraints: vec![],
         as_query: None,
+        if_not_exists: false,
     });
 
     let drop = Statement::DropTable(DropTableStatement {
         name: "users".to_string(),
+        if_exists: false,
     });
 
     assert_eq!(execute(create).unwrap(), "Table 'users' created");

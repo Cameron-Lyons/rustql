@@ -27,32 +27,45 @@ pub enum Statement {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub enum SetOperation {
+    Union,
+    UnionAll,
+    Intersect,
+    IntersectAll,
+    Except,
+    ExceptAll,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct SelectStatement {
     pub ctes: Vec<Cte>,
     pub distinct: bool,
     pub columns: Vec<Column>,
     pub from: String,
+    pub from_alias: Option<String>,
+    pub from_subquery: Option<(Box<SelectStatement>, String)>,
     pub joins: Vec<Join>,
     pub where_clause: Option<Expression>,
-    pub group_by: Option<Vec<String>>,
+    pub group_by: Option<Vec<Expression>>,
     pub having: Option<Expression>,
     pub order_by: Option<Vec<OrderByExpr>>,
     pub limit: Option<usize>,
     pub offset: Option<usize>,
-    pub union: Option<Box<SelectStatement>>,
-    pub union_all: bool,
+    pub set_op: Option<(SetOperation, Box<SelectStatement>)>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Cte {
     pub name: String,
     pub query: SelectStatement,
+    pub recursive: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Join {
     pub join_type: JoinType,
     pub table: String,
+    pub table_alias: Option<String>,
     pub on: Option<Expression>,
 }
 
@@ -116,6 +129,7 @@ pub struct InsertStatement {
     pub values: Vec<Vec<Value>>,
     pub source_query: Option<Box<SelectStatement>>,
     pub on_conflict: Option<OnConflictClause>,
+    pub returning: Option<Vec<Column>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -136,6 +150,7 @@ pub struct UpdateStatement {
     pub assignments: Vec<Assignment>,
     pub where_clause: Option<Expression>,
     pub from: Option<UpdateFrom>,
+    pub returning: Option<Vec<Column>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -154,13 +169,36 @@ pub struct Assignment {
 pub struct DeleteStatement {
     pub table: String,
     pub where_clause: Option<Expression>,
+    pub using: Option<DeleteUsing>,
+    pub returning: Option<Vec<Column>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeleteUsing {
+    pub table: String,
+    pub alias: Option<String>,
+    pub joins: Vec<Join>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum TableConstraint {
+    PrimaryKey {
+        name: Option<String>,
+        columns: Vec<String>,
+    },
+    Unique {
+        name: Option<String>,
+        columns: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct CreateTableStatement {
     pub name: String,
     pub columns: Vec<ColumnDefinition>,
+    pub constraints: Vec<TableConstraint>,
     pub as_query: Option<Box<SelectStatement>>,
+    pub if_not_exists: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -208,6 +246,7 @@ pub enum DataType {
 #[derive(Debug, Clone, PartialEq)]
 pub struct DropTableStatement {
     pub name: String,
+    pub if_exists: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -221,6 +260,9 @@ pub enum AlterOperation {
     AddColumn(ColumnDefinition),
     DropColumn(String),
     RenameColumn { old: String, new: String },
+    RenameTable(String),
+    AddConstraint(TableConstraint),
+    DropConstraint(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -228,11 +270,13 @@ pub struct CreateIndexStatement {
     pub name: String,
     pub table: String,
     pub columns: Vec<String>,
+    pub if_not_exists: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct DropIndexStatement {
     pub name: String,
+    pub if_exists: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -306,6 +350,20 @@ pub enum ScalarFunctionType {
     Day,
     DateAdd,
     Datediff,
+    Nullif,
+    Greatest,
+    Least,
+    Lpad,
+    Rpad,
+    LeftFn,
+    RightFn,
+    Reverse,
+    Repeat,
+    Log,
+    Exp,
+    Sign,
+    DateTrunc,
+    Extract,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -361,6 +419,7 @@ pub enum BinaryOperator {
     Multiply,
     Divide,
     Like,
+    ILike,
     Between,
     In,
     Concat,

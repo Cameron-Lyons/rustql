@@ -13,6 +13,9 @@ pub fn execute_create_table(stmt: CreateTableStatement) -> Result<String, Rustql
 
     let mut db = get_database_write();
     if db.tables.contains_key(&stmt.name) {
+        if stmt.if_not_exists {
+            return Ok(format!("Table '{}' already exists, skipping", stmt.name));
+        }
         return Err(RustqlError::TableAlreadyExists(stmt.name.clone()));
     }
     db.tables.insert(
@@ -20,6 +23,7 @@ pub fn execute_create_table(stmt: CreateTableStatement) -> Result<String, Rustql
         Table {
             columns: stmt.columns,
             rows: Vec::new(),
+            constraints: stmt.constraints,
         },
     );
     wal::record_wal_entry(WalEntry::CreateTable {
@@ -80,6 +84,7 @@ fn execute_create_table_as_select(
         Table {
             columns,
             rows: result.rows,
+            constraints: Vec::new(),
         },
     );
     wal::record_wal_entry(WalEntry::CreateTable { name: name.clone() });
@@ -97,6 +102,8 @@ pub fn execute_drop_table(stmt: DropTableStatement) -> Result<String, RustqlErro
         });
         save_if_not_in_transaction(&db)?;
         Ok(format!("Table '{}' dropped", stmt.name))
+    } else if stmt.if_exists {
+        Ok(format!("Table '{}' does not exist, skipping", stmt.name))
     } else {
         Err(RustqlError::TableNotFound(stmt.name.clone()))
     }
@@ -104,6 +111,31 @@ pub fn execute_drop_table(stmt: DropTableStatement) -> Result<String, RustqlErro
 
 pub fn execute_alter_table(stmt: AlterTableStatement) -> Result<String, RustqlError> {
     let mut db = get_database_write();
+
+    if let AlterOperation::RenameTable(ref new_name) = stmt.operation {
+        let table_data = db
+            .tables
+            .remove(&stmt.table)
+            .ok_or_else(|| RustqlError::TableNotFound(stmt.table.clone()))?;
+        db.tables.insert(new_name.clone(), table_data);
+        for index in db.indexes.values_mut() {
+            if index.table == stmt.table {
+                index.table = new_name.clone();
+            }
+        }
+        for ci in db.composite_indexes.values_mut() {
+            if ci.table == stmt.table {
+                ci.table = new_name.clone();
+            }
+        }
+        wal::record_wal_entry(WalEntry::AlterRenameTable {
+            old_name: stmt.table.clone(),
+            new_name: new_name.clone(),
+        });
+        save_if_not_in_transaction(&db)?;
+        return Ok(format!("Table '{}' renamed to '{}'", stmt.table, new_name));
+    }
+
     let table = db
         .tables
         .get_mut(&stmt.table)
@@ -193,6 +225,86 @@ pub fn execute_alter_table(stmt: AlterTableStatement) -> Result<String, RustqlEr
                 old, new, stmt.table
             ))
         }
+        AlterOperation::RenameTable(_) => unreachable!(),
+        AlterOperation::AddConstraint(constraint) => {
+            let constraint_cols = match &constraint {
+                crate::ast::TableConstraint::PrimaryKey { columns, .. } => columns.clone(),
+                crate::ast::TableConstraint::Unique { columns, .. } => columns.clone(),
+            };
+            let col_indices: Vec<usize> = constraint_cols
+                .iter()
+                .map(|col_name| {
+                    table
+                        .columns
+                        .iter()
+                        .position(|c| c.name == *col_name)
+                        .ok_or_else(|| {
+                            RustqlError::ColumnNotFound(format!(
+                                "{} (table: {})",
+                                col_name, stmt.table
+                            ))
+                        })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let mut seen: std::collections::BTreeSet<Vec<Value>> =
+                std::collections::BTreeSet::new();
+            for row in &table.rows {
+                let key: Vec<Value> = col_indices.iter().map(|&i| row[i].clone()).collect();
+                if matches!(&constraint, crate::ast::TableConstraint::PrimaryKey { .. })
+                    && key.iter().any(|v| matches!(v, Value::Null))
+                {
+                    return Err(RustqlError::Internal(
+                        "Cannot add PRIMARY KEY constraint: column contains NULL values"
+                            .to_string(),
+                    ));
+                }
+                if !seen.insert(key) {
+                    return Err(RustqlError::Internal(
+                        "Cannot add constraint: duplicate values exist".to_string(),
+                    ));
+                }
+            }
+            table.constraints.push(constraint.clone());
+            wal::record_wal_entry(WalEntry::AlterAddConstraint {
+                table: stmt.table.clone(),
+                constraint: constraint.clone(),
+            });
+            save_if_not_in_transaction(&db)?;
+            Ok(format!("Constraint added to table '{}'", stmt.table))
+        }
+        AlterOperation::DropConstraint(constraint_name) => {
+            let mut removed_constraint = None;
+            let before_len = table.constraints.len();
+            table.constraints.retain(|c| {
+                let name = match c {
+                    crate::ast::TableConstraint::PrimaryKey { name, .. } => name.as_deref(),
+                    crate::ast::TableConstraint::Unique { name, .. } => name.as_deref(),
+                };
+                if name == Some(constraint_name.as_str()) {
+                    removed_constraint = Some(c.clone());
+                    false
+                } else {
+                    true
+                }
+            });
+            if table.constraints.len() == before_len {
+                return Err(RustqlError::Internal(format!(
+                    "Constraint '{}' not found",
+                    constraint_name
+                )));
+            }
+            if let Some(removed) = removed_constraint {
+                wal::record_wal_entry(WalEntry::AlterDropConstraint {
+                    table: stmt.table.clone(),
+                    constraint: removed,
+                });
+            }
+            save_if_not_in_transaction(&db)?;
+            Ok(format!(
+                "Constraint '{}' dropped from table '{}'",
+                constraint_name, stmt.table
+            ))
+        }
     }
 }
 
@@ -200,6 +312,9 @@ pub fn execute_create_index(stmt: CreateIndexStatement) -> Result<String, Rustql
     let mut db = get_database_write();
 
     if db.indexes.contains_key(&stmt.name) {
+        if stmt.if_not_exists {
+            return Ok(format!("Index '{}' already exists, skipping", stmt.name));
+        }
         return Err(RustqlError::IndexError(format!(
             "Index '{}' already exists",
             stmt.name
@@ -279,6 +394,47 @@ pub fn execute_create_index(stmt: CreateIndexStatement) -> Result<String, Rustql
         wal::record_wal_entry(WalEntry::CreateIndex { name: index_name });
     }
 
+    if stmt.columns.len() > 1 {
+        let table = db
+            .tables
+            .get(&stmt.table)
+            .ok_or_else(|| RustqlError::TableNotFound(stmt.table.clone()))?;
+        let col_indices: Vec<usize> = stmt
+            .columns
+            .iter()
+            .map(|col_name| {
+                table
+                    .columns
+                    .iter()
+                    .position(|c| c.name == *col_name)
+                    .ok_or_else(|| {
+                        RustqlError::Internal(format!(
+                            "Column '{}' not found in table '{}'",
+                            col_name, stmt.table
+                        ))
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let composite_name = format!("{}_composite", stmt.name);
+        let mut entries = BTreeMap::new();
+        for (row_idx, row) in table.rows.iter().enumerate() {
+            let key: Vec<Value> = col_indices
+                .iter()
+                .map(|&i| row.get(i).cloned().unwrap_or(Value::Null))
+                .collect();
+            entries.entry(key).or_insert_with(Vec::new).push(row_idx);
+        }
+        db.composite_indexes.insert(
+            composite_name,
+            crate::database::CompositeIndex {
+                name: stmt.name.clone(),
+                table: stmt.table.clone(),
+                columns: stmt.columns.clone(),
+                entries,
+            },
+        );
+    }
+
     save_if_not_in_transaction(&db)?;
     let columns_str = stmt.columns.join(", ");
     Ok(format!(
@@ -296,6 +452,8 @@ pub fn execute_drop_index(stmt: DropIndexStatement) -> Result<String, RustqlErro
         });
         save_if_not_in_transaction(&db)?;
         Ok(format!("Index '{}' dropped", stmt.name))
+    } else if stmt.if_exists {
+        Ok(format!("Index '{}' does not exist, skipping", stmt.name))
     } else {
         Err(RustqlError::IndexError(format!(
             "Index '{}' does not exist",

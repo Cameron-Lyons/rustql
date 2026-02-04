@@ -371,20 +371,42 @@ impl<'a> PlanExecutor<'a> {
     fn execute_aggregate(
         &self,
         input: ExecutionResult,
-        group_by: &[String],
+        group_by: &[Expression],
         aggregates: &[AggregateFunction],
         having: Option<&Expression>,
     ) -> Result<ExecutionResult, RustqlError> {
-        let group_by_indices: Vec<usize> = group_by
+        let column_defs: Vec<ColumnDefinition> = input
+            .columns
             .iter()
-            .filter_map(|col| input.columns.iter().position(|c| c == col))
+            .map(|name| ColumnDefinition {
+                name: name.clone(),
+                data_type: DataType::Text,
+                nullable: true,
+                primary_key: false,
+                unique: false,
+                default_value: None,
+                foreign_key: None,
+                check: None,
+                auto_increment: false,
+            })
+            .collect();
+
+        let group_by_names: Vec<String> = group_by
+            .iter()
+            .map(|expr| match expr {
+                Expression::Column(name) => name.clone(),
+                _ => format!("{:?}", expr),
+            })
             .collect();
 
         let mut groups: BTreeMap<Vec<Value>, Vec<Vec<Value>>> = BTreeMap::new();
         for row in &input.rows {
-            let key: Vec<Value> = group_by_indices
+            let key: Vec<Value> = group_by
                 .iter()
-                .map(|&idx| row[idx].clone())
+                .map(|expr| {
+                    self.evaluate_value_expression(expr, &column_defs, row)
+                        .unwrap_or(Value::Null)
+                })
                 .collect();
             groups.entry(key).or_default().push(row.clone());
         }
@@ -399,7 +421,7 @@ impl<'a> PlanExecutor<'a> {
             }
 
             if let Some(having_expr) = having {
-                let mut result_columns: Vec<String> = group_by.to_vec();
+                let mut result_columns: Vec<String> = group_by_names.clone();
                 for agg in aggregates {
                     result_columns.push(format!("{:?}", agg.function));
                 }
@@ -450,7 +472,7 @@ impl<'a> PlanExecutor<'a> {
             result_rows.push(result_row);
         }
 
-        let mut result_columns = group_by.to_vec();
+        let mut result_columns = group_by_names;
         for agg in aggregates {
             result_columns.push(format!("{:?}", agg.function));
         }
@@ -482,6 +504,18 @@ impl<'a> PlanExecutor<'a> {
                         }
                         _ => Err(RustqlError::TypeMismatch(
                             "LIKE operator requires text values".to_string(),
+                        )),
+                    }
+                }
+                BinaryOperator::ILike => {
+                    let left_val = self.evaluate_value_expression(left, columns, row)?;
+                    let right_val = self.evaluate_value_expression(right, columns, row)?;
+                    match (left_val, right_val) {
+                        (Value::Text(text), Value::Text(pattern)) => {
+                            Ok(self.match_like(&text.to_lowercase(), &pattern.to_lowercase()))
+                        }
+                        _ => Err(RustqlError::TypeMismatch(
+                            "ILIKE operator requires text values".to_string(),
                         )),
                     }
                 }
@@ -1288,7 +1322,7 @@ impl<'a> PlanExecutor<'a> {
                 }
                 values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
                 let mid = values.len() / 2;
-                if values.len() % 2 == 0 {
+                if values.len().is_multiple_of(2) {
                     Ok(Value::Float((values[mid - 1] + values[mid]) / 2.0))
                 } else {
                     Ok(Value::Float(values[mid]))

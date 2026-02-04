@@ -392,7 +392,7 @@ fn compute_aggregate_inner(
             }
             values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
             let mid = values.len() / 2;
-            if values.len() % 2 == 0 {
+            if values.len().is_multiple_of(2) {
                 Ok(Value::Float((values[mid - 1] + values[mid]) / 2.0))
             } else {
                 Ok(Value::Float(values[mid]))
@@ -625,34 +625,49 @@ pub fn execute_select_with_grouping(
     rows: Vec<&Vec<Value>>,
 ) -> Result<String, RustqlError> {
     let raw_group_by = stmt.group_by.as_ref().unwrap();
-    let mut group_by_normalized_with_indices: Vec<(String, usize)> =
+    let mut group_by_info: Vec<(Expression, Option<(String, usize)>)> =
         Vec::with_capacity(raw_group_by.len());
-    for name in raw_group_by {
-        let normalized = if name.contains('.') {
-            name.split('.').next_back().unwrap_or(name)
+    for expr in raw_group_by {
+        let col_info = if let Expression::Column(col_name) = expr {
+            let normalized = if col_name.contains('.') {
+                col_name
+                    .split('.')
+                    .next_back()
+                    .unwrap_or(col_name)
+                    .to_string()
+            } else {
+                col_name.clone()
+            };
+            table
+                .columns
+                .iter()
+                .position(|c| c.name == normalized)
+                .map(|idx| (normalized, idx))
         } else {
-            name.as_str()
+            None
         };
-        let idx = table
-            .columns
-            .iter()
-            .position(|c| c.name == normalized)
-            .ok_or_else(|| RustqlError::ColumnNotFound(name.clone()))?;
-        group_by_normalized_with_indices.push((normalized.to_string(), idx));
+        group_by_info.push((expr.clone(), col_info));
     }
-    let group_by_indices: Vec<usize> = group_by_normalized_with_indices
-        .iter()
-        .map(|(_, idx)| *idx)
-        .collect();
 
     let mut groups: BTreeMap<Vec<Value>, Vec<&Vec<Value>>> = BTreeMap::new();
     for row in rows {
-        let key: Vec<Value> = group_by_indices
+        let key: Vec<Value> = group_by_info
             .iter()
-            .map(|&idx| row[idx].clone())
+            .map(|(expr, col_info)| {
+                if let Some((_, idx)) = col_info {
+                    row[*idx].clone()
+                } else {
+                    evaluate_value_expression(expr, &table.columns, row).unwrap_or(Value::Null)
+                }
+            })
             .collect();
         groups.entry(key).or_default().push(row);
     }
+
+    let group_by_normalized_with_indices: Vec<(String, usize)> = group_by_info
+        .iter()
+        .filter_map(|(_, col_info)| col_info.clone())
+        .collect();
 
     let mut column_specs: Vec<(String, Column)> = Vec::new();
     for col in &stmt.columns {
@@ -950,6 +965,7 @@ fn resolve_frame_bounds(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn compute_windowed_aggregate(
     agg_type: &AggregateFunctionType,
     rows: &[Vec<Value>],
@@ -967,8 +983,7 @@ fn compute_windowed_aggregate(
     let expr = args.first().unwrap_or(&default_expr);
 
     let mut values: Vec<Value> = Vec::new();
-    for i in frame_start..=frame_end {
-        let row_idx = sorted_indices[i];
+    for &row_idx in &sorted_indices[frame_start..=frame_end] {
         let val = evaluate_value_expression(expr, columns, &rows[row_idx]).unwrap_or(Value::Null);
         values.push(val);
     }
@@ -1100,7 +1115,7 @@ fn compute_windowed_aggregate(
             let parts: Vec<String> = values
                 .iter()
                 .filter(|v| !matches!(v, Value::Null))
-                .map(|v| format_value(v))
+                .map(format_value)
                 .collect();
             if parts.is_empty() {
                 Value::Null
@@ -1176,7 +1191,7 @@ fn compute_windowed_aggregate(
             }
             nums.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
             let mid = nums.len() / 2;
-            if nums.len() % 2 == 0 {
+            if nums.len().is_multiple_of(2) {
                 Value::Float((nums[mid - 1] + nums[mid]) / 2.0)
             } else {
                 Value::Float(nums[mid])
@@ -1246,7 +1261,7 @@ fn compute_windowed_aggregate(
 }
 
 pub fn evaluate_window_functions(
-    rows: &mut Vec<Vec<Value>>,
+    rows: &mut [Vec<Value>],
     columns: &[ColumnDefinition],
     select_columns: &[Column],
 ) -> Result<(), RustqlError> {
@@ -1274,7 +1289,7 @@ pub fn evaluate_window_functions(
                 partition_groups.entry(key).or_default().push(idx);
             }
 
-            for (_key, indices) in &partition_groups {
+            for indices in partition_groups.values() {
                 let mut sorted_indices = indices.clone();
                 sorted_indices.sort_by(|&a, &b| {
                     for ob in order_by {

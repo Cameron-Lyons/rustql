@@ -31,7 +31,9 @@ fn test_update_and_delete() {
                 nullable: false,
             },
         ],
+        constraints: vec![],
         as_query: None,
+        if_not_exists: false,
     }))
     .unwrap();
 
@@ -41,6 +43,7 @@ fn test_update_and_delete() {
         values: vec![vec![Value::Integer(1), Value::Text("Alice".into())]],
         source_query: None,
         on_conflict: None,
+        returning: None,
     }))
     .unwrap();
 
@@ -52,6 +55,7 @@ fn test_update_and_delete() {
         }],
         where_clause: None,
         from: None,
+        returning: None,
     });
 
     assert_eq!(execute(update).unwrap(), "1 row(s) updated");
@@ -59,6 +63,8 @@ fn test_update_and_delete() {
     let delete = Statement::Delete(DeleteStatement {
         table: "users".into(),
         where_clause: None,
+        using: None,
+        returning: None,
     });
 
     assert_eq!(execute(delete).unwrap(), "1 row(s) deleted");

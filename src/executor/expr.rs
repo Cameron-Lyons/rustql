@@ -25,6 +25,18 @@ pub fn evaluate_expression(
                     )),
                 }
             }
+            BinaryOperator::ILike => {
+                let left_val = evaluate_value_expression(left, columns, row)?;
+                let right_val = evaluate_value_expression(right, columns, row)?;
+                match (left_val, right_val) {
+                    (Value::Text(text), Value::Text(pattern)) => {
+                        Ok(match_like(&text.to_lowercase(), &pattern.to_lowercase()))
+                    }
+                    _ => Err(RustqlError::TypeMismatch(
+                        "ILIKE operator requires text values".to_string(),
+                    )),
+                }
+            }
             BinaryOperator::Between => {
                 let left_val = evaluate_value_expression(left, columns, row)?;
                 match &**right {
@@ -156,6 +168,15 @@ pub fn evaluate_value_expression(
     columns: &[ColumnDefinition],
     row: &[Value],
 ) -> Result<Value, RustqlError> {
+    evaluate_value_expression_with_db(expr, columns, row, None)
+}
+
+pub fn evaluate_value_expression_with_db(
+    expr: &Expression,
+    columns: &[ColumnDefinition],
+    row: &[Value],
+    db: Option<&Database>,
+) -> Result<Value, RustqlError> {
     match expr {
         Expression::Column(name) => {
             if name == "*" {
@@ -174,8 +195,8 @@ pub fn evaluate_value_expression(
         }
         Expression::Value(val) => Ok(val.clone()),
         Expression::BinaryOp { left, op, right } => {
-            let left_val = evaluate_value_expression(left, columns, row)?;
-            let right_val = evaluate_value_expression(right, columns, row)?;
+            let left_val = evaluate_value_expression_with_db(left, columns, row, db)?;
+            let right_val = evaluate_value_expression_with_db(right, columns, row, db)?;
             match op {
                 BinaryOperator::Plus
                 | BinaryOperator::Minus
@@ -192,7 +213,7 @@ pub fn evaluate_value_expression(
             }
         }
         Expression::UnaryOp { op, expr } => {
-            let val = evaluate_value_expression(expr, columns, row)?;
+            let val = evaluate_value_expression_with_db(expr, columns, row, db)?;
             match op {
                 UnaryOperator::Minus => match val {
                     Value::Integer(n) => Ok(Value::Integer(-n)),
@@ -212,23 +233,24 @@ pub fn evaluate_value_expression(
             else_clause,
         } => {
             if let Some(operand_expr) = operand {
-                let operand_val = evaluate_value_expression(operand_expr, columns, row)?;
+                let operand_val =
+                    evaluate_value_expression_with_db(operand_expr, columns, row, db)?;
                 for (when_expr, then_expr) in when_clauses {
-                    let when_val = evaluate_value_expression(when_expr, columns, row)?;
+                    let when_val = evaluate_value_expression_with_db(when_expr, columns, row, db)?;
                     if operand_val == when_val {
-                        return evaluate_value_expression(then_expr, columns, row);
+                        return evaluate_value_expression_with_db(then_expr, columns, row, db);
                     }
                 }
             } else {
                 for (when_expr, then_expr) in when_clauses {
-                    let is_true = evaluate_expression(None, when_expr, columns, row)?;
+                    let is_true = evaluate_expression(db, when_expr, columns, row)?;
                     if is_true {
-                        return evaluate_value_expression(then_expr, columns, row);
+                        return evaluate_value_expression_with_db(then_expr, columns, row, db);
                     }
                 }
             }
             if let Some(else_expr) = else_clause {
-                evaluate_value_expression(else_expr, columns, row)
+                evaluate_value_expression_with_db(else_expr, columns, row, db)
             } else {
                 Ok(Value::Null)
             }
@@ -236,7 +258,7 @@ pub fn evaluate_value_expression(
         Expression::ScalarFunction { name, args } => {
             let evaluated_args: Vec<Value> = args
                 .iter()
-                .map(|a| evaluate_value_expression(a, columns, row))
+                .map(|a| evaluate_value_expression_with_db(a, columns, row, db))
                 .collect::<Result<Vec<_>, _>>()?;
             match name {
                 ScalarFunctionType::Upper => match evaluated_args.first() {
@@ -636,15 +658,409 @@ pub fn evaluate_value_expression(
                     let jdn2 = ymd_to_days(y2, m2, d2);
                     Ok(Value::Integer(jdn1 - jdn2))
                 }
+                ScalarFunctionType::Nullif => {
+                    if evaluated_args.len() < 2 {
+                        return Err(RustqlError::TypeMismatch(
+                            "NULLIF requires two arguments".to_string(),
+                        ));
+                    }
+                    if evaluated_args[0] == evaluated_args[1] {
+                        Ok(Value::Null)
+                    } else {
+                        Ok(evaluated_args[0].clone())
+                    }
+                }
+                ScalarFunctionType::Greatest => {
+                    let non_null: Vec<&Value> = evaluated_args
+                        .iter()
+                        .filter(|v| !matches!(v, Value::Null))
+                        .collect();
+                    if non_null.is_empty() {
+                        Ok(Value::Null)
+                    } else {
+                        let mut max = non_null[0];
+                        for v in &non_null[1..] {
+                            if (*v).cmp(max) == std::cmp::Ordering::Greater {
+                                max = *v;
+                            }
+                        }
+                        Ok(max.clone())
+                    }
+                }
+                ScalarFunctionType::Least => {
+                    let non_null: Vec<&Value> = evaluated_args
+                        .iter()
+                        .filter(|v| !matches!(v, Value::Null))
+                        .collect();
+                    if non_null.is_empty() {
+                        Ok(Value::Null)
+                    } else {
+                        let mut min = non_null[0];
+                        for v in &non_null[1..] {
+                            if (*v).cmp(min) == std::cmp::Ordering::Less {
+                                min = *v;
+                            }
+                        }
+                        Ok(min.clone())
+                    }
+                }
+                ScalarFunctionType::Lpad => {
+                    let s = match evaluated_args.first() {
+                        Some(Value::Text(s)) => s.clone(),
+                        Some(Value::Null) => return Ok(Value::Null),
+                        _ => {
+                            return Err(RustqlError::TypeMismatch(
+                                "LPAD requires a text first argument".to_string(),
+                            ));
+                        }
+                    };
+                    let len = match evaluated_args.get(1) {
+                        Some(Value::Integer(i)) => *i as usize,
+                        _ => {
+                            return Err(RustqlError::TypeMismatch(
+                                "LPAD requires an integer second argument".to_string(),
+                            ));
+                        }
+                    };
+                    let pad = match evaluated_args.get(2) {
+                        Some(Value::Text(p)) => p.clone(),
+                        None => " ".to_string(),
+                        _ => {
+                            return Err(RustqlError::TypeMismatch(
+                                "LPAD pad argument must be text".to_string(),
+                            ));
+                        }
+                    };
+                    let chars: Vec<char> = s.chars().collect();
+                    if chars.len() >= len {
+                        Ok(Value::Text(chars[..len].iter().collect()))
+                    } else {
+                        let needed = len - chars.len();
+                        let pad_chars: Vec<char> = pad.chars().collect();
+                        let mut result = String::new();
+                        for i in 0..needed {
+                            result.push(pad_chars[i % pad_chars.len()]);
+                        }
+                        result.extend(chars);
+                        Ok(Value::Text(result))
+                    }
+                }
+                ScalarFunctionType::Rpad => {
+                    let s = match evaluated_args.first() {
+                        Some(Value::Text(s)) => s.clone(),
+                        Some(Value::Null) => return Ok(Value::Null),
+                        _ => {
+                            return Err(RustqlError::TypeMismatch(
+                                "RPAD requires a text first argument".to_string(),
+                            ));
+                        }
+                    };
+                    let len = match evaluated_args.get(1) {
+                        Some(Value::Integer(i)) => *i as usize,
+                        _ => {
+                            return Err(RustqlError::TypeMismatch(
+                                "RPAD requires an integer second argument".to_string(),
+                            ));
+                        }
+                    };
+                    let pad = match evaluated_args.get(2) {
+                        Some(Value::Text(p)) => p.clone(),
+                        None => " ".to_string(),
+                        _ => {
+                            return Err(RustqlError::TypeMismatch(
+                                "RPAD pad argument must be text".to_string(),
+                            ));
+                        }
+                    };
+                    let chars: Vec<char> = s.chars().collect();
+                    if chars.len() >= len {
+                        Ok(Value::Text(chars[..len].iter().collect()))
+                    } else {
+                        let needed = len - chars.len();
+                        let pad_chars: Vec<char> = pad.chars().collect();
+                        let mut result: String = chars.into_iter().collect();
+                        for i in 0..needed {
+                            result.push(pad_chars[i % pad_chars.len()]);
+                        }
+                        Ok(Value::Text(result))
+                    }
+                }
+                ScalarFunctionType::LeftFn => {
+                    let s = match evaluated_args.first() {
+                        Some(Value::Text(s)) => s.clone(),
+                        Some(Value::Null) => return Ok(Value::Null),
+                        _ => {
+                            return Err(RustqlError::TypeMismatch(
+                                "LEFT requires a text first argument".to_string(),
+                            ));
+                        }
+                    };
+                    let n = match evaluated_args.get(1) {
+                        Some(Value::Integer(i)) => *i as usize,
+                        _ => {
+                            return Err(RustqlError::TypeMismatch(
+                                "LEFT requires an integer second argument".to_string(),
+                            ));
+                        }
+                    };
+                    let result: String = s.chars().take(n).collect();
+                    Ok(Value::Text(result))
+                }
+                ScalarFunctionType::RightFn => {
+                    let s = match evaluated_args.first() {
+                        Some(Value::Text(s)) => s.clone(),
+                        Some(Value::Null) => return Ok(Value::Null),
+                        _ => {
+                            return Err(RustqlError::TypeMismatch(
+                                "RIGHT requires a text first argument".to_string(),
+                            ));
+                        }
+                    };
+                    let n = match evaluated_args.get(1) {
+                        Some(Value::Integer(i)) => *i as usize,
+                        _ => {
+                            return Err(RustqlError::TypeMismatch(
+                                "RIGHT requires an integer second argument".to_string(),
+                            ));
+                        }
+                    };
+                    let chars: Vec<char> = s.chars().collect();
+                    let start = chars.len().saturating_sub(n);
+                    let result: String = chars[start..].iter().collect();
+                    Ok(Value::Text(result))
+                }
+                ScalarFunctionType::Reverse => match evaluated_args.first() {
+                    Some(Value::Text(s)) => Ok(Value::Text(s.chars().rev().collect())),
+                    Some(Value::Null) => Ok(Value::Null),
+                    _ => Err(RustqlError::TypeMismatch(
+                        "REVERSE requires a text argument".to_string(),
+                    )),
+                },
+                ScalarFunctionType::Repeat => {
+                    let s = match evaluated_args.first() {
+                        Some(Value::Text(s)) => s.clone(),
+                        Some(Value::Null) => return Ok(Value::Null),
+                        _ => {
+                            return Err(RustqlError::TypeMismatch(
+                                "REPEAT requires a text first argument".to_string(),
+                            ));
+                        }
+                    };
+                    let n = match evaluated_args.get(1) {
+                        Some(Value::Integer(i)) => *i as usize,
+                        _ => {
+                            return Err(RustqlError::TypeMismatch(
+                                "REPEAT requires an integer second argument".to_string(),
+                            ));
+                        }
+                    };
+                    Ok(Value::Text(s.repeat(n)))
+                }
+                ScalarFunctionType::Log => {
+                    if evaluated_args.len() == 1 {
+                        match evaluated_args.first() {
+                            Some(Value::Float(f)) => Ok(Value::Float(f.ln())),
+                            Some(Value::Integer(i)) => Ok(Value::Float((*i as f64).ln())),
+                            Some(Value::Null) => Ok(Value::Null),
+                            _ => Err(RustqlError::TypeMismatch(
+                                "LOG requires a numeric argument".to_string(),
+                            )),
+                        }
+                    } else {
+                        let base = match evaluated_args.first() {
+                            Some(Value::Float(f)) => *f,
+                            Some(Value::Integer(i)) => *i as f64,
+                            Some(Value::Null) => return Ok(Value::Null),
+                            _ => {
+                                return Err(RustqlError::TypeMismatch(
+                                    "LOG requires numeric arguments".to_string(),
+                                ));
+                            }
+                        };
+                        let x = match evaluated_args.get(1) {
+                            Some(Value::Float(f)) => *f,
+                            Some(Value::Integer(i)) => *i as f64,
+                            Some(Value::Null) => return Ok(Value::Null),
+                            _ => {
+                                return Err(RustqlError::TypeMismatch(
+                                    "LOG requires numeric arguments".to_string(),
+                                ));
+                            }
+                        };
+                        Ok(Value::Float(x.ln() / base.ln()))
+                    }
+                }
+                ScalarFunctionType::Exp => match evaluated_args.first() {
+                    Some(Value::Float(f)) => Ok(Value::Float(f.exp())),
+                    Some(Value::Integer(i)) => Ok(Value::Float((*i as f64).exp())),
+                    Some(Value::Null) => Ok(Value::Null),
+                    _ => Err(RustqlError::TypeMismatch(
+                        "EXP requires a numeric argument".to_string(),
+                    )),
+                },
+                ScalarFunctionType::Sign => match evaluated_args.first() {
+                    Some(Value::Integer(i)) => {
+                        if *i > 0 {
+                            Ok(Value::Integer(1))
+                        } else if *i < 0 {
+                            Ok(Value::Integer(-1))
+                        } else {
+                            Ok(Value::Integer(0))
+                        }
+                    }
+                    Some(Value::Float(f)) => {
+                        if *f > 0.0 {
+                            Ok(Value::Integer(1))
+                        } else if *f < 0.0 {
+                            Ok(Value::Integer(-1))
+                        } else {
+                            Ok(Value::Integer(0))
+                        }
+                    }
+                    Some(Value::Null) => Ok(Value::Null),
+                    _ => Err(RustqlError::TypeMismatch(
+                        "SIGN requires a numeric argument".to_string(),
+                    )),
+                },
+                ScalarFunctionType::DateTrunc => {
+                    let part = match evaluated_args.first() {
+                        Some(Value::Text(s)) => s.to_lowercase(),
+                        _ => {
+                            return Err(RustqlError::TypeMismatch(
+                                "DATE_TRUNC requires a text part argument".to_string(),
+                            ));
+                        }
+                    };
+                    let date_str = match evaluated_args.get(1) {
+                        Some(Value::Date(d)) | Some(Value::DateTime(d)) | Some(Value::Text(d)) => {
+                            d.clone()
+                        }
+                        Some(Value::Null) => return Ok(Value::Null),
+                        _ => {
+                            return Err(RustqlError::TypeMismatch(
+                                "DATE_TRUNC requires a date second argument".to_string(),
+                            ));
+                        }
+                    };
+                    let (y, m, d) = parse_date_components(&date_str).ok_or_else(|| {
+                        RustqlError::TypeMismatch("Invalid date format".to_string())
+                    })?;
+                    match part.as_str() {
+                        "year" => Ok(Value::Date(format!("{:04}-01-01", y))),
+                        "month" => Ok(Value::Date(format!("{:04}-{:02}-01", y, m))),
+                        "day" => Ok(Value::Date(format!("{:04}-{:02}-{:02}", y, m, d))),
+                        _ => Err(RustqlError::TypeMismatch(format!(
+                            "DATE_TRUNC unsupported part: {}",
+                            part
+                        ))),
+                    }
+                }
+                ScalarFunctionType::Extract => {
+                    let part = match evaluated_args.first() {
+                        Some(Value::Text(s)) => s.to_lowercase(),
+                        _ => {
+                            return Err(RustqlError::TypeMismatch(
+                                "EXTRACT requires a text part argument".to_string(),
+                            ));
+                        }
+                    };
+                    let date_str = match evaluated_args.get(1) {
+                        Some(Value::Date(d)) | Some(Value::DateTime(d)) | Some(Value::Text(d)) => {
+                            d.clone()
+                        }
+                        Some(Value::Null) => return Ok(Value::Null),
+                        _ => {
+                            return Err(RustqlError::TypeMismatch(
+                                "EXTRACT requires a date/datetime second argument".to_string(),
+                            ));
+                        }
+                    };
+                    match part.as_str() {
+                        "year" => {
+                            let (y, _, _) = parse_date_components(&date_str).ok_or_else(|| {
+                                RustqlError::TypeMismatch("Invalid date format".to_string())
+                            })?;
+                            Ok(Value::Integer(y))
+                        }
+                        "month" => {
+                            let (_, m, _) = parse_date_components(&date_str).ok_or_else(|| {
+                                RustqlError::TypeMismatch("Invalid date format".to_string())
+                            })?;
+                            Ok(Value::Integer(m))
+                        }
+                        "day" => {
+                            let (_, _, d) = parse_date_components(&date_str).ok_or_else(|| {
+                                RustqlError::TypeMismatch("Invalid date format".to_string())
+                            })?;
+                            Ok(Value::Integer(d))
+                        }
+                        "hour" | "minute" | "second" => {
+                            let time_part = if let Some(space_pos) = date_str.find(' ') {
+                                &date_str[space_pos + 1..]
+                            } else {
+                                &date_str
+                            };
+                            let parts: Vec<&str> = time_part.split(':').collect();
+                            match part.as_str() {
+                                "hour" => {
+                                    let h = parts
+                                        .first()
+                                        .and_then(|s| s.parse::<i64>().ok())
+                                        .unwrap_or(0);
+                                    Ok(Value::Integer(h))
+                                }
+                                "minute" => {
+                                    let m = parts
+                                        .get(1)
+                                        .and_then(|s| s.parse::<i64>().ok())
+                                        .unwrap_or(0);
+                                    Ok(Value::Integer(m))
+                                }
+                                "second" => {
+                                    let s = parts
+                                        .get(2)
+                                        .and_then(|s| s.parse::<i64>().ok())
+                                        .unwrap_or(0);
+                                    Ok(Value::Integer(s))
+                                }
+                                _ => unreachable!(),
+                            }
+                        }
+                        _ => Err(RustqlError::TypeMismatch(format!(
+                            "EXTRACT unsupported part: {}",
+                            part
+                        ))),
+                    }
+                }
             }
         }
         Expression::Cast { expr, data_type } => {
-            let val = evaluate_value_expression(expr, columns, row)?;
+            let val = evaluate_value_expression_with_db(expr, columns, row, db)?;
             execute_cast(val, data_type)
         }
         Expression::WindowFunction { .. } => Err(RustqlError::Internal(
             "Window functions must be evaluated in a separate pass".to_string(),
         )),
+        Expression::Subquery(subquery) => {
+            let db_ref = match db {
+                Some(d) => std::borrow::Cow::Borrowed(d),
+                None => std::borrow::Cow::Owned(super::get_database_read().clone()),
+            };
+            let result = super::select::execute_select_internal((**subquery).clone(), &db_ref)?;
+            if result.rows.is_empty() {
+                Ok(Value::Null)
+            } else if result.rows.len() > 1 {
+                Err(RustqlError::Internal(
+                    "Scalar subquery returned more than one row".to_string(),
+                ))
+            } else if result.rows[0].len() != 1 {
+                Err(RustqlError::Internal(
+                    "Scalar subquery must return exactly one column".to_string(),
+                ))
+            } else {
+                Ok(result.rows[0][0].clone())
+            }
+        }
         _ => Err(RustqlError::Internal(
             "Complex expressions not yet supported in SELECT".to_string(),
         )),

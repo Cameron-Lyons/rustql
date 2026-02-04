@@ -4,8 +4,83 @@ use crate::error::{ConstraintKind, RustqlError};
 use crate::wal::{self, WalEntry};
 use std::collections::HashSet;
 
-use super::expr::{evaluate_expression, evaluate_value_expression, parse_value_from_string};
+use super::expr::{
+    evaluate_expression, evaluate_value_expression, evaluate_value_expression_with_db,
+    format_value, parse_value_from_string,
+};
 use super::{get_database_write, save_if_not_in_transaction};
+
+fn format_returning(
+    returning: &[Column],
+    columns: &[ColumnDefinition],
+    rows: &[Vec<Value>],
+) -> Result<String, RustqlError> {
+    let mut headers: Vec<String> = Vec::new();
+    for col in returning {
+        match col {
+            Column::All => {
+                for c in columns {
+                    headers.push(c.name.clone());
+                }
+            }
+            Column::Named { name, alias } => {
+                headers.push(alias.clone().unwrap_or_else(|| name.clone()));
+            }
+            Column::Expression { alias, .. } => {
+                headers.push(alias.clone().unwrap_or_else(|| "?column?".to_string()));
+            }
+            _ => {
+                headers.push("?column?".to_string());
+            }
+        }
+    }
+
+    let mut result = String::new();
+    for h in &headers {
+        result.push_str(&format!("{}\t", h));
+    }
+    result.push('\n');
+    result.push_str(&"-".repeat(40));
+    result.push('\n');
+
+    for row in rows {
+        let mut projected: Vec<Value> = Vec::new();
+        for col in returning {
+            match col {
+                Column::All => {
+                    for v in row {
+                        projected.push(v.clone());
+                    }
+                }
+                Column::Named { name, .. } => {
+                    let col_name = if name.contains('.') {
+                        name.split('.').next_back().unwrap_or(name)
+                    } else {
+                        name.as_str()
+                    };
+                    let idx = columns
+                        .iter()
+                        .position(|c| c.name == col_name)
+                        .ok_or_else(|| RustqlError::ColumnNotFound(name.clone()))?;
+                    projected.push(row[idx].clone());
+                }
+                Column::Expression { expr, .. } => {
+                    let val = evaluate_value_expression(expr, columns, row)?;
+                    projected.push(val);
+                }
+                _ => {
+                    projected.push(Value::Null);
+                }
+            }
+        }
+        for val in &projected {
+            result.push_str(&format!("{}\t", format_value(val)));
+        }
+        result.push('\n');
+    }
+
+    Ok(result)
+}
 
 pub fn execute_insert(mut stmt: InsertStatement) -> Result<String, RustqlError> {
     if let Some(source_query) = stmt.source_query.take() {
@@ -134,11 +209,13 @@ pub fn execute_insert(mut stmt: InsertStatement) -> Result<String, RustqlError> 
 
     let mut inserted_count = 0usize;
     let mut updated_count = 0usize;
+    let mut affected_rows: Vec<Vec<Value>> = Vec::new();
 
     for values in &mapped_values {
         validate_not_null_constraints(&columns_snapshot, values)?;
         validate_foreign_keys_for_insert(&db, &columns_snapshot, values)?;
         validate_check_constraints(&columns_snapshot, values)?;
+        validate_table_constraints_for_insert(&db, &columns_snapshot, values, &stmt.table, None)?;
 
         let pk_result =
             validate_primary_keys_for_insert(&db, &columns_snapshot, values, &stmt.table);
@@ -178,10 +255,11 @@ pub fn execute_insert(mut stmt: InsertStatement) -> Result<String, RustqlError> 
                                     .iter()
                                     .position(|c| c.name == assignment.column)
                                 {
-                                    updated_row[idx] = evaluate_value_expression(
+                                    updated_row[idx] = evaluate_value_expression_with_db(
                                         &assignment.value,
                                         &columns_snapshot,
                                         values,
+                                        Some(&*db),
                                     )?;
                                 }
                             }
@@ -203,6 +281,9 @@ pub fn execute_insert(mut stmt: InsertStatement) -> Result<String, RustqlError> 
                                 &old_row,
                                 &updated_row,
                             )?;
+                            if stmt.returning.is_some() {
+                                affected_rows.push(updated_row);
+                            }
                             updated_count += 1;
                         }
                         continue;
@@ -225,10 +306,18 @@ pub fn execute_insert(mut stmt: InsertStatement) -> Result<String, RustqlError> 
             row_index: row_idx,
         });
         super::ddl::update_indexes_on_insert(&mut db, &stmt.table, row_idx, values)?;
+        if stmt.returning.is_some() {
+            affected_rows.push(values.clone());
+        }
         inserted_count += 1;
     }
 
     save_if_not_in_transaction(&db)?;
+
+    if let Some(ref returning) = stmt.returning {
+        return format_returning(returning, &columns_snapshot, &affected_rows);
+    }
+
     if updated_count > 0 {
         Ok(format!(
             "{} row(s) inserted, {} row(s) updated",
@@ -280,7 +369,7 @@ pub fn execute_update(stmt: UpdateStatement) -> Result<String, RustqlError> {
 
     for (row_idx, row) in rows_to_check {
         let should_update = if let Some(ref where_expr) = stmt.where_clause {
-            evaluate_expression(None, where_expr, &table_ref.columns, row)?
+            evaluate_expression(Some(&*db), where_expr, &table_ref.columns, row)?
         } else {
             true
         };
@@ -292,8 +381,12 @@ pub fn execute_update(stmt: UpdateStatement) -> Result<String, RustqlError> {
                     .iter()
                     .position(|c| c.name == assignment.column)
                 {
-                    updated_row[idx] =
-                        evaluate_value_expression(&assignment.value, &table_ref.columns, row)?;
+                    updated_row[idx] = evaluate_value_expression_with_db(
+                        &assignment.value,
+                        &table_ref.columns,
+                        row,
+                        Some(&*db),
+                    )?;
                 } else {
                     return Err(RustqlError::ColumnNotFound(assignment.column.clone()));
                 }
@@ -308,6 +401,13 @@ pub fn execute_update(stmt: UpdateStatement) -> Result<String, RustqlError> {
             )?;
             validate_foreign_keys_for_update(&db, &table_ref.columns, &updated_row)?;
             validate_check_constraints(&table_ref.columns, &updated_row)?;
+            validate_table_constraints_for_insert(
+                &db,
+                &table_ref.columns,
+                &updated_row,
+                &stmt.table,
+                Some(row_idx),
+            )?;
             rows_to_update.push((row_idx, updated_row));
         }
     }
@@ -334,7 +434,11 @@ pub fn execute_update(stmt: UpdateStatement) -> Result<String, RustqlError> {
     for (_, old_row, updated_row) in &update_info {
         handle_foreign_keys_for_update(&mut db, &stmt.table, &columns, old_row, updated_row)?;
     }
+    let mut returning_rows: Vec<Vec<Value>> = Vec::new();
     for (row_idx, old_row, updated_row) in update_info {
+        if stmt.returning.is_some() {
+            returning_rows.push(updated_row.clone());
+        }
         super::ddl::update_indexes_on_update(
             &mut db,
             &stmt.table,
@@ -344,11 +448,57 @@ pub fn execute_update(stmt: UpdateStatement) -> Result<String, RustqlError> {
         )?;
     }
     save_if_not_in_transaction(&db)?;
+
+    if let Some(ref returning) = stmt.returning {
+        return format_returning(returning, &columns, &returning_rows);
+    }
+
     Ok(format!("{} row(s) updated", updated_count))
 }
 
 pub fn execute_delete(stmt: DeleteStatement) -> Result<String, RustqlError> {
     let mut db = get_database_write();
+
+    let using_matches: Option<HashSet<usize>> = if let Some(ref using) = stmt.using {
+        let using_table = db
+            .tables
+            .get(&using.table)
+            .ok_or_else(|| RustqlError::TableNotFound(using.table.clone()))?;
+        let main_table = db
+            .tables
+            .get(&stmt.table)
+            .ok_or_else(|| RustqlError::TableNotFound(stmt.table.clone()))?;
+
+        let using_rows = using_table.rows.clone();
+        let using_columns = using_table.columns.clone();
+        let main_columns = main_table.columns.clone();
+
+        let mut combined_columns: Vec<ColumnDefinition> = main_columns.clone();
+        combined_columns.extend(using_columns.clone());
+
+        let mut matching_indices: HashSet<usize> = HashSet::new();
+        for (main_idx, main_row) in main_table.rows.iter().enumerate() {
+            for using_row in &using_rows {
+                let mut combined_row: Vec<Value> = main_row.clone();
+                combined_row.extend(using_row.clone());
+
+                let matches = if let Some(ref where_expr) = stmt.where_clause {
+                    evaluate_expression(Some(&*db), where_expr, &combined_columns, &combined_row)
+                        .unwrap_or(false)
+                } else {
+                    true
+                };
+
+                if matches {
+                    matching_indices.insert(main_idx);
+                    break;
+                }
+            }
+        }
+        Some(matching_indices)
+    } else {
+        None
+    };
 
     let (columns, rows_to_delete) = {
         let table_ref = db
@@ -358,38 +508,49 @@ pub fn execute_delete(stmt: DeleteStatement) -> Result<String, RustqlError> {
 
         let mut rows: Vec<Vec<Value>> = Vec::new();
 
-        let candidate_indices: Option<HashSet<usize>> = if let Some(ref where_expr) =
-            stmt.where_clause
-        {
-            if let Some(index_usage) = super::ddl::find_index_usage(&db, &stmt.table, where_expr) {
-                super::ddl::get_indexed_rows(&db, table_ref, &index_usage).ok()
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
-        if let Some(ref where_expr) = stmt.where_clause {
-            let rows_to_check: Vec<(usize, &Vec<Value>)> =
-                if let Some(ref candidate_set) = candidate_indices {
-                    table_ref
-                        .rows
-                        .iter()
-                        .enumerate()
-                        .filter(|(idx, _)| candidate_set.contains(idx))
-                        .collect()
-                } else {
-                    table_ref.rows.iter().enumerate().collect()
-                };
-
-            for (_, row) in rows_to_check {
-                if evaluate_expression(None, where_expr, &table_ref.columns, row).unwrap_or(false) {
+        if let Some(ref using_set) = using_matches {
+            for idx in using_set {
+                if let Some(row) = table_ref.rows.get(*idx) {
                     rows.push(row.clone());
                 }
             }
         } else {
-            rows = table_ref.rows.clone();
+            let candidate_indices: Option<HashSet<usize>> =
+                if let Some(ref where_expr) = stmt.where_clause {
+                    if let Some(index_usage) =
+                        super::ddl::find_index_usage(&db, &stmt.table, where_expr)
+                    {
+                        super::ddl::get_indexed_rows(&db, table_ref, &index_usage).ok()
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
+            if let Some(ref where_expr) = stmt.where_clause {
+                let rows_to_check: Vec<(usize, &Vec<Value>)> =
+                    if let Some(ref candidate_set) = candidate_indices {
+                        table_ref
+                            .rows
+                            .iter()
+                            .enumerate()
+                            .filter(|(idx, _)| candidate_set.contains(idx))
+                            .collect()
+                    } else {
+                        table_ref.rows.iter().enumerate().collect()
+                    };
+
+                for (_, row) in rows_to_check {
+                    if evaluate_expression(Some(&*db), where_expr, &table_ref.columns, row)
+                        .unwrap_or(false)
+                    {
+                        rows.push(row.clone());
+                    }
+                }
+            } else {
+                rows = table_ref.rows.clone();
+            }
         }
 
         (table_ref.columns.clone(), rows)
@@ -399,54 +560,85 @@ pub fn execute_delete(stmt: DeleteStatement) -> Result<String, RustqlError> {
         handle_foreign_keys_for_delete(&mut db, &stmt.table, &columns, row_to_delete)?;
     }
 
-    let table_ref = db
-        .tables
-        .get(&stmt.table)
-        .ok_or_else(|| RustqlError::TableNotFound(stmt.table.clone()))?;
+    let mut rows_to_delete_indices = {
+        let table_ref = db
+            .tables
+            .get(&stmt.table)
+            .ok_or_else(|| RustqlError::TableNotFound(stmt.table.clone()))?;
 
-    let candidate_indices: Option<HashSet<usize>> = if let Some(ref where_expr) = stmt.where_clause
-    {
-        if let Some(index_usage) = super::ddl::find_index_usage(&db, &stmt.table, where_expr) {
-            super::ddl::get_indexed_rows(&db, table_ref, &index_usage).ok()
+        let candidate_indices: Option<HashSet<usize>> = if using_matches.is_some() {
+            using_matches.clone()
+        } else if let Some(ref where_expr) = stmt.where_clause {
+            if let Some(index_usage) = super::ddl::find_index_usage(&db, &stmt.table, where_expr) {
+                super::ddl::get_indexed_rows(&db, table_ref, &index_usage).ok()
+            } else {
+                None
+            }
         } else {
             None
-        }
-    } else {
-        None
-    };
+        };
 
-    let (_, mut rows_to_delete_indices) = {
-        let table = db
-            .tables
-            .get_mut(&stmt.table)
-            .ok_or_else(|| RustqlError::TableNotFound(stmt.table.clone()))?;
-        let initial_count = table.rows.len();
+        let columns = table_ref.columns.clone();
+        let rows: Vec<(usize, Vec<Value>)> = table_ref
+            .rows
+            .iter()
+            .enumerate()
+            .map(|(i, r)| (i, r.clone()))
+            .collect();
 
         let mut rows_to_delete_indices = Vec::new();
-        if let Some(ref where_expr) = stmt.where_clause {
+
+        if using_matches.is_some() {
+            if let Some(ref candidate_set) = candidate_indices {
+                for &idx in candidate_set {
+                    rows_to_delete_indices.push(idx);
+                }
+            }
+        } else if let Some(ref where_expr) = stmt.where_clause {
             let rows_to_check: Vec<(usize, &Vec<Value>)> =
                 if let Some(ref candidate_set) = candidate_indices {
-                    table
-                        .rows
-                        .iter()
-                        .enumerate()
+                    rows.iter()
                         .filter(|(idx, _)| candidate_set.contains(idx))
+                        .map(|(i, r)| (*i, r))
                         .collect()
                 } else {
-                    table.rows.iter().enumerate().collect()
+                    rows.iter().map(|(i, r)| (*i, r)).collect()
                 };
 
             for (idx, row) in rows_to_check {
-                if evaluate_expression(None, where_expr, &table.columns, row).unwrap_or(false) {
+                if evaluate_expression(Some(&*db), where_expr, &columns, row).unwrap_or(false) {
                     rows_to_delete_indices.push(idx);
                 }
             }
         } else {
-            rows_to_delete_indices = (0..table.rows.len()).collect();
+            rows_to_delete_indices = (0..rows.len()).collect();
         }
 
         rows_to_delete_indices.sort();
-        rows_to_delete_indices.reverse();
+        rows_to_delete_indices
+    };
+
+    let returning_rows = {
+        let table = db
+            .tables
+            .get(&stmt.table)
+            .ok_or_else(|| RustqlError::TableNotFound(stmt.table.clone()))?;
+
+        let mut returning_rows: Vec<Vec<Value>> = Vec::new();
+        if stmt.returning.is_some() {
+            for &idx in &rows_to_delete_indices {
+                returning_rows.push(table.rows[idx].clone());
+            }
+        }
+        returning_rows
+    };
+
+    {
+        let table = db
+            .tables
+            .get_mut(&stmt.table)
+            .ok_or_else(|| RustqlError::TableNotFound(stmt.table.clone()))?;
+
         for idx in &rows_to_delete_indices {
             let old_row = table.rows[*idx].clone();
             wal::record_wal_entry(WalEntry::DeleteRow {
@@ -456,15 +648,18 @@ pub fn execute_delete(stmt: DeleteStatement) -> Result<String, RustqlError> {
             });
             table.rows.remove(*idx);
         }
-
-        (initial_count, rows_to_delete_indices)
-    };
+    }
 
     let deleted_count = rows_to_delete_indices.len();
     rows_to_delete_indices.reverse();
     super::ddl::update_indexes_on_delete(&mut db, &stmt.table, &rows_to_delete_indices)?;
 
     save_if_not_in_transaction(&db)?;
+
+    if let Some(ref returning) = stmt.returning {
+        return format_returning(returning, &columns, &returning_rows);
+    }
+
     Ok(format!("{} row(s) deleted", deleted_count))
 }
 
@@ -824,6 +1019,101 @@ fn find_conflict_row(
     None
 }
 
+pub fn validate_table_constraints_for_insert(
+    db: &Database,
+    columns: &[ColumnDefinition],
+    row: &[Value],
+    table_name: &str,
+    exclude_row_idx: Option<usize>,
+) -> Result<(), RustqlError> {
+    let table = db
+        .tables
+        .get(table_name)
+        .ok_or_else(|| RustqlError::TableNotFound(table_name.to_string()))?;
+
+    for constraint in &table.constraints {
+        match constraint {
+            crate::ast::TableConstraint::PrimaryKey {
+                columns: pk_cols, ..
+            } => {
+                let col_indices: Vec<usize> = pk_cols
+                    .iter()
+                    .filter_map(|name| columns.iter().position(|c| c.name == *name))
+                    .collect();
+                if col_indices.len() != pk_cols.len() {
+                    continue;
+                }
+                let key: Vec<Value> = col_indices.iter().map(|&i| row[i].clone()).collect();
+                if key.iter().any(|v| matches!(v, Value::Null)) {
+                    return Err(RustqlError::ConstraintViolation {
+                        kind: crate::error::ConstraintKind::PrimaryKey,
+                        message: format!(
+                            "Composite PRIMARY KEY constraint violation: NULL value in columns {:?}",
+                            pk_cols
+                        ),
+                    });
+                }
+                for (row_idx, existing_row) in table.rows.iter().enumerate() {
+                    if let Some(exclude_idx) = exclude_row_idx
+                        && row_idx == exclude_idx
+                    {
+                        continue;
+                    }
+                    let existing_key: Vec<Value> = col_indices
+                        .iter()
+                        .map(|&i| existing_row[i].clone())
+                        .collect();
+                    if existing_key == key {
+                        return Err(RustqlError::ConstraintViolation {
+                            kind: crate::error::ConstraintKind::PrimaryKey,
+                            message: format!(
+                                "Composite PRIMARY KEY constraint violation: duplicate value for columns {:?}",
+                                pk_cols
+                            ),
+                        });
+                    }
+                }
+            }
+            crate::ast::TableConstraint::Unique {
+                columns: uq_cols, ..
+            } => {
+                let col_indices: Vec<usize> = uq_cols
+                    .iter()
+                    .filter_map(|name| columns.iter().position(|c| c.name == *name))
+                    .collect();
+                if col_indices.len() != uq_cols.len() {
+                    continue;
+                }
+                let key: Vec<Value> = col_indices.iter().map(|&i| row[i].clone()).collect();
+                if key.iter().all(|v| matches!(v, Value::Null)) {
+                    continue;
+                }
+                for (row_idx, existing_row) in table.rows.iter().enumerate() {
+                    if let Some(exclude_idx) = exclude_row_idx
+                        && row_idx == exclude_idx
+                    {
+                        continue;
+                    }
+                    let existing_key: Vec<Value> = col_indices
+                        .iter()
+                        .map(|&i| existing_row[i].clone())
+                        .collect();
+                    if existing_key == key {
+                        return Err(RustqlError::ConstraintViolation {
+                            kind: crate::error::ConstraintKind::Unique,
+                            message: format!(
+                                "Composite UNIQUE constraint violation: duplicate value for columns {:?}",
+                                uq_cols
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 pub fn validate_check_constraints(
     columns: &[ColumnDefinition],
     row: &[Value],
@@ -831,20 +1121,19 @@ pub fn validate_check_constraints(
     for col_def in columns {
         if let Some(ref check_expr_str) = col_def.check {
             let wrapped = format!("SELECT * FROM _dummy WHERE {}", check_expr_str);
-            if let Ok(tokens) = crate::lexer::tokenize(&wrapped) {
-                if let Ok(Statement::Select(select_stmt)) = crate::parser::parse(tokens) {
-                    if let Some(where_expr) = select_stmt.where_clause {
-                        let result = evaluate_expression(None, &where_expr, columns, row)?;
-                        if !result {
-                            return Err(RustqlError::ConstraintViolation {
-                                kind: ConstraintKind::NotNull,
-                                message: format!(
-                                    "CHECK constraint violation on column '{}': {}",
-                                    col_def.name, check_expr_str
-                                ),
-                            });
-                        }
-                    }
+            if let Ok(tokens) = crate::lexer::tokenize(&wrapped)
+                && let Ok(Statement::Select(select_stmt)) = crate::parser::parse(tokens)
+                && let Some(where_expr) = select_stmt.where_clause
+            {
+                let result = evaluate_expression(None, &where_expr, columns, row)?;
+                if !result {
+                    return Err(RustqlError::ConstraintViolation {
+                        kind: ConstraintKind::NotNull,
+                        message: format!(
+                            "CHECK constraint violation on column '{}': {}",
+                            col_def.name, check_expr_str
+                        ),
+                    });
                 }
             }
         }

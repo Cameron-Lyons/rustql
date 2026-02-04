@@ -16,30 +16,36 @@ use super::join::perform_multiple_joins;
 use super::{SelectResult, get_database_read, get_database_write};
 
 pub fn execute_select(stmt: SelectStatement) -> Result<String, RustqlError> {
+    if let Some((ref subquery, ref alias)) = stmt.from_subquery {
+        return execute_select_from_subquery(stmt.clone(), subquery, alias);
+    }
+
     if !stmt.ctes.is_empty() {
         return execute_select_with_ctes(stmt);
     }
 
     {
         let db = get_database_read();
-        if !db.tables.contains_key(&stmt.from) {
-            if let Some(view) = db.views.get(&stmt.from) {
-                let view_sql = view.query_sql.clone();
-                let view_name = stmt.from.clone();
-                drop(db);
-                return execute_select_from_view(stmt, &view_name, &view_sql);
-            }
+        if !db.tables.contains_key(&stmt.from)
+            && let Some(view) = db.views.get(&stmt.from)
+        {
+            let view_sql = view.query_sql.clone();
+            let view_name = stmt.from.clone();
+            drop(db);
+            return execute_select_from_view(stmt, &view_name, &view_sql);
         }
     }
 
     let db = get_database_read();
 
-    if let Some(ref union_stmt) = stmt.union {
+    if let Some((ref set_op_type, ref other_stmt)) = stmt.set_op {
         let left_stmt = SelectStatement {
             ctes: Vec::new(),
             distinct: stmt.distinct,
             columns: stmt.columns.clone(),
             from: stmt.from.clone(),
+            from_alias: stmt.from_alias.clone(),
+            from_subquery: stmt.from_subquery.clone(),
             joins: stmt.joins.clone(),
             where_clause: stmt.where_clause.clone(),
             group_by: stmt.group_by.clone(),
@@ -47,10 +53,9 @@ pub fn execute_select(stmt: SelectStatement) -> Result<String, RustqlError> {
             order_by: stmt.order_by.clone(),
             limit: stmt.limit,
             offset: stmt.offset,
-            union: None,
-            union_all: stmt.union_all,
+            set_op: None,
         };
-        return execute_union(left_stmt, union_stmt.as_ref().clone(), &db);
+        return execute_set_operation(left_stmt, other_stmt.as_ref().clone(), set_op_type, &db);
     }
 
     if !stmt.joins.is_empty() {
@@ -279,41 +284,101 @@ pub fn execute_select(stmt: SelectStatement) -> Result<String, RustqlError> {
     Ok(result)
 }
 
-fn execute_union(
+fn execute_set_operation(
     left_stmt: SelectStatement,
     right_stmt: SelectStatement,
+    set_op_type: &SetOperation,
     db: &Database,
 ) -> Result<String, RustqlError> {
-    let union_all = left_stmt.union_all;
-
     let mut left_stmt_internal = left_stmt;
-    left_stmt_internal.union = None;
+    left_stmt_internal.set_op = None;
     let mut right_stmt_internal = right_stmt;
-    right_stmt_internal.union = None;
+    right_stmt_internal.set_op = None;
 
     let left_result = execute_select_internal(left_stmt_internal, db)?;
     let right_result = execute_select_internal(right_stmt_internal, db)?;
 
     let mut combined: Vec<Vec<Value>> = Vec::new();
 
-    if union_all {
-        combined.extend(left_result.rows);
-        combined.extend(right_result.rows);
-    } else {
-        use std::collections::BTreeSet;
-        let mut seen: BTreeSet<Vec<Value>> = BTreeSet::new();
-
-        for row in left_result.rows {
-            if !seen.contains(&row) {
-                seen.insert(row.clone());
-                combined.push(row);
+    match set_op_type {
+        SetOperation::UnionAll => {
+            combined.extend(left_result.rows);
+            combined.extend(right_result.rows);
+        }
+        SetOperation::Union => {
+            use std::collections::BTreeSet;
+            let mut seen: BTreeSet<Vec<Value>> = BTreeSet::new();
+            for row in left_result.rows {
+                if seen.insert(row.clone()) {
+                    combined.push(row);
+                }
+            }
+            for row in right_result.rows {
+                if seen.insert(row.clone()) {
+                    combined.push(row);
+                }
             }
         }
-
-        for row in right_result.rows {
-            if !seen.contains(&row) {
-                seen.insert(row.clone());
-                combined.push(row);
+        SetOperation::Intersect => {
+            use std::collections::BTreeSet;
+            let right_set: BTreeSet<Vec<Value>> = right_result.rows.into_iter().collect();
+            let mut seen: BTreeSet<Vec<Value>> = BTreeSet::new();
+            for row in left_result.rows {
+                if right_set.contains(&row) && seen.insert(row.clone()) {
+                    combined.push(row);
+                }
+            }
+        }
+        SetOperation::IntersectAll => {
+            use std::collections::BTreeMap;
+            let mut right_counts: BTreeMap<Vec<Value>, usize> = BTreeMap::new();
+            for row in &right_result.rows {
+                *right_counts.entry(row.clone()).or_insert(0) += 1;
+            }
+            let mut left_counts: BTreeMap<Vec<Value>, usize> = BTreeMap::new();
+            for row in &left_result.rows {
+                *left_counts.entry(row.clone()).or_insert(0) += 1;
+            }
+            for (row, left_count) in &left_counts {
+                let right_count = right_counts.get(row).copied().unwrap_or(0);
+                let emit_count = (*left_count).min(right_count);
+                for _ in 0..emit_count {
+                    combined.push(row.clone());
+                }
+            }
+        }
+        SetOperation::Except => {
+            use std::collections::BTreeSet;
+            let right_set: BTreeSet<Vec<Value>> = right_result.rows.into_iter().collect();
+            let mut seen: BTreeSet<Vec<Value>> = BTreeSet::new();
+            for row in left_result.rows {
+                if !right_set.contains(&row) && seen.insert(row.clone()) {
+                    combined.push(row);
+                }
+            }
+        }
+        SetOperation::ExceptAll => {
+            use std::collections::BTreeMap;
+            let mut right_counts: BTreeMap<Vec<Value>, usize> = BTreeMap::new();
+            for row in &right_result.rows {
+                *right_counts.entry(row.clone()).or_insert(0) += 1;
+            }
+            let mut left_counts: BTreeMap<Vec<Value>, usize> = BTreeMap::new();
+            let mut left_order: Vec<Vec<Value>> = Vec::new();
+            for row in &left_result.rows {
+                let entry = left_counts.entry(row.clone()).or_insert(0);
+                if *entry == 0 {
+                    left_order.push(row.clone());
+                }
+                *entry += 1;
+            }
+            for row in &left_order {
+                let left_count = left_counts.get(row).copied().unwrap_or(0);
+                let right_count = right_counts.get(row).copied().unwrap_or(0);
+                let emit_count = left_count.saturating_sub(right_count);
+                for _ in 0..emit_count {
+                    combined.push(row.clone());
+                }
             }
         }
     }
@@ -355,10 +420,55 @@ fn execute_union(
     Ok(result)
 }
 
+fn execute_select_without_from(stmt: SelectStatement) -> Result<SelectResult, RustqlError> {
+    let empty_columns: Vec<ColumnDefinition> = Vec::new();
+    let empty_row: Vec<Value> = Vec::new();
+
+    let mut headers = Vec::new();
+    let mut result_row = Vec::new();
+
+    for col in &stmt.columns {
+        match col {
+            Column::Named { name, alias } => {
+                let col_name = alias.clone().unwrap_or_else(|| name.clone());
+                headers.push(col_name);
+                result_row.push(Value::Null);
+            }
+            Column::Expression { expr, alias } => {
+                let val = evaluate_value_expression(expr, &empty_columns, &empty_row)?;
+                let col_name = alias
+                    .clone()
+                    .unwrap_or_else(|| format!("column{}", headers.len()));
+                headers.push(col_name);
+                result_row.push(val);
+            }
+            Column::Function(agg) => {
+                let col_name = agg
+                    .alias
+                    .clone()
+                    .unwrap_or_else(|| format!("{:?}", agg.function));
+                headers.push(col_name);
+                result_row.push(Value::Null);
+            }
+            Column::Subquery(_) => {}
+            Column::All => {}
+        }
+    }
+
+    Ok(SelectResult {
+        headers,
+        rows: vec![result_row],
+    })
+}
+
 pub(crate) fn execute_select_internal(
     stmt: SelectStatement,
     db: &Database,
 ) -> Result<SelectResult, RustqlError> {
+    if stmt.from.is_empty() {
+        return execute_select_without_from(stmt);
+    }
+
     let (all_rows, all_columns) = if !stmt.joins.is_empty() {
         let main_table = db
             .tables
@@ -434,6 +544,7 @@ pub(crate) fn execute_select_internal(
         let temp_table = Table {
             columns: all_columns.clone(),
             rows: Vec::new(),
+            constraints: vec![],
         };
         let row_refs: Vec<&Vec<Value>> = filtered_rows.to_vec();
         let grouping_result = execute_select_with_grouping(stmt.clone(), &temp_table, row_refs)?;
@@ -469,6 +580,7 @@ pub(crate) fn execute_select_internal(
         let temp_table = Table {
             columns: all_columns.clone(),
             rows: Vec::new(),
+            constraints: vec![],
         };
         let row_refs: Vec<&Vec<Value>> = filtered_rows.to_vec();
         let agg_result = execute_select_with_aggregates(stmt.clone(), &temp_table, row_refs)?;
@@ -698,23 +810,16 @@ pub fn eval_subquery_values(
             Ok(values)
         }
         Column::Function(agg) => {
-            if let Some(group_by_cols) = &subquery.group_by {
-                let group_by_indices: Vec<usize> = group_by_cols
-                    .iter()
-                    .map(|g| {
-                        table
-                            .columns
-                            .iter()
-                            .position(|c| &c.name == g)
-                            .ok_or_else(|| format!("Column '{}' not found in GROUP BY", g))
-                    })
-                    .collect::<Result<_, _>>()?;
+            if let Some(group_by_exprs) = &subquery.group_by {
                 let mut groups: std::collections::BTreeMap<Vec<Value>, Vec<&Vec<Value>>> =
                     std::collections::BTreeMap::new();
                 for row in &filtered_rows {
-                    let key: Vec<Value> = group_by_indices
+                    let key: Vec<Value> = group_by_exprs
                         .iter()
-                        .map(|&idx| row[idx].clone())
+                        .map(|expr| {
+                            evaluate_value_expression(expr, &table.columns, row)
+                                .unwrap_or(Value::Null)
+                        })
                         .collect();
                     groups.entry(key).or_default().push(*row);
                 }
@@ -742,24 +847,16 @@ pub fn eval_subquery_values(
             }
         }
         Column::Named { name, .. } => {
-            if let Some(group_by_cols) = &subquery.group_by {
-                let group_by_indices: Vec<usize> = group_by_cols
-                    .iter()
-                    .map(|g| {
-                        table
-                            .columns
-                            .iter()
-                            .position(|c| &c.name == g)
-                            .ok_or_else(|| format!("Column '{}' not found in GROUP BY", g))
-                    })
-                    .collect::<Result<_, _>>()?;
-
+            if let Some(group_by_exprs) = &subquery.group_by {
                 let mut groups: std::collections::BTreeMap<Vec<Value>, Vec<&Vec<Value>>> =
                     std::collections::BTreeMap::new();
                 for row in &filtered_rows {
-                    let key: Vec<Value> = group_by_indices
+                    let key: Vec<Value> = group_by_exprs
                         .iter()
-                        .map(|&idx| row[idx].clone())
+                        .map(|expr| {
+                            evaluate_value_expression(expr, &table.columns, row)
+                                .unwrap_or(Value::Null)
+                        })
                         .collect();
                     groups.entry(key).or_default().push(*row);
                 }
@@ -769,7 +866,11 @@ pub fn eval_subquery_values(
                     .iter()
                     .position(|c| &c.name == name)
                     .ok_or_else(|| RustqlError::ColumnNotFound(name.clone()))?;
-                if !group_by_indices.contains(&named_idx) {
+                let is_in_group_by = group_by_exprs.iter().any(|expr| {
+                    matches!(expr, Expression::Column(col_name) if col_name == name
+                        || col_name.split('.').next_back() == Some(name))
+                });
+                if !is_in_group_by {
                     return Err(RustqlError::Internal(format!(
                         "Column '{}' must appear in GROUP BY clause",
                         name
@@ -996,6 +1097,7 @@ pub fn eval_scalar_subquery_with_outer(
                 let temp_table = Table {
                     columns: all_subquery_columns.clone(),
                     rows: subquery_rows.clone(),
+                    constraints: vec![],
                 };
 
                 compute_aggregate(
@@ -1209,6 +1311,7 @@ fn execute_select_with_joins(stmt: SelectStatement, db: &Database) -> Result<Str
         let temp_table = Table {
             columns: all_columns.clone(),
             rows: Vec::new(),
+            constraints: vec![],
         };
         let row_refs: Vec<&Vec<Value>> = filtered_rows.iter().collect();
         return execute_select_with_grouping(stmt, &temp_table, row_refs);
@@ -1218,6 +1321,7 @@ fn execute_select_with_joins(stmt: SelectStatement, db: &Database) -> Result<Str
         let temp_table = Table {
             columns: all_columns.clone(),
             rows: Vec::new(),
+            constraints: vec![],
         };
         let row_refs: Vec<&Vec<Value>> = filtered_rows.iter().collect();
         return execute_select_with_aggregates(stmt, &temp_table, row_refs);
@@ -1310,6 +1414,75 @@ fn execute_select_with_joins(stmt: SelectStatement, db: &Database) -> Result<Str
     Ok(result)
 }
 
+fn execute_select_from_subquery(
+    stmt: SelectStatement,
+    subquery: &SelectStatement,
+    alias: &str,
+) -> Result<String, RustqlError> {
+    let subquery_result = {
+        let db = get_database_read();
+        execute_select_internal(subquery.clone(), &db)?
+    };
+
+    let columns: Vec<ColumnDefinition> = subquery_result
+        .headers
+        .iter()
+        .enumerate()
+        .map(|(idx, name)| {
+            let data_type = subquery_result
+                .rows
+                .first()
+                .and_then(|row| row.get(idx))
+                .map(|val| match val {
+                    Value::Integer(_) => DataType::Integer,
+                    Value::Float(_) => DataType::Float,
+                    Value::Boolean(_) => DataType::Boolean,
+                    Value::Date(_) => DataType::Date,
+                    Value::Time(_) => DataType::Time,
+                    Value::DateTime(_) => DataType::DateTime,
+                    _ => DataType::Text,
+                })
+                .unwrap_or(DataType::Text);
+            ColumnDefinition {
+                name: name.clone(),
+                data_type,
+                nullable: true,
+                primary_key: false,
+                unique: false,
+                default_value: None,
+                foreign_key: None,
+                check: None,
+                auto_increment: false,
+            }
+        })
+        .collect();
+
+    {
+        let mut db = get_database_write();
+        db.tables.insert(
+            alias.to_string(),
+            Table {
+                columns,
+                rows: subquery_result.rows,
+                constraints: vec![],
+            },
+        );
+    }
+
+    let mut new_stmt = stmt;
+    new_stmt.from = alias.to_string();
+    new_stmt.from_subquery = None;
+
+    let result = execute_select(new_stmt);
+
+    {
+        let mut db = get_database_write();
+        db.tables.remove(alias);
+    }
+
+    result
+}
+
 fn execute_select_from_view(
     stmt: SelectStatement,
     view_name: &str,
@@ -1371,6 +1544,7 @@ fn execute_select_from_view(
             Table {
                 columns,
                 rows: view_result.rows,
+                constraints: vec![],
             },
         );
     }
@@ -1391,29 +1565,144 @@ fn execute_select_with_ctes(mut stmt: SelectStatement) -> Result<String, RustqlE
 
     let mut temp_table_names: Vec<String> = Vec::new();
     for cte in &ctes {
-        let cte_result = execute_select_internal(cte.query.clone(), &db)?;
-        let columns: Vec<ColumnDefinition> = cte_result
-            .headers
-            .iter()
-            .map(|name| ColumnDefinition {
-                name: name.clone(),
-                data_type: DataType::Text,
-                nullable: true,
-                primary_key: false,
-                unique: false,
-                default_value: None,
-                foreign_key: None,
-                check: None,
-                auto_increment: false,
-            })
-            .collect();
-        db.tables.insert(
-            cte.name.clone(),
-            Table {
-                columns,
-                rows: cte_result.rows,
-            },
-        );
+        if cte.recursive {
+            let cte_query = &cte.query;
+            if let Some((ref set_op_type, ref recursive_part)) = cte_query.set_op {
+                if !matches!(set_op_type, SetOperation::UnionAll | SetOperation::Union) {
+                    return Err(RustqlError::Internal(
+                        "Recursive CTE requires UNION or UNION ALL".to_string(),
+                    ));
+                }
+                let is_union_all = matches!(set_op_type, SetOperation::UnionAll);
+
+                let mut base_stmt = cte_query.clone();
+                base_stmt.set_op = None;
+                let base_result = execute_select_internal(base_stmt, &db)?;
+
+                let columns: Vec<ColumnDefinition> = base_result
+                    .headers
+                    .iter()
+                    .map(|name| ColumnDefinition {
+                        name: name.clone(),
+                        data_type: DataType::Text,
+                        nullable: true,
+                        primary_key: false,
+                        unique: false,
+                        default_value: None,
+                        foreign_key: None,
+                        check: None,
+                        auto_increment: false,
+                    })
+                    .collect();
+
+                let mut all_rows: Vec<Vec<Value>> = base_result.rows.clone();
+                let mut working_rows: Vec<Vec<Value>> = base_result.rows;
+                let mut seen: Option<std::collections::BTreeSet<Vec<Value>>> = if is_union_all {
+                    None
+                } else {
+                    let mut s = std::collections::BTreeSet::new();
+                    for row in &all_rows {
+                        s.insert(row.clone());
+                    }
+                    Some(s)
+                };
+
+                const MAX_ITERATIONS: usize = 1000;
+                for _ in 0..MAX_ITERATIONS {
+                    if working_rows.is_empty() {
+                        break;
+                    }
+
+                    db.tables.insert(
+                        cte.name.clone(),
+                        Table {
+                            columns: columns.clone(),
+                            rows: working_rows,
+                            constraints: vec![],
+                        },
+                    );
+
+                    let recursive_result = execute_select_internal(*recursive_part.clone(), &db)?;
+
+                    let mut new_rows: Vec<Vec<Value>> = Vec::new();
+                    for row in recursive_result.rows {
+                        if let Some(ref mut seen_set) = seen {
+                            if seen_set.insert(row.clone()) {
+                                new_rows.push(row);
+                            }
+                        } else {
+                            new_rows.push(row);
+                        }
+                    }
+
+                    if new_rows.is_empty() {
+                        break;
+                    }
+
+                    all_rows.extend(new_rows.clone());
+                    working_rows = new_rows;
+                }
+
+                db.tables.insert(
+                    cte.name.clone(),
+                    Table {
+                        columns,
+                        rows: all_rows,
+                        constraints: vec![],
+                    },
+                );
+            } else {
+                let cte_result = execute_select_internal(cte.query.clone(), &db)?;
+                let columns: Vec<ColumnDefinition> = cte_result
+                    .headers
+                    .iter()
+                    .map(|name| ColumnDefinition {
+                        name: name.clone(),
+                        data_type: DataType::Text,
+                        nullable: true,
+                        primary_key: false,
+                        unique: false,
+                        default_value: None,
+                        foreign_key: None,
+                        check: None,
+                        auto_increment: false,
+                    })
+                    .collect();
+                db.tables.insert(
+                    cte.name.clone(),
+                    Table {
+                        columns,
+                        rows: cte_result.rows,
+                        constraints: vec![],
+                    },
+                );
+            }
+        } else {
+            let cte_result = execute_select_internal(cte.query.clone(), &db)?;
+            let columns: Vec<ColumnDefinition> = cte_result
+                .headers
+                .iter()
+                .map(|name| ColumnDefinition {
+                    name: name.clone(),
+                    data_type: DataType::Text,
+                    nullable: true,
+                    primary_key: false,
+                    unique: false,
+                    default_value: None,
+                    foreign_key: None,
+                    check: None,
+                    auto_increment: false,
+                })
+                .collect();
+            db.tables.insert(
+                cte.name.clone(),
+                Table {
+                    columns,
+                    rows: cte_result.rows,
+                    constraints: vec![],
+                },
+            );
+        }
         temp_table_names.push(cte.name.clone());
     }
 

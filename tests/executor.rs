@@ -36,7 +36,9 @@ fn test_create_table() {
                 nullable: false,
             },
         ],
+        constraints: vec![],
         as_query: None,
+        if_not_exists: false,
     });
     assert!(execute(stmt).is_ok());
 }

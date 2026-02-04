@@ -69,6 +69,12 @@ impl Parser {
 
     fn parse_with_select(&mut self) -> Result<Statement, RustqlError> {
         self.consume(Token::With)?;
+        let recursive = if *self.current_token() == Token::Recursive {
+            self.advance();
+            true
+        } else {
+            false
+        };
         let mut ctes = Vec::new();
         loop {
             let name = match self.advance() {
@@ -90,7 +96,11 @@ impl Parser {
                 ));
             };
             self.consume(Token::RightParen)?;
-            ctes.push(Cte { name, query });
+            ctes.push(Cte {
+                name,
+                query,
+                recursive,
+            });
             if *self.current_token() == Token::Comma {
                 self.advance();
             } else {
@@ -117,11 +127,49 @@ impl Parser {
 
         let columns = self.parse_columns()?;
 
-        self.consume(Token::From)?;
-
-        let table = match self.advance() {
-            Token::Identifier(name) => name,
-            _ => return Err(RustqlError::ParseError("Expected table name".to_string())),
+        let (table, from_subquery, from_alias) = if *self.current_token() == Token::From {
+            self.advance();
+            if *self.current_token() == Token::LeftParen
+                && self.current + 1 < self.tokens.len()
+                && self.tokens[self.current + 1] == Token::Select
+            {
+                self.advance();
+                let subquery = self.parse_select_inner(Vec::new())?;
+                self.consume(Token::RightParen)?;
+                if *self.current_token() == Token::As {
+                    self.advance();
+                }
+                let alias = match self.advance() {
+                    Token::Identifier(name) => name,
+                    _ => {
+                        return Err(RustqlError::ParseError(
+                            "Expected alias for derived table".to_string(),
+                        ));
+                    }
+                };
+                (alias.clone(), Some((Box::new(subquery), alias)), None)
+            } else {
+                let name = match self.advance() {
+                    Token::Identifier(name) => name,
+                    _ => return Err(RustqlError::ParseError("Expected table name".to_string())),
+                };
+                let alias = if self.is_alias_token() {
+                    if *self.current_token() == Token::As {
+                        self.advance();
+                    }
+                    match self.advance() {
+                        Token::Identifier(a) => Some(a),
+                        _ => {
+                            return Err(RustqlError::ParseError("Expected alias name".to_string()));
+                        }
+                    }
+                } else {
+                    None
+                };
+                (name, None, alias)
+            }
+        } else {
+            ("".to_string(), None, None)
         };
 
         let mut joins = Vec::new();
@@ -162,6 +210,20 @@ impl Parser {
                     }
                 };
 
+                let join_alias = if self.is_alias_token() {
+                    if *self.current_token() == Token::As {
+                        self.advance();
+                    }
+                    match self.advance() {
+                        Token::Identifier(a) => Some(a),
+                        _ => {
+                            return Err(RustqlError::ParseError("Expected alias name".to_string()));
+                        }
+                    }
+                } else {
+                    None
+                };
+
                 let on_expr = if matches!(join_type, JoinType::Cross | JoinType::Natural) {
                     if *self.current_token() == Token::On {
                         self.advance();
@@ -177,6 +239,7 @@ impl Parser {
                 joins.push(Join {
                     join_type,
                     table: join_table,
+                    table_alias: join_alias,
                     on: on_expr,
                 });
             } else {
@@ -242,16 +305,43 @@ impl Parser {
             None
         };
 
-        let (union, union_all) = if *self.current_token() == Token::Union {
-            self.advance();
+        let set_op = if matches!(
+            self.current_token(),
+            Token::Union | Token::Intersect | Token::Except
+        ) {
+            let op_token = self.advance();
             let is_all = *self.current_token() == Token::All;
             if is_all {
                 self.advance();
             }
-            let union_stmt = self.parse_select_inner(Vec::new())?;
-            (Some(Box::new(union_stmt)), is_all)
+            let set_op_type = match op_token {
+                Token::Union => {
+                    if is_all {
+                        crate::ast::SetOperation::UnionAll
+                    } else {
+                        crate::ast::SetOperation::Union
+                    }
+                }
+                Token::Intersect => {
+                    if is_all {
+                        crate::ast::SetOperation::IntersectAll
+                    } else {
+                        crate::ast::SetOperation::Intersect
+                    }
+                }
+                Token::Except => {
+                    if is_all {
+                        crate::ast::SetOperation::ExceptAll
+                    } else {
+                        crate::ast::SetOperation::Except
+                    }
+                }
+                _ => unreachable!(),
+            };
+            let other_stmt = self.parse_select_inner(Vec::new())?;
+            Some((set_op_type, Box::new(other_stmt)))
         } else {
-            (None, false)
+            None
         };
 
         Ok(SelectStatement {
@@ -259,6 +349,8 @@ impl Parser {
             distinct,
             columns,
             from: table,
+            from_alias,
+            from_subquery,
             joins,
             where_clause,
             group_by,
@@ -266,8 +358,7 @@ impl Parser {
             order_by,
             limit,
             offset,
-            union,
-            union_all,
+            set_op,
         })
     }
 
@@ -432,7 +523,19 @@ impl Parser {
                     | Token::Day
                     | Token::DateAdd
                     | Token::Datediff
-                    | Token::ConcatFn => {
+                    | Token::ConcatFn
+                    | Token::Nullif
+                    | Token::Greatest
+                    | Token::Least
+                    | Token::Lpad
+                    | Token::Rpad
+                    | Token::Reverse
+                    | Token::Repeat
+                    | Token::Log
+                    | Token::Exp
+                    | Token::Sign
+                    | Token::DateTrunc
+                    | Token::Extract => {
                         let expr = self.parse_scalar_function()?;
                         let alias = if *self.current_token() == Token::As {
                             self.advance();
@@ -448,6 +551,45 @@ impl Parser {
                             None
                         };
                         Column::Expression { expr, alias }
+                    }
+                    Token::Left | Token::Right => {
+                        if self.current + 1 < self.tokens.len()
+                            && self.tokens[self.current + 1] == Token::LeftParen
+                        {
+                            let expr = self.parse_scalar_function()?;
+                            let alias = if *self.current_token() == Token::As {
+                                self.advance();
+                                match self.advance() {
+                                    Token::Identifier(alias) => Some(alias),
+                                    _ => {
+                                        return Err(RustqlError::ParseError(
+                                            "Expected alias after AS".to_string(),
+                                        ));
+                                    }
+                                }
+                            } else {
+                                None
+                            };
+                            Column::Expression { expr, alias }
+                        } else {
+                            let saved_pos = self.current;
+                            match self.parse_column_expression() {
+                                Ok((expr, alias)) => {
+                                    if let Expression::Column(name) = &expr {
+                                        Column::Named {
+                                            name: name.clone(),
+                                            alias,
+                                        }
+                                    } else {
+                                        Column::Expression { expr, alias }
+                                    }
+                                }
+                                Err(_) => {
+                                    self.current = saved_pos;
+                                    break;
+                                }
+                            }
+                        }
                     }
                     _ => {
                         let saved_pos = self.current;
@@ -541,15 +683,13 @@ impl Parser {
                 | WindowFunctionType::LastValue
                 | WindowFunctionType::NthValue
         );
-        if takes_args {
-            if *self.current_token() != Token::RightParen {
-                loop {
-                    args.push(self.parse_expression()?);
-                    if *self.current_token() == Token::Comma {
-                        self.advance();
-                    } else {
-                        break;
-                    }
+        if takes_args && *self.current_token() != Token::RightParen {
+            loop {
+                args.push(self.parse_expression()?);
+                if *self.current_token() == Token::Comma {
+                    self.advance();
+                } else {
+                    break;
                 }
             }
         }
@@ -583,6 +723,7 @@ impl Parser {
         })
     }
 
+    #[allow(clippy::type_complexity)]
     fn parse_over_clause(
         &mut self,
     ) -> Result<(Vec<Expression>, Vec<OrderByExpr>, Option<WindowFrame>), RustqlError> {
@@ -893,12 +1034,61 @@ impl Parser {
             Token::DateAdd => ScalarFunctionType::DateAdd,
             Token::Datediff => ScalarFunctionType::Datediff,
             Token::ConcatFn => ScalarFunctionType::ConcatFn,
+            Token::Nullif => ScalarFunctionType::Nullif,
+            Token::Greatest => ScalarFunctionType::Greatest,
+            Token::Least => ScalarFunctionType::Least,
+            Token::Lpad => ScalarFunctionType::Lpad,
+            Token::Rpad => ScalarFunctionType::Rpad,
+            Token::Left => ScalarFunctionType::LeftFn,
+            Token::Right => ScalarFunctionType::RightFn,
+            Token::Reverse => ScalarFunctionType::Reverse,
+            Token::Repeat => ScalarFunctionType::Repeat,
+            Token::Log => ScalarFunctionType::Log,
+            Token::Exp => ScalarFunctionType::Exp,
+            Token::Sign => ScalarFunctionType::Sign,
+            Token::DateTrunc => ScalarFunctionType::DateTrunc,
+            Token::Extract => ScalarFunctionType::Extract,
             _ => {
                 return Err(RustqlError::ParseError(
                     "Expected scalar function name".to_string(),
                 ));
             }
         };
+        if func_type == ScalarFunctionType::Extract {
+            self.consume(Token::LeftParen)?;
+            let part_name = match self.current_token() {
+                Token::Identifier(s) => {
+                    let s = s.to_uppercase();
+                    self.advance();
+                    s
+                }
+                Token::Year => {
+                    self.advance();
+                    "YEAR".to_string()
+                }
+                Token::Month => {
+                    self.advance();
+                    "MONTH".to_string()
+                }
+                Token::Day => {
+                    self.advance();
+                    "DAY".to_string()
+                }
+                _ => {
+                    return Err(RustqlError::ParseError(
+                        "Expected date part (YEAR, MONTH, DAY, HOUR, MINUTE, SECOND) after EXTRACT("
+                            .to_string(),
+                    ));
+                }
+            };
+            self.consume(Token::From)?;
+            let inner_expr = self.parse_expression()?;
+            self.consume(Token::RightParen)?;
+            return Ok(Expression::ScalarFunction {
+                name: ScalarFunctionType::Extract,
+                args: vec![Expression::Value(Value::Text(part_name)), inner_expr],
+            });
+        }
         self.consume(Token::LeftParen)?;
         let mut args = Vec::new();
         if *self.current_token() != Token::RightParen {
@@ -1037,12 +1227,9 @@ impl Parser {
         if matches!(func_type, AggregateFunctionType::GroupConcat) {
             if *self.current_token() == Token::Comma {
                 self.advance();
-                match self.current_token() {
-                    Token::StringLiteral(s) => {
-                        separator = Some(s.clone());
-                        self.advance();
-                    }
-                    _ => {}
+                if let Token::StringLiteral(s) = self.current_token() {
+                    separator = Some(s.clone());
+                    self.advance();
                 }
             }
             if *self.current_token() == Token::Separator {
@@ -1115,18 +1302,11 @@ impl Parser {
         }))
     }
 
-    fn parse_group_by(&mut self) -> Result<Vec<String>, RustqlError> {
-        let mut columns = Vec::new();
+    fn parse_group_by(&mut self) -> Result<Vec<Expression>, RustqlError> {
+        let mut exprs = Vec::new();
 
         loop {
-            match self.advance() {
-                Token::Identifier(name) => columns.push(name),
-                _ => {
-                    return Err(RustqlError::ParseError(
-                        "Expected column name in GROUP BY".to_string(),
-                    ));
-                }
-            }
+            exprs.push(self.parse_expression()?);
 
             if *self.current_token() == Token::Comma {
                 self.advance();
@@ -1135,7 +1315,51 @@ impl Parser {
             }
         }
 
-        Ok(columns)
+        Ok(exprs)
+    }
+
+    fn is_alias_token(&self) -> bool {
+        if *self.current_token() == Token::As {
+            return true;
+        }
+        if let Token::Identifier(_) = self.current_token() {
+            !matches!(
+                self.current_token(),
+                Token::Where
+                    | Token::Join
+                    | Token::Inner
+                    | Token::Left
+                    | Token::Right
+                    | Token::Full
+                    | Token::Cross
+                    | Token::Natural
+                    | Token::On
+                    | Token::Group
+                    | Token::Having
+                    | Token::Order
+                    | Token::Limit
+                    | Token::Offset
+                    | Token::Union
+                    | Token::Intersect
+                    | Token::Except
+                    | Token::Set
+                    | Token::From
+                    | Token::Using
+                    | Token::Returning
+            )
+        } else {
+            false
+        }
+    }
+
+    fn parse_returning(&mut self) -> Result<Option<Vec<Column>>, RustqlError> {
+        if *self.current_token() == Token::Returning {
+            self.advance();
+            let cols = self.parse_columns()?;
+            Ok(Some(cols))
+        } else {
+            Ok(None)
+        }
     }
 
     fn parse_insert(&mut self) -> Result<Statement, RustqlError> {
@@ -1181,12 +1405,14 @@ impl Parser {
                     "Expected SELECT after INSERT INTO table".to_string(),
                 ));
             };
+            let returning = self.parse_returning()?;
             return Ok(Statement::Insert(InsertStatement {
                 table,
                 columns,
                 values: Vec::new(),
                 source_query: Some(Box::new(source_query)),
                 on_conflict: None,
+                returning,
             }));
         }
 
@@ -1240,12 +1466,15 @@ impl Parser {
             None
         };
 
+        let returning = self.parse_returning()?;
+
         Ok(Statement::Insert(InsertStatement {
             table,
             columns,
             values,
             source_query: None,
             on_conflict,
+            returning,
         }))
     }
 
@@ -1346,6 +1575,7 @@ impl Parser {
                     joins.push(Join {
                         join_type,
                         table: join_table,
+                        table_alias: None,
                         on: Some(on_expr),
                     });
                 } else {
@@ -1367,11 +1597,14 @@ impl Parser {
             None
         };
 
+        let returning = self.parse_returning()?;
+
         Ok(Statement::Update(UpdateStatement {
             table,
             assignments,
             where_clause,
             from,
+            returning,
         }))
     }
 
@@ -1409,6 +1642,86 @@ impl Parser {
             _ => return Err(RustqlError::ParseError("Expected table name".to_string())),
         };
 
+        let using = if *self.current_token() == Token::Using {
+            self.advance();
+            let using_table = match self.advance() {
+                Token::Identifier(name) => name,
+                _ => {
+                    return Err(RustqlError::ParseError(
+                        "Expected table name after USING".to_string(),
+                    ));
+                }
+            };
+            let using_alias = if self.is_alias_token()
+                && !matches!(
+                    self.current_token(),
+                    Token::Where
+                        | Token::Join
+                        | Token::Inner
+                        | Token::Left
+                        | Token::Right
+                        | Token::Full
+                ) {
+                if *self.current_token() == Token::As {
+                    self.advance();
+                }
+                match self.advance() {
+                    Token::Identifier(a) => Some(a),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            let mut joins = Vec::new();
+            loop {
+                let join_type = if *self.current_token() == Token::Left {
+                    self.advance();
+                    Some(JoinType::Left)
+                } else if *self.current_token() == Token::Right {
+                    self.advance();
+                    Some(JoinType::Right)
+                } else if *self.current_token() == Token::Full {
+                    self.advance();
+                    Some(JoinType::Full)
+                } else if *self.current_token() == Token::Inner {
+                    self.advance();
+                    Some(JoinType::Inner)
+                } else if *self.current_token() == Token::Join {
+                    Some(JoinType::Inner)
+                } else {
+                    None
+                };
+                if let Some(join_type) = join_type {
+                    self.consume(Token::Join)?;
+                    let join_table = match self.advance() {
+                        Token::Identifier(name) => name,
+                        _ => {
+                            return Err(RustqlError::ParseError(
+                                "Expected table name after JOIN".to_string(),
+                            ));
+                        }
+                    };
+                    self.consume(Token::On)?;
+                    let on_expr = self.parse_expression()?;
+                    joins.push(Join {
+                        join_type,
+                        table: join_table,
+                        table_alias: None,
+                        on: Some(on_expr),
+                    });
+                } else {
+                    break;
+                }
+            }
+            Some(DeleteUsing {
+                table: using_table,
+                alias: using_alias,
+                joins,
+            })
+        } else {
+            None
+        };
+
         let where_clause = if *self.current_token() == Token::Where {
             self.advance();
             Some(self.parse_expression()?)
@@ -1416,9 +1729,13 @@ impl Parser {
             None
         };
 
+        let returning = self.parse_returning()?;
+
         Ok(Statement::Delete(DeleteStatement {
             table,
             where_clause,
+            using,
+            returning,
         }))
     }
 
@@ -1428,6 +1745,14 @@ impl Parser {
         match self.current_token() {
             Token::Table => {
                 self.advance();
+                let if_not_exists = if *self.current_token() == Token::If {
+                    self.advance();
+                    self.consume(Token::Not)?;
+                    self.consume(Token::Exists)?;
+                    true
+                } else {
+                    false
+                };
                 let name = match self.advance() {
                     Token::Identifier(name) => name,
                     _ => return Err(RustqlError::ParseError("Expected table name".to_string())),
@@ -1446,24 +1771,36 @@ impl Parser {
                     return Ok(Statement::CreateTable(CreateTableStatement {
                         name,
                         columns: Vec::new(),
+                        constraints: Vec::new(),
                         as_query: Some(Box::new(query)),
+                        if_not_exists,
                     }));
                 }
 
                 self.consume(Token::LeftParen)?;
 
-                let columns = self.parse_column_definitions()?;
+                let (columns, constraints) = self.parse_column_definitions()?;
 
                 self.consume(Token::RightParen)?;
 
                 Ok(Statement::CreateTable(CreateTableStatement {
                     name,
                     columns,
+                    constraints,
                     as_query: None,
+                    if_not_exists,
                 }))
             }
             Token::Index => {
                 self.advance();
+                let if_not_exists = if *self.current_token() == Token::If {
+                    self.advance();
+                    self.consume(Token::Not)?;
+                    self.consume(Token::Exists)?;
+                    true
+                } else {
+                    false
+                };
                 let index_name = match self.advance() {
                     Token::Identifier(name) => name,
                     _ => return Err(RustqlError::ParseError("Expected index name".to_string())),
@@ -1501,6 +1838,7 @@ impl Parser {
                     name: index_name,
                     table,
                     columns,
+                    if_not_exists,
                 }))
             }
             Token::View => {
@@ -1528,10 +1866,150 @@ impl Parser {
         }
     }
 
-    fn parse_column_definitions(&mut self) -> Result<Vec<ColumnDefinition>, RustqlError> {
+    fn parse_column_definitions(
+        &mut self,
+    ) -> Result<(Vec<ColumnDefinition>, Vec<crate::ast::TableConstraint>), RustqlError> {
         let mut columns = Vec::new();
+        let mut table_constraints: Vec<crate::ast::TableConstraint> = Vec::new();
 
         loop {
+            if *self.current_token() == Token::Primary {
+                self.advance();
+                self.consume(Token::Key)?;
+                self.consume(Token::LeftParen)?;
+                let mut cols = Vec::new();
+                loop {
+                    match self.advance() {
+                        Token::Identifier(name) => cols.push(name),
+                        _ => {
+                            return Err(RustqlError::ParseError(
+                                "Expected column name in PRIMARY KEY".to_string(),
+                            ));
+                        }
+                    }
+                    if *self.current_token() == Token::Comma {
+                        self.advance();
+                    } else {
+                        break;
+                    }
+                }
+                self.consume(Token::RightParen)?;
+                table_constraints.push(crate::ast::TableConstraint::PrimaryKey {
+                    name: None,
+                    columns: cols,
+                });
+                if *self.current_token() == Token::Comma {
+                    self.advance();
+                    continue;
+                } else {
+                    break;
+                }
+            }
+
+            if *self.current_token() == Token::Unique {
+                self.advance();
+                self.consume(Token::LeftParen)?;
+                let mut cols = Vec::new();
+                loop {
+                    match self.advance() {
+                        Token::Identifier(name) => cols.push(name),
+                        _ => {
+                            return Err(RustqlError::ParseError(
+                                "Expected column name in UNIQUE".to_string(),
+                            ));
+                        }
+                    }
+                    if *self.current_token() == Token::Comma {
+                        self.advance();
+                    } else {
+                        break;
+                    }
+                }
+                self.consume(Token::RightParen)?;
+                table_constraints.push(crate::ast::TableConstraint::Unique {
+                    name: None,
+                    columns: cols,
+                });
+                if *self.current_token() == Token::Comma {
+                    self.advance();
+                    continue;
+                } else {
+                    break;
+                }
+            }
+
+            if *self.current_token() == Token::Constraint {
+                self.advance();
+                let constraint_name = match self.advance() {
+                    Token::Identifier(name) => name,
+                    _ => {
+                        return Err(RustqlError::ParseError(
+                            "Expected constraint name after CONSTRAINT".to_string(),
+                        ));
+                    }
+                };
+                if *self.current_token() == Token::Primary {
+                    self.advance();
+                    self.consume(Token::Key)?;
+                    self.consume(Token::LeftParen)?;
+                    let mut cols = Vec::new();
+                    loop {
+                        match self.advance() {
+                            Token::Identifier(name) => cols.push(name),
+                            _ => {
+                                return Err(RustqlError::ParseError(
+                                    "Expected column name".to_string(),
+                                ));
+                            }
+                        }
+                        if *self.current_token() == Token::Comma {
+                            self.advance();
+                        } else {
+                            break;
+                        }
+                    }
+                    self.consume(Token::RightParen)?;
+                    table_constraints.push(crate::ast::TableConstraint::PrimaryKey {
+                        name: Some(constraint_name),
+                        columns: cols,
+                    });
+                } else if *self.current_token() == Token::Unique {
+                    self.advance();
+                    self.consume(Token::LeftParen)?;
+                    let mut cols = Vec::new();
+                    loop {
+                        match self.advance() {
+                            Token::Identifier(name) => cols.push(name),
+                            _ => {
+                                return Err(RustqlError::ParseError(
+                                    "Expected column name".to_string(),
+                                ));
+                            }
+                        }
+                        if *self.current_token() == Token::Comma {
+                            self.advance();
+                        } else {
+                            break;
+                        }
+                    }
+                    self.consume(Token::RightParen)?;
+                    table_constraints.push(crate::ast::TableConstraint::Unique {
+                        name: Some(constraint_name),
+                        columns: cols,
+                    });
+                } else {
+                    return Err(RustqlError::ParseError(
+                        "Expected PRIMARY KEY or UNIQUE after CONSTRAINT name".to_string(),
+                    ));
+                }
+                if *self.current_token() == Token::Comma {
+                    self.advance();
+                    continue;
+                } else {
+                    break;
+                }
+            }
+
             let name = match self.advance() {
                 Token::Identifier(name) => name,
                 _ => return Err(RustqlError::ParseError("Expected column name".to_string())),
@@ -1713,7 +2191,7 @@ impl Parser {
             }
         }
 
-        Ok(columns)
+        Ok((columns, table_constraints))
     }
 
     fn parse_data_type(&mut self) -> Result<DataType, RustqlError> {
@@ -1743,34 +2221,42 @@ impl Parser {
         match self.current_token() {
             Token::Table => {
                 self.advance();
+                let if_exists = if *self.current_token() == Token::If {
+                    self.advance();
+                    self.consume(Token::Exists)?;
+                    true
+                } else {
+                    false
+                };
                 let name = match self.advance() {
                     Token::Identifier(name) => name,
                     _ => return Err(RustqlError::ParseError("Expected table name".to_string())),
                 };
 
-                Ok(Statement::DropTable(DropTableStatement { name }))
+                Ok(Statement::DropTable(DropTableStatement { name, if_exists }))
             }
             Token::Index => {
                 self.advance();
+                let if_exists = if *self.current_token() == Token::If {
+                    self.advance();
+                    self.consume(Token::Exists)?;
+                    true
+                } else {
+                    false
+                };
                 let name = match self.advance() {
                     Token::Identifier(name) => name,
                     _ => return Err(RustqlError::ParseError("Expected index name".to_string())),
                 };
 
-                Ok(Statement::DropIndex(DropIndexStatement { name }))
+                Ok(Statement::DropIndex(DropIndexStatement { name, if_exists }))
             }
             Token::View => {
                 self.advance();
-                let if_exists = if *self.current_token() == Token::Identifier("IF".to_string()) {
+                let if_exists = if *self.current_token() == Token::If {
                     self.advance();
-                    if *self.current_token() == Token::Exists {
-                        self.advance();
-                        true
-                    } else {
-                        return Err(RustqlError::ParseError(
-                            "Expected EXISTS after IF".to_string(),
-                        ));
-                    }
+                    self.consume(Token::Exists)?;
+                    true
                 } else {
                     false
                 };
@@ -1798,49 +2284,233 @@ impl Parser {
         let operation = match self.current_token() {
             Token::Add => {
                 self.advance();
-                self.consume(Token::Column)?;
-                let name = match self.advance() {
-                    Token::Identifier(n) => n,
-                    _ => return Err(RustqlError::ParseError("Expected column name".to_string())),
-                };
-                let data_type = self.parse_data_type()?;
-                AlterOperation::AddColumn(ColumnDefinition {
-                    name,
-                    data_type,
-                    nullable: true,
-                    primary_key: false,
-                    unique: false,
-                    default_value: None,
-                    foreign_key: None,
-                    check: None,
-                    auto_increment: false,
-                })
+                match self.current_token() {
+                    Token::Column => {
+                        self.advance();
+                        let name = match self.advance() {
+                            Token::Identifier(n) => n,
+                            _ => {
+                                return Err(RustqlError::ParseError(
+                                    "Expected column name".to_string(),
+                                ));
+                            }
+                        };
+                        let data_type = self.parse_data_type()?;
+                        AlterOperation::AddColumn(ColumnDefinition {
+                            name,
+                            data_type,
+                            nullable: true,
+                            primary_key: false,
+                            unique: false,
+                            default_value: None,
+                            foreign_key: None,
+                            check: None,
+                            auto_increment: false,
+                        })
+                    }
+                    Token::Constraint => {
+                        self.advance();
+                        let constraint_name = match self.advance() {
+                            Token::Identifier(n) => n,
+                            _ => {
+                                return Err(RustqlError::ParseError(
+                                    "Expected constraint name".to_string(),
+                                ));
+                            }
+                        };
+                        if *self.current_token() == Token::Primary {
+                            self.advance();
+                            self.consume(Token::Key)?;
+                            self.consume(Token::LeftParen)?;
+                            let mut cols = Vec::new();
+                            loop {
+                                match self.advance() {
+                                    Token::Identifier(name) => cols.push(name),
+                                    _ => {
+                                        return Err(RustqlError::ParseError(
+                                            "Expected column name".to_string(),
+                                        ));
+                                    }
+                                }
+                                if *self.current_token() == Token::Comma {
+                                    self.advance();
+                                } else {
+                                    break;
+                                }
+                            }
+                            self.consume(Token::RightParen)?;
+                            AlterOperation::AddConstraint(crate::ast::TableConstraint::PrimaryKey {
+                                name: Some(constraint_name),
+                                columns: cols,
+                            })
+                        } else if *self.current_token() == Token::Unique {
+                            self.advance();
+                            self.consume(Token::LeftParen)?;
+                            let mut cols = Vec::new();
+                            loop {
+                                match self.advance() {
+                                    Token::Identifier(name) => cols.push(name),
+                                    _ => {
+                                        return Err(RustqlError::ParseError(
+                                            "Expected column name".to_string(),
+                                        ));
+                                    }
+                                }
+                                if *self.current_token() == Token::Comma {
+                                    self.advance();
+                                } else {
+                                    break;
+                                }
+                            }
+                            self.consume(Token::RightParen)?;
+                            AlterOperation::AddConstraint(crate::ast::TableConstraint::Unique {
+                                name: Some(constraint_name),
+                                columns: cols,
+                            })
+                        } else {
+                            return Err(RustqlError::ParseError(
+                                "Expected PRIMARY KEY or UNIQUE after constraint name".to_string(),
+                            ));
+                        }
+                    }
+                    Token::Primary => {
+                        self.advance();
+                        self.consume(Token::Key)?;
+                        self.consume(Token::LeftParen)?;
+                        let mut cols = Vec::new();
+                        loop {
+                            match self.advance() {
+                                Token::Identifier(name) => cols.push(name),
+                                _ => {
+                                    return Err(RustqlError::ParseError(
+                                        "Expected column name".to_string(),
+                                    ));
+                                }
+                            }
+                            if *self.current_token() == Token::Comma {
+                                self.advance();
+                            } else {
+                                break;
+                            }
+                        }
+                        self.consume(Token::RightParen)?;
+                        AlterOperation::AddConstraint(crate::ast::TableConstraint::PrimaryKey {
+                            name: None,
+                            columns: cols,
+                        })
+                    }
+                    Token::Unique => {
+                        self.advance();
+                        self.consume(Token::LeftParen)?;
+                        let mut cols = Vec::new();
+                        loop {
+                            match self.advance() {
+                                Token::Identifier(name) => cols.push(name),
+                                _ => {
+                                    return Err(RustqlError::ParseError(
+                                        "Expected column name".to_string(),
+                                    ));
+                                }
+                            }
+                            if *self.current_token() == Token::Comma {
+                                self.advance();
+                            } else {
+                                break;
+                            }
+                        }
+                        self.consume(Token::RightParen)?;
+                        AlterOperation::AddConstraint(crate::ast::TableConstraint::Unique {
+                            name: None,
+                            columns: cols,
+                        })
+                    }
+                    _ => {
+                        let name = match self.advance() {
+                            Token::Identifier(n) => n,
+                            _ => {
+                                return Err(RustqlError::ParseError(
+                                    "Expected COLUMN, CONSTRAINT, PRIMARY, or UNIQUE after ADD"
+                                        .to_string(),
+                                ));
+                            }
+                        };
+                        let data_type = self.parse_data_type()?;
+                        AlterOperation::AddColumn(ColumnDefinition {
+                            name,
+                            data_type,
+                            nullable: true,
+                            primary_key: false,
+                            unique: false,
+                            default_value: None,
+                            foreign_key: None,
+                            check: None,
+                            auto_increment: false,
+                        })
+                    }
+                }
             }
             Token::Drop => {
                 self.advance();
-                self.consume(Token::Column)?;
-                match self.advance() {
-                    Token::Identifier(name) => AlterOperation::DropColumn(name),
-                    _ => return Err(RustqlError::ParseError("Expected column name".to_string())),
+                if *self.current_token() == Token::Constraint {
+                    self.advance();
+                    match self.advance() {
+                        Token::Identifier(name) => AlterOperation::DropConstraint(name),
+                        _ => {
+                            return Err(RustqlError::ParseError(
+                                "Expected constraint name after DROP CONSTRAINT".to_string(),
+                            ));
+                        }
+                    }
+                } else {
+                    if *self.current_token() == Token::Column {
+                        self.advance();
+                    }
+                    match self.advance() {
+                        Token::Identifier(name) => AlterOperation::DropColumn(name),
+                        _ => {
+                            return Err(RustqlError::ParseError(
+                                "Expected column name".to_string(),
+                            ));
+                        }
+                    }
                 }
             }
             Token::Rename => {
                 self.advance();
-                self.consume(Token::Column)?;
-                let old = match self.advance() {
-                    Token::Identifier(n) => n,
-                    _ => return Err(RustqlError::ParseError("Expected column name".to_string())),
-                };
-                self.consume(Token::To)?;
-                let new = match self.advance() {
-                    Token::Identifier(n) => n,
-                    _ => {
-                        return Err(RustqlError::ParseError(
-                            "Expected new column name".to_string(),
-                        ));
+                if *self.current_token() == Token::To {
+                    self.advance();
+                    let new_name = match self.advance() {
+                        Token::Identifier(n) => n,
+                        _ => {
+                            return Err(RustqlError::ParseError(
+                                "Expected new table name after RENAME TO".to_string(),
+                            ));
+                        }
+                    };
+                    AlterOperation::RenameTable(new_name)
+                } else {
+                    if *self.current_token() == Token::Column {
+                        self.advance();
                     }
-                };
-                AlterOperation::RenameColumn { old, new }
+                    let old = match self.advance() {
+                        Token::Identifier(n) => n,
+                        _ => {
+                            return Err(RustqlError::ParseError(
+                                "Expected column name".to_string(),
+                            ));
+                        }
+                    };
+                    self.consume(Token::To)?;
+                    let new = match self.advance() {
+                        Token::Identifier(n) => n,
+                        _ => {
+                            return Err(RustqlError::ParseError(
+                                "Expected new column name".to_string(),
+                            ));
+                        }
+                    };
+                    AlterOperation::RenameColumn { old, new }
+                }
             }
             _ => {
                 return Err(RustqlError::ParseError(
@@ -1956,6 +2626,15 @@ impl Parser {
                     expr = Expression::BinaryOp {
                         left: Box::new(expr),
                         op: BinaryOperator::Like,
+                        right: Box::new(right),
+                    };
+                }
+                Token::ILike => {
+                    self.advance();
+                    let right = self.parse_term()?;
+                    expr = Expression::BinaryOp {
+                        left: Box::new(expr),
+                        op: BinaryOperator::ILike,
                         right: Box::new(right),
                     };
                 }
@@ -2125,7 +2804,30 @@ impl Parser {
             | Token::Day
             | Token::DateAdd
             | Token::Datediff
-            | Token::ConcatFn => self.parse_scalar_function(),
+            | Token::ConcatFn
+            | Token::Nullif
+            | Token::Greatest
+            | Token::Least
+            | Token::Lpad
+            | Token::Rpad
+            | Token::Reverse
+            | Token::Repeat
+            | Token::Log
+            | Token::Exp
+            | Token::Sign
+            | Token::DateTrunc
+            | Token::Extract => self.parse_scalar_function(),
+            Token::Left | Token::Right => {
+                if self.current + 1 < self.tokens.len()
+                    && self.tokens[self.current + 1] == Token::LeftParen
+                {
+                    self.parse_scalar_function()
+                } else {
+                    let name = format!("{:?}", self.current_token());
+                    self.advance();
+                    Ok(Expression::Column(name))
+                }
+            }
             Token::Count
             | Token::Sum
             | Token::Avg
@@ -2383,8 +3085,24 @@ fn token_to_string(tok: &Token) -> String {
         Token::Is => "IS".to_string(),
         Token::In => "IN".to_string(),
         Token::Like => "LIKE".to_string(),
+        Token::ILike => "ILIKE".to_string(),
         Token::Between => "BETWEEN".to_string(),
         Token::Comma => ",".to_string(),
+        Token::Intersect => "INTERSECT".to_string(),
+        Token::Except => "EXCEPT".to_string(),
+        Token::Constraint => "CONSTRAINT".to_string(),
+        Token::Nullif => "NULLIF".to_string(),
+        Token::Greatest => "GREATEST".to_string(),
+        Token::Least => "LEAST".to_string(),
+        Token::Lpad => "LPAD".to_string(),
+        Token::Rpad => "RPAD".to_string(),
+        Token::Reverse => "REVERSE".to_string(),
+        Token::Repeat => "REPEAT".to_string(),
+        Token::Log => "LOG".to_string(),
+        Token::Exp => "EXP".to_string(),
+        Token::Sign => "SIGN".to_string(),
+        Token::DateTrunc => "DATE_TRUNC".to_string(),
+        Token::Extract => "EXTRACT".to_string(),
         _ => format!("{:?}", tok),
     }
 }
@@ -2544,6 +3262,41 @@ fn token_to_sql(tok: &Token) -> String {
         Token::Datediff => "DATEDIFF".to_string(),
         Token::Truncate => "TRUNCATE".to_string(),
         Token::View => "VIEW".to_string(),
+        Token::ILike => "ILIKE".to_string(),
+        Token::Intersect => "INTERSECT".to_string(),
+        Token::Except => "EXCEPT".to_string(),
+        Token::Constraint => "CONSTRAINT".to_string(),
+        Token::Nullif => "NULLIF".to_string(),
+        Token::Greatest => "GREATEST".to_string(),
+        Token::Least => "LEAST".to_string(),
+        Token::Lpad => "LPAD".to_string(),
+        Token::Rpad => "RPAD".to_string(),
+        Token::Reverse => "REVERSE".to_string(),
+        Token::Repeat => "REPEAT".to_string(),
+        Token::Log => "LOG".to_string(),
+        Token::Exp => "EXP".to_string(),
+        Token::Sign => "SIGN".to_string(),
+        Token::DateTrunc => "DATE_TRUNC".to_string(),
+        Token::Extract => "EXTRACT".to_string(),
+        Token::Conflict => "CONFLICT".to_string(),
+        Token::Do => "DO".to_string(),
+        Token::Nothing => "NOTHING".to_string(),
+        Token::Autoincrement => "AUTOINCREMENT".to_string(),
+        Token::Analyze => "ANALYZE".to_string(),
+        Token::Begin => "BEGIN".to_string(),
+        Token::Commit => "COMMIT".to_string(),
+        Token::Rollback => "ROLLBACK".to_string(),
+        Token::Transaction => "TRANSACTION".to_string(),
+        Token::Explain => "EXPLAIN".to_string(),
+        Token::Describe => "DESCRIBE".to_string(),
+        Token::Show => "SHOW".to_string(),
+        Token::Tables => "TABLES".to_string(),
+        Token::Savepoint => "SAVEPOINT".to_string(),
+        Token::Release => "RELEASE".to_string(),
+        Token::If => "IF".to_string(),
+        Token::Using => "USING".to_string(),
+        Token::Returning => "RETURNING".to_string(),
+        Token::Recursive => "RECURSIVE".to_string(),
         _ => format!("{:?}", tok),
     }
 }

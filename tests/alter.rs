@@ -18,7 +18,9 @@ fn test_alter_table_add_column() {
             check: None,
             auto_increment: false,
         }],
+        constraints: vec![],
         as_query: None,
+        if_not_exists: false,
     }))
     .unwrap();
 

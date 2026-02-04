@@ -29,7 +29,9 @@ fn test_where_exists_true() {
                 nullable: false,
             },
         ],
+        constraints: vec![],
         as_query: None,
+        if_not_exists: false,
     }))
     .unwrap();
 
@@ -42,6 +44,7 @@ fn test_where_exists_true() {
         ],
         source_query: None,
         on_conflict: None,
+        returning: None,
     }))
     .unwrap();
 
@@ -71,7 +74,9 @@ fn test_where_exists_true() {
                 nullable: false,
             },
         ],
+        constraints: vec![],
         as_query: None,
+        if_not_exists: false,
     }))
     .unwrap();
 
@@ -84,16 +89,18 @@ fn test_where_exists_true() {
         ],
         source_query: None,
         on_conflict: None,
+        returning: None,
     }))
     .unwrap();
 
     let sub = SelectStatement {
         ctes: Vec::new(),
-        union: None,
-        union_all: false,
+        from_subquery: None,
+        set_op: None,
         distinct: false,
         columns: vec![Column::All],
         from: "orders_ex1".into(),
+        from_alias: None,
         joins: vec![],
         where_clause: Some(Expression::BinaryOp {
             left: Box::new(Expression::Column("amount".into())),
@@ -109,10 +116,11 @@ fn test_where_exists_true() {
 
     let stmt = Statement::Select(SelectStatement {
         ctes: Vec::new(),
-        union: None,
-        union_all: false,
+        from_subquery: None,
+        set_op: None,
         distinct: false,
         from: "users_ex1".into(),
+        from_alias: None,
         columns: vec![Column::All],
         joins: vec![],
         where_clause: Some(Expression::Exists(Box::new(sub))),
@@ -156,7 +164,9 @@ fn test_where_exists_false_filters_all() {
                 nullable: false,
             },
         ],
+        constraints: vec![],
         as_query: None,
+        if_not_exists: false,
     }))
     .unwrap();
 
@@ -169,6 +179,7 @@ fn test_where_exists_false_filters_all() {
         ],
         source_query: None,
         on_conflict: None,
+        returning: None,
     }))
     .unwrap();
 
@@ -198,7 +209,9 @@ fn test_where_exists_false_filters_all() {
                 nullable: false,
             },
         ],
+        constraints: vec![],
         as_query: None,
+        if_not_exists: false,
     }))
     .unwrap();
 
@@ -211,16 +224,18 @@ fn test_where_exists_false_filters_all() {
         ],
         source_query: None,
         on_conflict: None,
+        returning: None,
     }))
     .unwrap();
 
     let sub = SelectStatement {
         ctes: Vec::new(),
-        union: None,
-        union_all: false,
+        from_subquery: None,
+        set_op: None,
         distinct: false,
         columns: vec![Column::All],
         from: "orders_ex2".into(),
+        from_alias: None,
         joins: vec![],
         where_clause: Some(Expression::BinaryOp {
             left: Box::new(Expression::Column("amount".into())),
@@ -236,10 +251,11 @@ fn test_where_exists_false_filters_all() {
 
     let stmt = Statement::Select(SelectStatement {
         ctes: Vec::new(),
-        union: None,
-        union_all: false,
+        from_subquery: None,
+        set_op: None,
         distinct: false,
         from: "users_ex2".into(),
+        from_alias: None,
         columns: vec![Column::All],
         joins: vec![],
         where_clause: Some(Expression::Exists(Box::new(sub))),
@@ -283,7 +299,9 @@ fn test_where_not_exists_true_filters_all() {
                 nullable: false,
             },
         ],
+        constraints: vec![],
         as_query: None,
+        if_not_exists: false,
     }))
     .unwrap();
 
@@ -296,6 +314,7 @@ fn test_where_not_exists_true_filters_all() {
         ],
         source_query: None,
         on_conflict: None,
+        returning: None,
     }))
     .unwrap();
 
@@ -325,7 +344,9 @@ fn test_where_not_exists_true_filters_all() {
                 nullable: false,
             },
         ],
+        constraints: vec![],
         as_query: None,
+        if_not_exists: false,
     }))
     .unwrap();
 
@@ -338,16 +359,18 @@ fn test_where_not_exists_true_filters_all() {
         ],
         source_query: None,
         on_conflict: None,
+        returning: None,
     }))
     .unwrap();
 
     let sub = SelectStatement {
         ctes: Vec::new(),
-        union: None,
-        union_all: false,
+        from_subquery: None,
+        set_op: None,
         distinct: false,
         columns: vec![Column::All],
         from: "t_orders_ne1".into(),
+        from_alias: None,
         joins: vec![],
         where_clause: Some(Expression::BinaryOp {
             left: Box::new(Expression::Column("amount".into())),
@@ -363,10 +386,11 @@ fn test_where_not_exists_true_filters_all() {
 
     let stmt = Statement::Select(SelectStatement {
         ctes: Vec::new(),
-        union: None,
-        union_all: false,
+        from_subquery: None,
+        set_op: None,
         distinct: false,
         from: "t_users_ne1".into(),
+        from_alias: None,
         columns: vec![Column::All],
         joins: vec![],
         where_clause: Some(Expression::UnaryOp {
@@ -413,7 +437,9 @@ fn test_where_exists_correlated_true() {
                 nullable: false,
             },
         ],
+        constraints: vec![],
         as_query: None,
+        if_not_exists: false,
     }))
     .unwrap();
 
@@ -426,6 +452,7 @@ fn test_where_exists_correlated_true() {
         ],
         source_query: None,
         on_conflict: None,
+        returning: None,
     }))
     .unwrap();
 
@@ -455,7 +482,9 @@ fn test_where_exists_correlated_true() {
                 nullable: false,
             },
         ],
+        constraints: vec![],
         as_query: None,
+        if_not_exists: false,
     }))
     .unwrap();
 
@@ -468,16 +497,18 @@ fn test_where_exists_correlated_true() {
         ],
         source_query: None,
         on_conflict: None,
+        returning: None,
     }))
     .unwrap();
 
     let sub = SelectStatement {
         ctes: Vec::new(),
-        union: None,
-        union_all: false,
+        from_subquery: None,
+        set_op: None,
         distinct: false,
         columns: vec![Column::All],
         from: "orders_corr1".into(),
+        from_alias: None,
         joins: vec![],
         where_clause: Some(Expression::BinaryOp {
             left: Box::new(Expression::BinaryOp {
@@ -501,10 +532,11 @@ fn test_where_exists_correlated_true() {
 
     let stmt = Statement::Select(SelectStatement {
         ctes: Vec::new(),
-        union: None,
-        union_all: false,
+        from_subquery: None,
+        set_op: None,
         distinct: false,
         from: "users_corr1".into(),
+        from_alias: None,
         columns: vec![Column::All],
         joins: vec![],
         where_clause: Some(Expression::Exists(Box::new(sub))),
@@ -548,7 +580,9 @@ fn test_where_not_exists_false() {
                 nullable: false,
             },
         ],
+        constraints: vec![],
         as_query: None,
+        if_not_exists: false,
     }))
     .unwrap();
 
@@ -561,6 +595,7 @@ fn test_where_not_exists_false() {
         ],
         source_query: None,
         on_conflict: None,
+        returning: None,
     }))
     .unwrap();
 
@@ -590,7 +625,9 @@ fn test_where_not_exists_false() {
                 nullable: false,
             },
         ],
+        constraints: vec![],
         as_query: None,
+        if_not_exists: false,
     }))
     .unwrap();
 
@@ -603,16 +640,18 @@ fn test_where_not_exists_false() {
         ],
         source_query: None,
         on_conflict: None,
+        returning: None,
     }))
     .unwrap();
 
     let sub = SelectStatement {
         ctes: Vec::new(),
-        union: None,
-        union_all: false,
+        from_subquery: None,
+        set_op: None,
         distinct: false,
         columns: vec![Column::All],
         from: "t_orders_ne2".into(),
+        from_alias: None,
         joins: vec![],
         where_clause: Some(Expression::BinaryOp {
             left: Box::new(Expression::Column("amount".into())),
@@ -628,10 +667,11 @@ fn test_where_not_exists_false() {
 
     let stmt = Statement::Select(SelectStatement {
         ctes: Vec::new(),
-        union: None,
-        union_all: false,
+        from_subquery: None,
+        set_op: None,
         distinct: false,
         from: "t_users_ne2".into(),
+        from_alias: None,
         columns: vec![Column::All],
         joins: vec![],
         where_clause: Some(Expression::UnaryOp {
@@ -678,7 +718,9 @@ fn test_where_exists_correlated_false() {
                 nullable: false,
             },
         ],
+        constraints: vec![],
         as_query: None,
+        if_not_exists: false,
     }))
     .unwrap();
 
@@ -691,6 +733,7 @@ fn test_where_exists_correlated_false() {
         ],
         source_query: None,
         on_conflict: None,
+        returning: None,
     }))
     .unwrap();
 
@@ -720,7 +763,9 @@ fn test_where_exists_correlated_false() {
                 nullable: false,
             },
         ],
+        constraints: vec![],
         as_query: None,
+        if_not_exists: false,
     }))
     .unwrap();
 
@@ -733,16 +778,18 @@ fn test_where_exists_correlated_false() {
         ],
         source_query: None,
         on_conflict: None,
+        returning: None,
     }))
     .unwrap();
 
     let sub = SelectStatement {
         ctes: Vec::new(),
-        union: None,
-        union_all: false,
+        from_subquery: None,
+        set_op: None,
         distinct: false,
         columns: vec![Column::All],
         from: "orders_corr2".into(),
+        from_alias: None,
         joins: vec![],
         where_clause: Some(Expression::BinaryOp {
             left: Box::new(Expression::BinaryOp {
@@ -766,10 +813,11 @@ fn test_where_exists_correlated_false() {
 
     let stmt = Statement::Select(SelectStatement {
         ctes: Vec::new(),
-        union: None,
-        union_all: false,
+        from_subquery: None,
+        set_op: None,
         distinct: false,
         from: "users_corr2".into(),
+        from_alias: None,
         columns: vec![Column::All],
         joins: vec![],
         where_clause: Some(Expression::Exists(Box::new(sub))),
@@ -813,7 +861,9 @@ fn test_where_exists_with_join() {
                 nullable: false,
             },
         ],
+        constraints: vec![],
         as_query: None,
+        if_not_exists: false,
     }))
     .unwrap();
 
@@ -826,6 +876,7 @@ fn test_where_exists_with_join() {
         ],
         source_query: None,
         on_conflict: None,
+        returning: None,
     }))
     .unwrap();
 
@@ -855,7 +906,9 @@ fn test_where_exists_with_join() {
                 nullable: false,
             },
         ],
+        constraints: vec![],
         as_query: None,
+        if_not_exists: false,
     }))
     .unwrap();
 
@@ -868,6 +921,7 @@ fn test_where_exists_with_join() {
         ],
         source_query: None,
         on_conflict: None,
+        returning: None,
     }))
     .unwrap();
 
@@ -897,7 +951,9 @@ fn test_where_exists_with_join() {
                 nullable: false,
             },
         ],
+        constraints: vec![],
         as_query: None,
+        if_not_exists: false,
     }))
     .unwrap();
 
@@ -907,19 +963,22 @@ fn test_where_exists_with_join() {
         values: vec![vec![Value::Integer(1), Value::Integer(1)]],
         source_query: None,
         on_conflict: None,
+        returning: None,
     }))
     .unwrap();
 
     let sub = SelectStatement {
         ctes: Vec::new(),
-        union: None,
-        union_all: false,
+        from_subquery: None,
+        set_op: None,
         distinct: false,
         columns: vec![Column::All],
         from: "orders_join1".into(),
+        from_alias: None,
         joins: vec![Join {
             join_type: JoinType::Inner,
             table: "payments_join1".to_string(),
+            table_alias: None,
             on: Some(Expression::BinaryOp {
                 left: Box::new(Expression::Column("orders_join1.id".into())),
                 op: BinaryOperator::Equal,
@@ -940,10 +999,11 @@ fn test_where_exists_with_join() {
 
     let stmt = Statement::Select(SelectStatement {
         ctes: Vec::new(),
-        union: None,
-        union_all: false,
+        from_subquery: None,
+        set_op: None,
         distinct: false,
         from: "users_join1".into(),
+        from_alias: None,
         columns: vec![Column::All],
         joins: vec![],
         where_clause: Some(Expression::Exists(Box::new(sub))),

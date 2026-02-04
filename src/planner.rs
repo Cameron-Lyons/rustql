@@ -61,7 +61,7 @@ pub enum PlanNode {
 
     Aggregate {
         input: Box<PlanNode>,
-        group_by: Vec<String>,
+        group_by: Vec<Expression>,
         aggregates: Vec<AggregateFunction>,
         having: Option<Expression>,
         cost: f64,
@@ -360,7 +360,7 @@ impl<'a> QueryPlanner<'a> {
     fn plan_aggregate(
         &self,
         input: PlanNode,
-        group_by: Vec<String>,
+        group_by: Vec<Expression>,
         aggregates: Vec<AggregateFunction>,
         having: Option<Expression>,
     ) -> PlanNode {
@@ -458,7 +458,7 @@ impl<'a> QueryPlanner<'a> {
                     BinaryOperator::GreaterThan | BinaryOperator::GreaterThanOrEqual => 0.5,
                     BinaryOperator::And => 0.3, // AND reduces selectivity
                     BinaryOperator::Or => 0.7,  // OR increases selectivity
-                    BinaryOperator::Like => 0.2, // LIKE is somewhat selective
+                    BinaryOperator::Like | BinaryOperator::ILike => 0.2,
                     BinaryOperator::Between => 0.3,
                     _ => 0.5,
                 }
@@ -864,11 +864,13 @@ impl PlanNode {
                 cost,
                 rows,
             } => {
+                let group_by_strs: Vec<String> =
+                    group_by.iter().map(|e| format!("{:?}", e)).collect();
                 writeln!(
                     f,
                     "{}Aggregate (Group By: {})",
                     indent_str,
-                    group_by.join(", ")
+                    group_by_strs.join(", ")
                 )?;
                 writeln!(f, "{}  Cost: {:.2}, Rows: {}", indent_str, cost, rows)?;
                 input.fmt_with_indent(f, indent + 1)

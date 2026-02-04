@@ -1,4 +1,4 @@
-use crate::ast::{ColumnDefinition, Value};
+use crate::ast::{ColumnDefinition, TableConstraint, Value};
 use crate::database::{Database, Index, Table};
 use crate::error::RustqlError;
 use std::collections::HashMap;
@@ -60,6 +60,18 @@ pub enum WalEntry {
     DropView {
         name: String,
         view: crate::database::View,
+    },
+    AlterRenameTable {
+        old_name: String,
+        new_name: String,
+    },
+    AlterAddConstraint {
+        table: String,
+        constraint: TableConstraint,
+    },
+    AlterDropConstraint {
+        table: String,
+        constraint: TableConstraint,
     },
 }
 
@@ -145,7 +157,14 @@ impl WalLog {
                     columns,
                     rows,
                 } => {
-                    db.tables.insert(name, Table { columns, rows });
+                    db.tables.insert(
+                        name,
+                        Table {
+                            columns,
+                            rows,
+                            constraints: vec![],
+                        },
+                    );
                 }
                 WalEntry::CreateIndex { name } => {
                     db.indexes.remove(&name);
@@ -202,6 +221,33 @@ impl WalLog {
                 WalEntry::DropView { name, view } => {
                     db.views.insert(name, view);
                 }
+                WalEntry::AlterRenameTable { old_name, new_name } => {
+                    if let Some(table_data) = db.tables.remove(&new_name) {
+                        db.tables.insert(old_name.clone(), table_data);
+                    }
+                    for index in db.indexes.values_mut() {
+                        if index.table == new_name {
+                            index.table = old_name.clone();
+                        }
+                    }
+                    for ci in db.composite_indexes.values_mut() {
+                        if ci.table == new_name {
+                            ci.table = old_name.clone();
+                        }
+                    }
+                }
+                WalEntry::AlterAddConstraint { table, .. } => {
+                    if let Some(t) = db.tables.get_mut(&table) {
+                        t.constraints.pop();
+                    }
+                }
+                WalEntry::AlterDropConstraint {
+                    table, constraint, ..
+                } => {
+                    if let Some(t) = db.tables.get_mut(&table) {
+                        t.constraints.push(constraint);
+                    }
+                }
             }
         }
 
@@ -249,7 +295,14 @@ fn rollback_single_entry(entry: WalEntry, db: &mut Database) {
             columns,
             rows,
         } => {
-            db.tables.insert(name, Table { columns, rows });
+            db.tables.insert(
+                name,
+                Table {
+                    columns,
+                    rows,
+                    constraints: vec![],
+                },
+            );
         }
         WalEntry::CreateIndex { name } => {
             db.indexes.remove(&name);
@@ -305,6 +358,33 @@ fn rollback_single_entry(entry: WalEntry, db: &mut Database) {
         }
         WalEntry::DropView { name, view } => {
             db.views.insert(name, view);
+        }
+        WalEntry::AlterRenameTable { old_name, new_name } => {
+            if let Some(table_data) = db.tables.remove(&new_name) {
+                db.tables.insert(old_name.clone(), table_data);
+            }
+            for index in db.indexes.values_mut() {
+                if index.table == new_name {
+                    index.table = old_name.clone();
+                }
+            }
+            for ci in db.composite_indexes.values_mut() {
+                if ci.table == new_name {
+                    ci.table = old_name.clone();
+                }
+            }
+        }
+        WalEntry::AlterAddConstraint { table, .. } => {
+            if let Some(t) = db.tables.get_mut(&table) {
+                t.constraints.pop();
+            }
+        }
+        WalEntry::AlterDropConstraint {
+            table, constraint, ..
+        } => {
+            if let Some(t) = db.tables.get_mut(&table) {
+                t.constraints.push(constraint);
+            }
         }
     }
 }

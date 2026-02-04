@@ -40,7 +40,9 @@ fn test_select_all() {
                 auto_increment: false,
             },
         ],
+        constraints: vec![],
         as_query: None,
+        if_not_exists: false,
     }))
     .unwrap();
 
@@ -53,15 +55,17 @@ fn test_select_all() {
         ],
         source_query: None,
         on_conflict: None,
+        returning: None,
     }))
     .unwrap();
 
     let select = Statement::Select(SelectStatement {
         ctes: Vec::new(),
-        union: None,
-        union_all: false,
+        from_subquery: None,
+        set_op: None,
         distinct: false,
         from: "users".into(),
+        from_alias: None,
         columns: vec![Column::All],
         joins: vec![],
         where_clause: None,
@@ -107,7 +111,9 @@ fn test_count_distinct_values() {
                 nullable: false,
             },
         ],
+        constraints: vec![],
         as_query: None,
+        if_not_exists: false,
     }))
     .unwrap();
 
@@ -121,15 +127,17 @@ fn test_count_distinct_values() {
         ],
         source_query: None,
         on_conflict: None,
+        returning: None,
     }))
     .unwrap();
 
     let stmt = Statement::Select(SelectStatement {
         ctes: Vec::new(),
-        union: None,
-        union_all: false,
+        from_subquery: None,
+        set_op: None,
         distinct: false,
         from: "cities".into(),
+        from_alias: None,
         columns: vec![Column::Function(AggregateFunction {
             function: AggregateFunctionType::Count,
             expr: Box::new(Expression::Column("city".into())),
@@ -181,7 +189,9 @@ fn test_sum_distinct_values() {
                 nullable: true,
             },
         ],
+        constraints: vec![],
         as_query: None,
+        if_not_exists: false,
     }))
     .unwrap();
 
@@ -196,15 +206,17 @@ fn test_sum_distinct_values() {
         ],
         source_query: None,
         on_conflict: None,
+        returning: None,
     }))
     .unwrap();
 
     let stmt = Statement::Select(SelectStatement {
         ctes: Vec::new(),
-        union: None,
-        union_all: false,
+        from_subquery: None,
+        set_op: None,
         distinct: false,
         from: "purchases".into(),
+        from_alias: None,
         columns: vec![Column::Function(AggregateFunction {
             function: AggregateFunctionType::Sum,
             expr: Box::new(Expression::Column("amount".into())),
@@ -256,7 +268,9 @@ fn test_min_distinct_values() {
                 nullable: true,
             },
         ],
+        constraints: vec![],
         as_query: None,
+        if_not_exists: false,
     }))
     .unwrap();
 
@@ -272,15 +286,17 @@ fn test_min_distinct_values() {
         ],
         source_query: None,
         on_conflict: None,
+        returning: None,
     }))
     .unwrap();
 
     let stmt = Statement::Select(SelectStatement {
         ctes: Vec::new(),
-        union: None,
-        union_all: false,
+        from_subquery: None,
+        set_op: None,
         distinct: false,
         from: "scores".into(),
+        from_alias: None,
         columns: vec![Column::Function(AggregateFunction {
             function: AggregateFunctionType::Min,
             expr: Box::new(Expression::Column("score".into())),
@@ -333,7 +349,9 @@ fn test_max_distinct_values() {
                 nullable: true,
             },
         ],
+        constraints: vec![],
         as_query: None,
+        if_not_exists: false,
     }))
     .unwrap();
 
@@ -349,15 +367,17 @@ fn test_max_distinct_values() {
         ],
         source_query: None,
         on_conflict: None,
+        returning: None,
     }))
     .unwrap();
 
     let stmt = Statement::Select(SelectStatement {
         ctes: Vec::new(),
-        union: None,
-        union_all: false,
+        from_subquery: None,
+        set_op: None,
         distinct: false,
         from: "prices".into(),
+        from_alias: None,
         columns: vec![Column::Function(AggregateFunction {
             function: AggregateFunctionType::Max,
             expr: Box::new(Expression::Column("price".into())),
@@ -410,7 +430,9 @@ fn test_avg_distinct_values() {
                 nullable: true,
             },
         ],
+        constraints: vec![],
         as_query: None,
+        if_not_exists: false,
     }))
     .unwrap();
 
@@ -426,15 +448,17 @@ fn test_avg_distinct_values() {
         ],
         source_query: None,
         on_conflict: None,
+        returning: None,
     }))
     .unwrap();
 
     let stmt = Statement::Select(SelectStatement {
         ctes: Vec::new(),
-        union: None,
-        union_all: false,
+        from_subquery: None,
+        set_op: None,
         distinct: false,
         from: "grades".into(),
+        from_alias: None,
         columns: vec![Column::Function(AggregateFunction {
             function: AggregateFunctionType::Avg,
             expr: Box::new(Expression::Column("grade".into())),

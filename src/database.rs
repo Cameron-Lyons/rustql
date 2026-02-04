@@ -1,5 +1,7 @@
 use crate::ast::*;
 use crate::error::RustqlError;
+#[allow(unused_imports)]
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 
@@ -9,6 +11,8 @@ pub struct Database {
     pub indexes: HashMap<String, Index>,
     #[serde(default)]
     pub views: HashMap<String, View>,
+    #[serde(default)]
+    pub composite_indexes: HashMap<String, CompositeIndex>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -112,6 +116,46 @@ mod index_entries {
 pub struct Table {
     pub columns: Vec<ColumnDefinition>,
     pub rows: Vec<Vec<Value>>,
+    #[serde(default)]
+    pub constraints: Vec<TableConstraint>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct CompositeIndex {
+    pub name: String,
+    pub table: String,
+    pub columns: Vec<String>,
+    #[serde(with = "composite_index_entries")]
+    pub entries: BTreeMap<Vec<Value>, Vec<usize>>,
+}
+
+mod composite_index_entries {
+    use super::*;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S>(
+        entries: &BTreeMap<Vec<Value>, Vec<usize>>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let converted: Vec<(Vec<Value>, Vec<usize>)> = entries
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        converted.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(
+        deserializer: D,
+    ) -> Result<BTreeMap<Vec<Value>, Vec<usize>>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let converted: Vec<(Vec<Value>, Vec<usize>)> = Vec::deserialize(deserializer)?;
+        Ok(converted.into_iter().collect())
+    }
 }
 
 impl Database {

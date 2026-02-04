@@ -308,6 +308,7 @@ impl<'a> CachedBTreeFile<'a> {
                     crate::database::Table {
                         columns,
                         rows: Vec::new(),
+                        constraints: Vec::new(),
                     },
                 );
             }
@@ -606,6 +607,7 @@ impl BTreeFile {
                     crate::database::Table {
                         columns,
                         rows: Vec::new(),
+                        constraints: Vec::new(),
                     },
                 );
             }
@@ -1533,7 +1535,11 @@ mod tests {
 
         let rows = vec![vec![Value::Integer(1), Value::Text("Alice".to_string())]];
 
-        let table = Table { columns, rows };
+        let table = Table {
+            columns,
+            rows,
+            constraints: vec![],
+        };
 
         let mut tables = HashMap::new();
         tables.insert("users".to_string(), table);
@@ -1688,6 +1694,7 @@ mod tests {
         let table = Table {
             columns,
             rows: vec![vec![Value::Integer(1)]],
+            constraints: vec![],
         };
         db.tables.insert("test".to_string(), table);
 
@@ -1742,6 +1749,7 @@ mod tests {
         let table = Table {
             columns,
             rows: vec![vec![Value::Integer(1)]],
+            constraints: vec![],
         };
         db.tables.insert("test".to_string(), table);
 
