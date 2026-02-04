@@ -1626,6 +1626,7 @@ fn execute_update(stmt: UpdateStatement) -> Result<String, RustqlError> {
     }
 
     let updated_count = rows_to_update.len();
+    let columns = table_ref.columns.clone();
     let mut update_info = Vec::new();
     {
         let table = db
@@ -1642,6 +1643,9 @@ fn execute_update(stmt: UpdateStatement) -> Result<String, RustqlError> {
             });
             update_info.push((row_idx, old_row, updated_row));
         }
+    }
+    for (_, old_row, updated_row) in &update_info {
+        handle_foreign_keys_for_update(&mut db, &stmt.table, &columns, old_row, updated_row)?;
     }
     for (row_idx, old_row, updated_row) in update_info {
         update_indexes_on_update(&mut db, &stmt.table, row_idx, &old_row, &updated_row)?;
@@ -3260,6 +3264,93 @@ fn handle_foreign_keys_for_delete(
                                 old_row,
                             });
                             other_table.rows.remove(*row_idx);
+                        }
+                    }
+                    ForeignKeyAction::SetNull => {
+                        for row_idx in rows_to_modify {
+                            if let Some(row) = other_table.rows.get_mut(row_idx) {
+                                wal::record_wal_entry(WalEntry::UpdateRow {
+                                    table: other_table_name.clone(),
+                                    row_index: row_idx,
+                                    old_row: row.clone(),
+                                });
+                                row[col_idx] = Value::Null;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn handle_foreign_keys_for_update(
+    db: &mut Database,
+    table_name: &str,
+    columns: &[ColumnDefinition],
+    old_row: &[Value],
+    new_row: &[Value],
+) -> Result<(), RustqlError> {
+    for (other_table_name, other_table) in db.tables.iter_mut() {
+        if other_table_name == table_name {
+            continue;
+        }
+
+        for (col_idx, col_def) in other_table.columns.iter().enumerate() {
+            if let Some(ref fk) = col_def.foreign_key
+                && fk.referenced_table == table_name
+            {
+                let ref_col_idx = columns
+                    .iter()
+                    .position(|c| c.name == fk.referenced_column)
+                    .ok_or_else(|| {
+                        format!(
+                            "Foreign key constraint: Referenced column '{}' not found in table '{}'",
+                            fk.referenced_column, table_name
+                        )
+                    })?;
+
+                if old_row[ref_col_idx] == new_row[ref_col_idx] {
+                    continue;
+                }
+
+                let old_value = &old_row[ref_col_idx];
+
+                let mut rows_to_modify: Vec<usize> = Vec::new();
+                for (row_idx, other_row) in other_table.rows.iter().enumerate() {
+                    if other_row
+                        .get(col_idx)
+                        .map(|v| v == old_value)
+                        .unwrap_or(false)
+                    {
+                        rows_to_modify.push(row_idx);
+                    }
+                }
+
+                match fk.on_update {
+                    ForeignKeyAction::Restrict | ForeignKeyAction::NoAction => {
+                        if !rows_to_modify.is_empty() {
+                            return Err(RustqlError::ConstraintViolation {
+                                kind: ConstraintKind::ForeignKey,
+                                message: format!(
+                                    "Foreign key constraint violation: Cannot update row in '{}' because it is referenced by '{}'",
+                                    table_name, other_table_name
+                                ),
+                            });
+                        }
+                    }
+                    ForeignKeyAction::Cascade => {
+                        let new_value = new_row[ref_col_idx].clone();
+                        for row_idx in rows_to_modify {
+                            if let Some(row) = other_table.rows.get_mut(row_idx) {
+                                wal::record_wal_entry(WalEntry::UpdateRow {
+                                    table: other_table_name.clone(),
+                                    row_index: row_idx,
+                                    old_row: row.clone(),
+                                });
+                                row[col_idx] = new_value.clone();
+                            }
                         }
                     }
                     ForeignKeyAction::SetNull => {

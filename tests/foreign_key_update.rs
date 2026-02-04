@@ -10,7 +10,7 @@ fn setup_test() -> std::sync::MutexGuard<'static, ()> {
 }
 
 #[test]
-#[ignore]
+
 fn test_on_update_cascade() {
     let _guard = setup_test();
 
@@ -31,7 +31,7 @@ fn test_on_update_cascade() {
 }
 
 #[test]
-#[ignore]
+
 fn test_on_update_set_null() {
     let _guard = setup_test();
 
@@ -51,7 +51,7 @@ fn test_on_update_set_null() {
 }
 
 #[test]
-#[ignore]
+
 fn test_on_update_restrict() {
     let _guard = setup_test();
 

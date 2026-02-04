@@ -783,6 +783,14 @@ impl Parser {
                     self.advance();
                 }
                 self.consume(Token::References)?;
+                true
+            } else if *self.current_token() == Token::References {
+                self.advance();
+                true
+            } else {
+                false
+            };
+            let foreign_key = if foreign_key {
                 let ref_table = match self.advance() {
                     Token::Identifier(name) => name,
                     _ => {
