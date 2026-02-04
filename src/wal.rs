@@ -50,6 +50,17 @@ pub enum WalEntry {
         old_name: String,
         new_name: String,
     },
+    TruncateTable {
+        name: String,
+        old_rows: Vec<Vec<Value>>,
+    },
+    CreateView {
+        name: String,
+    },
+    DropView {
+        name: String,
+        view: crate::database::View,
+    },
 }
 
 #[derive(Debug, Default)]
@@ -180,6 +191,17 @@ impl WalLog {
                         }
                     }
                 }
+                WalEntry::TruncateTable { name, old_rows } => {
+                    if let Some(t) = db.tables.get_mut(&name) {
+                        t.rows = old_rows;
+                    }
+                }
+                WalEntry::CreateView { name } => {
+                    db.views.remove(&name);
+                }
+                WalEntry::DropView { name, view } => {
+                    db.views.insert(name, view);
+                }
             }
         }
 
@@ -272,6 +294,17 @@ fn rollback_single_entry(entry: WalEntry, db: &mut Database) {
                     }
                 }
             }
+        }
+        WalEntry::TruncateTable { name, old_rows } => {
+            if let Some(t) = db.tables.get_mut(&name) {
+                t.rows = old_rows;
+            }
+        }
+        WalEntry::CreateView { name } => {
+            db.views.remove(&name);
+        }
+        WalEntry::DropView { name, view } => {
+            db.views.insert(name, view);
         }
     }
 }

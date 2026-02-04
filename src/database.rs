@@ -7,6 +7,14 @@ use std::collections::{BTreeMap, HashMap};
 pub struct Database {
     pub tables: HashMap<String, Table>,
     pub indexes: HashMap<String, Index>,
+    #[serde(default)]
+    pub views: HashMap<String, View>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct View {
+    pub name: String,
+    pub query_sql: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

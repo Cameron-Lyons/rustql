@@ -31,6 +31,7 @@ fn test_insert() {
                 auto_increment: false,
             },
         ],
+        as_query: None,
     });
 
     execute(create).unwrap();
@@ -40,6 +41,7 @@ fn test_insert() {
         columns: Some(vec!["id".into(), "name".into()]),
         values: vec![vec![Value::Integer(1), Value::Text("Alice".into())]],
         source_query: None,
+        on_conflict: None,
     });
 
     let result = execute(insert).unwrap();

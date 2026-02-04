@@ -18,6 +18,7 @@ fn test_alter_table_add_column() {
             check: None,
             auto_increment: false,
         }],
+        as_query: None,
     }))
     .unwrap();
 

@@ -40,6 +40,7 @@ fn test_select_all() {
                 auto_increment: false,
             },
         ],
+        as_query: None,
     }))
     .unwrap();
 
@@ -51,6 +52,7 @@ fn test_select_all() {
             vec![Value::Integer(2), Value::Text("Bob".into())],
         ],
         source_query: None,
+        on_conflict: None,
     }))
     .unwrap();
 
@@ -105,6 +107,7 @@ fn test_count_distinct_values() {
                 nullable: false,
             },
         ],
+        as_query: None,
     }))
     .unwrap();
 
@@ -117,6 +120,7 @@ fn test_count_distinct_values() {
             vec![Value::Integer(3), Value::Text("London".into())],
         ],
         source_query: None,
+        on_conflict: None,
     }))
     .unwrap();
 
@@ -131,6 +135,8 @@ fn test_count_distinct_values() {
             expr: Box::new(Expression::Column("city".into())),
             distinct: true,
             alias: Some("unique_cities".into()),
+            separator: None,
+            percentile: None,
         })],
         joins: vec![],
         where_clause: None,
@@ -175,6 +181,7 @@ fn test_sum_distinct_values() {
                 nullable: true,
             },
         ],
+        as_query: None,
     }))
     .unwrap();
 
@@ -188,6 +195,7 @@ fn test_sum_distinct_values() {
             vec![Value::Integer(4), Value::Null],
         ],
         source_query: None,
+        on_conflict: None,
     }))
     .unwrap();
 
@@ -202,6 +210,8 @@ fn test_sum_distinct_values() {
             expr: Box::new(Expression::Column("amount".into())),
             distinct: true,
             alias: Some("distinct_sum".into()),
+            separator: None,
+            percentile: None,
         })],
         joins: vec![],
         where_clause: None,
@@ -246,6 +256,7 @@ fn test_min_distinct_values() {
                 nullable: true,
             },
         ],
+        as_query: None,
     }))
     .unwrap();
 
@@ -260,6 +271,7 @@ fn test_min_distinct_values() {
             vec![Value::Integer(5), Value::Null],
         ],
         source_query: None,
+        on_conflict: None,
     }))
     .unwrap();
 
@@ -274,6 +286,8 @@ fn test_min_distinct_values() {
             expr: Box::new(Expression::Column("score".into())),
             distinct: true,
             alias: Some("min_distinct_score".into()),
+            separator: None,
+            percentile: None,
         })],
         joins: vec![],
         where_clause: None,
@@ -319,6 +333,7 @@ fn test_max_distinct_values() {
                 nullable: true,
             },
         ],
+        as_query: None,
     }))
     .unwrap();
 
@@ -333,6 +348,7 @@ fn test_max_distinct_values() {
             vec![Value::Integer(5), Value::Null],
         ],
         source_query: None,
+        on_conflict: None,
     }))
     .unwrap();
 
@@ -347,6 +363,8 @@ fn test_max_distinct_values() {
             expr: Box::new(Expression::Column("price".into())),
             distinct: true,
             alias: Some("max_distinct_price".into()),
+            separator: None,
+            percentile: None,
         })],
         joins: vec![],
         where_clause: None,
@@ -392,6 +410,7 @@ fn test_avg_distinct_values() {
                 nullable: true,
             },
         ],
+        as_query: None,
     }))
     .unwrap();
 
@@ -406,6 +425,7 @@ fn test_avg_distinct_values() {
             vec![Value::Integer(5), Value::Null],
         ],
         source_query: None,
+        on_conflict: None,
     }))
     .unwrap();
 
@@ -420,6 +440,8 @@ fn test_avg_distinct_values() {
             expr: Box::new(Expression::Column("grade".into())),
             distinct: true,
             alias: Some("avg_distinct_grade".into()),
+            separator: None,
+            percentile: None,
         })],
         joins: vec![],
         where_clause: None,

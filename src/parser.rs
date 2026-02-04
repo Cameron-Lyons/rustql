@@ -59,6 +59,7 @@ impl Parser {
             Token::Describe => self.parse_describe(),
             Token::Show => self.parse_show(),
             Token::Analyze => self.parse_analyze(),
+            Token::Truncate => self.parse_truncate(),
             _ => Err(RustqlError::ParseError(format!(
                 "Unexpected token: {:?}",
                 self.current_token()
@@ -279,7 +280,22 @@ impl Parser {
         } else {
             loop {
                 let column = match self.current_token() {
-                    Token::Count | Token::Sum | Token::Avg | Token::Min | Token::Max => {
+                    Token::Count
+                    | Token::Sum
+                    | Token::Avg
+                    | Token::Min
+                    | Token::Max
+                    | Token::Stddev
+                    | Token::Variance
+                    | Token::GroupConcat
+                    | Token::StringAgg
+                    | Token::BoolAnd
+                    | Token::BoolOr
+                    | Token::Every
+                    | Token::Median
+                    | Token::Mode
+                    | Token::PercentileCont
+                    | Token::PercentileDisc => {
                         if self.current + 1 < self.tokens.len()
                             && self.tokens[self.current + 1] == Token::LeftParen
                         {
@@ -316,7 +332,17 @@ impl Parser {
                             }
                         }
                     }
-                    Token::RowNumber | Token::Rank | Token::DenseRank => {
+                    Token::RowNumber
+                    | Token::Rank
+                    | Token::DenseRank
+                    | Token::Lag
+                    | Token::Lead
+                    | Token::Ntile
+                    | Token::FirstValue
+                    | Token::LastValue
+                    | Token::NthValue
+                    | Token::PercentRank
+                    | Token::CumeDist => {
                         let saved_pos = self.current;
                         match self.parse_window_function_column() {
                             Ok(col) => col,
@@ -366,13 +392,47 @@ impl Parser {
                         };
                         Column::Expression { expr, alias }
                     }
+                    Token::Cast => {
+                        let expr = self.parse_cast_expression()?;
+                        let alias = if *self.current_token() == Token::As {
+                            self.advance();
+                            match self.advance() {
+                                Token::Identifier(alias) => Some(alias),
+                                _ => {
+                                    return Err(RustqlError::ParseError(
+                                        "Expected alias after AS".to_string(),
+                                    ));
+                                }
+                            }
+                        } else {
+                            None
+                        };
+                        Column::Expression { expr, alias }
+                    }
                     Token::Upper
                     | Token::Lower
                     | Token::Length
                     | Token::Substring
                     | Token::Abs
                     | Token::Round
-                    | Token::Coalesce => {
+                    | Token::Coalesce
+                    | Token::Trim
+                    | Token::Replace
+                    | Token::Position
+                    | Token::Instr
+                    | Token::Ceil
+                    | Token::Ceiling
+                    | Token::Floor
+                    | Token::Sqrt
+                    | Token::Power
+                    | Token::Mod
+                    | Token::Now
+                    | Token::Year
+                    | Token::Month
+                    | Token::Day
+                    | Token::DateAdd
+                    | Token::Datediff
+                    | Token::ConcatFn => {
                         let expr = self.parse_scalar_function()?;
                         let alias = if *self.current_token() == Token::As {
                             self.advance();
@@ -455,16 +515,47 @@ impl Parser {
             Token::RowNumber => WindowFunctionType::RowNumber,
             Token::Rank => WindowFunctionType::Rank,
             Token::DenseRank => WindowFunctionType::DenseRank,
+            Token::Lag => WindowFunctionType::Lag,
+            Token::Lead => WindowFunctionType::Lead,
+            Token::Ntile => WindowFunctionType::Ntile,
+            Token::FirstValue => WindowFunctionType::FirstValue,
+            Token::LastValue => WindowFunctionType::LastValue,
+            Token::NthValue => WindowFunctionType::NthValue,
+            Token::PercentRank => WindowFunctionType::PercentRank,
+            Token::CumeDist => WindowFunctionType::CumeDist,
             _ => {
                 return Err(RustqlError::ParseError(
                     "Expected window function".to_string(),
                 ));
             }
         };
+
         self.consume(Token::LeftParen)?;
+        let mut args = Vec::new();
+        let takes_args = matches!(
+            func_type,
+            WindowFunctionType::Lag
+                | WindowFunctionType::Lead
+                | WindowFunctionType::Ntile
+                | WindowFunctionType::FirstValue
+                | WindowFunctionType::LastValue
+                | WindowFunctionType::NthValue
+        );
+        if takes_args {
+            if *self.current_token() != Token::RightParen {
+                loop {
+                    args.push(self.parse_expression()?);
+                    if *self.current_token() == Token::Comma {
+                        self.advance();
+                    } else {
+                        break;
+                    }
+                }
+            }
+        }
         self.consume(Token::RightParen)?;
 
-        let (partition_by, order_by) = self.parse_over_clause()?;
+        let (partition_by, order_by, frame) = self.parse_over_clause()?;
 
         let alias = if *self.current_token() == Token::As {
             self.advance();
@@ -483,14 +574,18 @@ impl Parser {
         Ok(Column::Expression {
             expr: Expression::WindowFunction {
                 function: func_type,
+                args,
                 partition_by,
                 order_by,
+                frame,
             },
             alias,
         })
     }
 
-    fn parse_over_clause(&mut self) -> Result<(Vec<Expression>, Vec<OrderByExpr>), RustqlError> {
+    fn parse_over_clause(
+        &mut self,
+    ) -> Result<(Vec<Expression>, Vec<OrderByExpr>, Option<WindowFrame>), RustqlError> {
         self.consume(Token::Over)?;
         self.consume(Token::LeftParen)?;
 
@@ -519,8 +614,64 @@ impl Parser {
             Vec::new()
         };
 
+        let frame =
+            if *self.current_token() == Token::Rows || *self.current_token() == Token::RangeFrame {
+                let mode = if *self.current_token() == Token::Rows {
+                    self.advance();
+                    WindowFrameMode::Rows
+                } else {
+                    self.advance();
+                    WindowFrameMode::Range
+                };
+                self.consume(Token::Between)?;
+                let start = self.parse_window_frame_bound()?;
+                self.consume(Token::And)?;
+                let end = self.parse_window_frame_bound()?;
+                Some(WindowFrame { mode, start, end })
+            } else {
+                None
+            };
+
         self.consume(Token::RightParen)?;
-        Ok((partition_by, order_by))
+        Ok((partition_by, order_by, frame))
+    }
+
+    fn parse_window_frame_bound(&mut self) -> Result<WindowFrameBound, RustqlError> {
+        if *self.current_token() == Token::Unbounded {
+            self.advance();
+            if *self.current_token() == Token::Preceding {
+                self.advance();
+                Ok(WindowFrameBound::UnboundedPreceding)
+            } else if *self.current_token() == Token::Following {
+                self.advance();
+                Ok(WindowFrameBound::UnboundedFollowing)
+            } else {
+                Err(RustqlError::ParseError(
+                    "Expected PRECEDING or FOLLOWING after UNBOUNDED".to_string(),
+                ))
+            }
+        } else if *self.current_token() == Token::Current {
+            self.advance();
+            self.consume(Token::Rows)?;
+            Ok(WindowFrameBound::CurrentRow)
+        } else if let Token::Number(n) = self.current_token().clone() {
+            self.advance();
+            if *self.current_token() == Token::Preceding {
+                self.advance();
+                Ok(WindowFrameBound::Preceding(n as usize))
+            } else if *self.current_token() == Token::Following {
+                self.advance();
+                Ok(WindowFrameBound::Following(n as usize))
+            } else {
+                Err(RustqlError::ParseError(
+                    "Expected PRECEDING or FOLLOWING after number".to_string(),
+                ))
+            }
+        } else {
+            Err(RustqlError::ParseError(
+                "Expected window frame bound".to_string(),
+            ))
+        }
     }
 
     fn parse_column_expression(&mut self) -> Result<(Expression, Option<String>), RustqlError> {
@@ -554,6 +705,7 @@ impl Parser {
             let op = match self.current_token() {
                 Token::Plus => BinaryOperator::Plus,
                 Token::Minus => BinaryOperator::Minus,
+                Token::Concat => BinaryOperator::Concat,
                 _ => break,
             };
 
@@ -622,13 +774,31 @@ impl Parser {
                 Ok(expr)
             }
             Token::Case => self.parse_case_expression(),
+            Token::Cast => self.parse_cast_expression(),
             Token::Upper
             | Token::Lower
             | Token::Length
             | Token::Substring
             | Token::Abs
             | Token::Round
-            | Token::Coalesce => self.parse_scalar_function(),
+            | Token::Coalesce
+            | Token::Trim
+            | Token::Replace
+            | Token::Position
+            | Token::Instr
+            | Token::Ceil
+            | Token::Ceiling
+            | Token::Floor
+            | Token::Sqrt
+            | Token::Power
+            | Token::Mod
+            | Token::Now
+            | Token::Year
+            | Token::Month
+            | Token::Day
+            | Token::DateAdd
+            | Token::Datediff
+            | Token::ConcatFn => self.parse_scalar_function(),
             Token::Identifier(name) => {
                 let name = name.clone();
                 self.advance();
@@ -685,6 +855,19 @@ impl Parser {
         })
     }
 
+    fn parse_cast_expression(&mut self) -> Result<Expression, RustqlError> {
+        self.consume(Token::Cast)?;
+        self.consume(Token::LeftParen)?;
+        let expr = self.parse_expression()?;
+        self.consume(Token::As)?;
+        let data_type = self.parse_data_type()?;
+        self.consume(Token::RightParen)?;
+        Ok(Expression::Cast {
+            expr: Box::new(expr),
+            data_type,
+        })
+    }
+
     fn parse_scalar_function(&mut self) -> Result<Expression, RustqlError> {
         let func_type = match self.advance() {
             Token::Upper => ScalarFunctionType::Upper,
@@ -694,6 +877,22 @@ impl Parser {
             Token::Abs => ScalarFunctionType::Abs,
             Token::Round => ScalarFunctionType::Round,
             Token::Coalesce => ScalarFunctionType::Coalesce,
+            Token::Trim => ScalarFunctionType::Trim,
+            Token::Replace => ScalarFunctionType::Replace,
+            Token::Position => ScalarFunctionType::Position,
+            Token::Instr => ScalarFunctionType::Instr,
+            Token::Ceil | Token::Ceiling => ScalarFunctionType::Ceil,
+            Token::Floor => ScalarFunctionType::Floor,
+            Token::Sqrt => ScalarFunctionType::Sqrt,
+            Token::Power => ScalarFunctionType::Power,
+            Token::Mod => ScalarFunctionType::Mod,
+            Token::Now => ScalarFunctionType::Now,
+            Token::Year => ScalarFunctionType::Year,
+            Token::Month => ScalarFunctionType::Month,
+            Token::Day => ScalarFunctionType::Day,
+            Token::DateAdd => ScalarFunctionType::DateAdd,
+            Token::Datediff => ScalarFunctionType::Datediff,
+            Token::ConcatFn => ScalarFunctionType::ConcatFn,
             _ => {
                 return Err(RustqlError::ParseError(
                     "Expected scalar function name".to_string(),
@@ -726,6 +925,15 @@ impl Parser {
             Token::Avg => AggregateFunctionType::Avg,
             Token::Min => AggregateFunctionType::Min,
             Token::Max => AggregateFunctionType::Max,
+            Token::Stddev => AggregateFunctionType::Stddev,
+            Token::Variance => AggregateFunctionType::Variance,
+            Token::GroupConcat | Token::StringAgg => AggregateFunctionType::GroupConcat,
+            Token::BoolAnd | Token::Every => AggregateFunctionType::BoolAnd,
+            Token::BoolOr => AggregateFunctionType::BoolOr,
+            Token::Median => AggregateFunctionType::Median,
+            Token::Mode => AggregateFunctionType::Mode,
+            Token::PercentileCont => AggregateFunctionType::PercentileCont,
+            Token::PercentileDisc => AggregateFunctionType::PercentileDisc,
             _ => {
                 return Err(RustqlError::ParseError(
                     "Expected aggregate function".to_string(),
@@ -742,11 +950,82 @@ impl Parser {
             false
         };
 
-        let expr = if *self.current_token() == Token::Star {
-            self.advance();
-            Box::new(Expression::Column("*".to_string()))
-        } else {
-            Box::new(self.parse_expression()?)
+        let mut separator = None;
+        let mut percentile = None;
+
+        let expr = match func_type {
+            AggregateFunctionType::PercentileCont | AggregateFunctionType::PercentileDisc => {
+                let frac_expr = self.parse_expression()?;
+                let frac = match &frac_expr {
+                    Expression::Value(Value::Float(f)) => *f,
+                    Expression::Value(Value::Integer(n)) => *n as f64,
+                    _ => {
+                        return Err(RustqlError::ParseError(
+                            "PERCENTILE_CONT/DISC requires a numeric fraction".to_string(),
+                        ));
+                    }
+                };
+                percentile = Some(frac);
+                if *self.current_token() == Token::Comma {
+                    self.advance();
+                    Box::new(self.parse_expression()?)
+                } else {
+                    self.consume(Token::RightParen)?;
+                    if *self.current_token() == Token::Within {
+                        self.advance();
+                        if let Token::Identifier(ref s) = *self.current_token() {
+                            if s.to_uppercase() == "GROUP" {
+                                self.advance();
+                            }
+                        } else if *self.current_token() == Token::Group {
+                            self.advance();
+                        }
+                        self.consume(Token::LeftParen)?;
+                        self.consume(Token::Order)?;
+                        self.consume(Token::By)?;
+                        let col_expr = self.parse_expression()?;
+                        if *self.current_token() == Token::Asc
+                            || *self.current_token() == Token::Desc
+                        {
+                            self.advance();
+                        }
+                        self.consume(Token::RightParen)?;
+                        let alias = if *self.current_token() == Token::As {
+                            self.advance();
+                            match self.advance() {
+                                Token::Identifier(name) => Some(name),
+                                _ => {
+                                    return Err(RustqlError::ParseError(
+                                        "Expected alias after AS".to_string(),
+                                    ));
+                                }
+                            }
+                        } else {
+                            None
+                        };
+                        return Ok(Column::Function(AggregateFunction {
+                            function: func_type,
+                            expr: Box::new(col_expr),
+                            distinct,
+                            alias,
+                            separator: None,
+                            percentile,
+                        }));
+                    } else {
+                        return Err(RustqlError::ParseError(
+                            "PERCENTILE_CONT/DISC requires WITHIN GROUP (ORDER BY col) or (frac, col) syntax".to_string(),
+                        ));
+                    }
+                }
+            }
+            _ => {
+                if *self.current_token() == Token::Star {
+                    self.advance();
+                    Box::new(Expression::Column("*".to_string()))
+                } else {
+                    Box::new(self.parse_expression()?)
+                }
+            }
         };
 
         if distinct && matches!(&*expr, Expression::Column(name) if name == "*") {
@@ -755,11 +1034,38 @@ impl Parser {
             ));
         }
 
+        if matches!(func_type, AggregateFunctionType::GroupConcat) {
+            if *self.current_token() == Token::Comma {
+                self.advance();
+                match self.current_token() {
+                    Token::StringLiteral(s) => {
+                        separator = Some(s.clone());
+                        self.advance();
+                    }
+                    _ => {}
+                }
+            }
+            if *self.current_token() == Token::Separator {
+                self.advance();
+                match self.current_token() {
+                    Token::StringLiteral(s) => {
+                        separator = Some(s.clone());
+                        self.advance();
+                    }
+                    _ => {
+                        return Err(RustqlError::ParseError(
+                            "Expected string literal after SEPARATOR".to_string(),
+                        ));
+                    }
+                }
+            }
+        }
+
         self.consume(Token::RightParen)?;
 
         if *self.current_token() == Token::Over {
             let agg_type = func_type;
-            let (partition_by, order_by) = self.parse_over_clause()?;
+            let (partition_by, order_by, frame) = self.parse_over_clause()?;
             let alias = if *self.current_token() == Token::As {
                 self.advance();
                 match self.advance() {
@@ -776,8 +1082,10 @@ impl Parser {
             return Ok(Column::Expression {
                 expr: Expression::WindowFunction {
                     function: WindowFunctionType::Aggregate(agg_type),
+                    args: Vec::new(),
                     partition_by,
                     order_by,
+                    frame,
                 },
                 alias,
             });
@@ -802,6 +1110,8 @@ impl Parser {
             expr,
             distinct,
             alias,
+            separator,
+            percentile,
         }))
     }
 
@@ -876,6 +1186,7 @@ impl Parser {
                 columns,
                 values: Vec::new(),
                 source_query: Some(Box::new(source_query)),
+                on_conflict: None,
             }));
         }
 
@@ -883,11 +1194,58 @@ impl Parser {
 
         let values = self.parse_values()?;
 
+        let on_conflict = if *self.current_token() == Token::On
+            && self.current + 1 < self.tokens.len()
+            && self.tokens[self.current + 1] == Token::Conflict
+        {
+            self.advance();
+            self.advance();
+            self.consume(Token::LeftParen)?;
+            let mut conflict_columns = Vec::new();
+            loop {
+                match self.advance() {
+                    Token::Identifier(name) => conflict_columns.push(name),
+                    _ => {
+                        return Err(RustqlError::ParseError(
+                            "Expected column name in ON CONFLICT".to_string(),
+                        ));
+                    }
+                }
+                if *self.current_token() == Token::Comma {
+                    self.advance();
+                } else {
+                    break;
+                }
+            }
+            self.consume(Token::RightParen)?;
+            self.consume(Token::Do)?;
+            let action = if *self.current_token() == Token::Nothing {
+                self.advance();
+                OnConflictAction::DoNothing
+            } else if *self.current_token() == Token::Update {
+                self.advance();
+                self.consume(Token::Set)?;
+                let assignments = self.parse_assignments()?;
+                OnConflictAction::DoUpdate { assignments }
+            } else {
+                return Err(RustqlError::ParseError(
+                    "Expected NOTHING or UPDATE after DO".to_string(),
+                ));
+            };
+            Some(OnConflictClause {
+                columns: conflict_columns,
+                action,
+            })
+        } else {
+            None
+        };
+
         Ok(Statement::Insert(InsertStatement {
             table,
             columns,
             values,
             source_query: None,
+            on_conflict,
         }))
     }
 
@@ -943,6 +1301,65 @@ impl Parser {
 
         let assignments = self.parse_assignments()?;
 
+        let from = if *self.current_token() == Token::From {
+            self.advance();
+            let from_table = match self.advance() {
+                Token::Identifier(name) => name,
+                _ => {
+                    return Err(RustqlError::ParseError(
+                        "Expected table name after FROM".to_string(),
+                    ));
+                }
+            };
+            let mut joins = Vec::new();
+            loop {
+                let join_type = if *self.current_token() == Token::Left {
+                    self.advance();
+                    Some(JoinType::Left)
+                } else if *self.current_token() == Token::Right {
+                    self.advance();
+                    Some(JoinType::Right)
+                } else if *self.current_token() == Token::Full {
+                    self.advance();
+                    Some(JoinType::Full)
+                } else if *self.current_token() == Token::Inner {
+                    self.advance();
+                    Some(JoinType::Inner)
+                } else if *self.current_token() == Token::Join {
+                    Some(JoinType::Inner)
+                } else {
+                    None
+                };
+
+                if let Some(join_type) = join_type {
+                    self.consume(Token::Join)?;
+                    let join_table = match self.advance() {
+                        Token::Identifier(name) => name,
+                        _ => {
+                            return Err(RustqlError::ParseError(
+                                "Expected table name after JOIN".to_string(),
+                            ));
+                        }
+                    };
+                    self.consume(Token::On)?;
+                    let on_expr = self.parse_expression()?;
+                    joins.push(Join {
+                        join_type,
+                        table: join_table,
+                        on: Some(on_expr),
+                    });
+                } else {
+                    break;
+                }
+            }
+            Some(UpdateFrom {
+                table: from_table,
+                joins,
+            })
+        } else {
+            None
+        };
+
         let where_clause = if *self.current_token() == Token::Where {
             self.advance();
             Some(self.parse_expression()?)
@@ -954,6 +1371,7 @@ impl Parser {
             table,
             assignments,
             where_clause,
+            from,
         }))
     }
 
@@ -968,7 +1386,7 @@ impl Parser {
 
             self.consume(Token::Equal)?;
 
-            let value = self.parse_value()?;
+            let value = self.parse_expression()?;
 
             assignments.push(Assignment { column, value });
 
@@ -1015,6 +1433,23 @@ impl Parser {
                     _ => return Err(RustqlError::ParseError("Expected table name".to_string())),
                 };
 
+                if *self.current_token() == Token::As {
+                    self.advance();
+                    let query_stmt = self.parse_select_statement(Vec::new())?;
+                    let query = if let Statement::Select(s) = query_stmt {
+                        s
+                    } else {
+                        return Err(RustqlError::ParseError(
+                            "Expected SELECT after AS".to_string(),
+                        ));
+                    };
+                    return Ok(Statement::CreateTable(CreateTableStatement {
+                        name,
+                        columns: Vec::new(),
+                        as_query: Some(Box::new(query)),
+                    }));
+                }
+
                 self.consume(Token::LeftParen)?;
 
                 let columns = self.parse_column_definitions()?;
@@ -1024,6 +1459,7 @@ impl Parser {
                 Ok(Statement::CreateTable(CreateTableStatement {
                     name,
                     columns,
+                    as_query: None,
                 }))
             }
             Token::Index => {
@@ -1067,8 +1503,27 @@ impl Parser {
                     columns,
                 }))
             }
+            Token::View => {
+                self.advance();
+                let name = match self.advance() {
+                    Token::Identifier(name) => name,
+                    _ => return Err(RustqlError::ParseError("Expected view name".to_string())),
+                };
+                self.consume(Token::As)?;
+                let remaining_start = self.current;
+                let mut query_sql_parts = Vec::new();
+                for tok in &self.tokens[remaining_start..] {
+                    if matches!(tok, Token::Eof | Token::Semicolon) {
+                        break;
+                    }
+                    query_sql_parts.push(token_to_sql(tok));
+                }
+                let query_sql = query_sql_parts.join(" ");
+                let _query_stmt = self.parse_select_statement(Vec::new())?;
+                Ok(Statement::CreateView { name, query_sql })
+            }
             _ => Err(RustqlError::ParseError(
-                "Expected TABLE or INDEX after CREATE".to_string(),
+                "Expected TABLE, INDEX, or VIEW after CREATE".to_string(),
             )),
         }
     }
@@ -1304,8 +1759,29 @@ impl Parser {
 
                 Ok(Statement::DropIndex(DropIndexStatement { name }))
             }
+            Token::View => {
+                self.advance();
+                let if_exists = if *self.current_token() == Token::Identifier("IF".to_string()) {
+                    self.advance();
+                    if *self.current_token() == Token::Exists {
+                        self.advance();
+                        true
+                    } else {
+                        return Err(RustqlError::ParseError(
+                            "Expected EXISTS after IF".to_string(),
+                        ));
+                    }
+                } else {
+                    false
+                };
+                let name = match self.advance() {
+                    Token::Identifier(name) => name,
+                    _ => return Err(RustqlError::ParseError("Expected view name".to_string())),
+                };
+                Ok(Statement::DropView { name, if_exists })
+            }
             _ => Err(RustqlError::ParseError(
-                "Expected TABLE or INDEX after DROP".to_string(),
+                "Expected TABLE, INDEX, or VIEW after DROP".to_string(),
             )),
         }
     }
@@ -1557,6 +2033,7 @@ impl Parser {
             let op = match self.current_token() {
                 Token::Plus => BinaryOperator::Plus,
                 Token::Minus => BinaryOperator::Minus,
+                Token::Concat => BinaryOperator::Concat,
                 _ => break,
             };
 
@@ -1624,14 +2101,47 @@ impl Parser {
                 Ok(Expression::Exists(Box::new(sub)))
             }
             Token::Case => self.parse_case_expression(),
+            Token::Cast => self.parse_cast_expression(),
             Token::Upper
             | Token::Lower
             | Token::Length
             | Token::Substring
             | Token::Abs
             | Token::Round
-            | Token::Coalesce => self.parse_scalar_function(),
-            Token::Count | Token::Sum | Token::Avg | Token::Min | Token::Max => {
+            | Token::Coalesce
+            | Token::Trim
+            | Token::Replace
+            | Token::Position
+            | Token::Instr
+            | Token::Ceil
+            | Token::Ceiling
+            | Token::Floor
+            | Token::Sqrt
+            | Token::Power
+            | Token::Mod
+            | Token::Now
+            | Token::Year
+            | Token::Month
+            | Token::Day
+            | Token::DateAdd
+            | Token::Datediff
+            | Token::ConcatFn => self.parse_scalar_function(),
+            Token::Count
+            | Token::Sum
+            | Token::Avg
+            | Token::Min
+            | Token::Max
+            | Token::Stddev
+            | Token::Variance
+            | Token::GroupConcat
+            | Token::StringAgg
+            | Token::BoolAnd
+            | Token::BoolOr
+            | Token::Every
+            | Token::Median
+            | Token::Mode
+            | Token::PercentileCont
+            | Token::PercentileDisc => {
                 let agg = self.parse_aggregate_function()?;
                 if let Column::Function(func) = agg {
                     Ok(Expression::Function(func))
@@ -1832,6 +2342,22 @@ impl Parser {
         };
         Ok(Statement::Analyze(table_name))
     }
+
+    fn parse_truncate(&mut self) -> Result<Statement, RustqlError> {
+        self.consume(Token::Truncate)?;
+        if *self.current_token() == Token::Table {
+            self.advance();
+        }
+        let table_name = match self.advance() {
+            Token::Identifier(name) => name,
+            _ => {
+                return Err(RustqlError::ParseError(
+                    "Expected table name after TRUNCATE".to_string(),
+                ));
+            }
+        };
+        Ok(Statement::TruncateTable { table_name })
+    }
 }
 
 fn token_to_string(tok: &Token) -> String {
@@ -1859,6 +2385,165 @@ fn token_to_string(tok: &Token) -> String {
         Token::Like => "LIKE".to_string(),
         Token::Between => "BETWEEN".to_string(),
         Token::Comma => ",".to_string(),
+        _ => format!("{:?}", tok),
+    }
+}
+
+fn token_to_sql(tok: &Token) -> String {
+    match tok {
+        Token::Identifier(s) => s.clone(),
+        Token::Number(n) => n.to_string(),
+        Token::Float(f) => f.to_string(),
+        Token::StringLiteral(s) => format!("'{}'", s),
+        Token::LeftParen => "(".to_string(),
+        Token::RightParen => ")".to_string(),
+        Token::Comma => ",".to_string(),
+        Token::Semicolon => ";".to_string(),
+        Token::Dot => ".".to_string(),
+        Token::Star => "*".to_string(),
+        Token::Plus => "+".to_string(),
+        Token::Minus => "-".to_string(),
+        Token::Multiply => "*".to_string(),
+        Token::Divide => "/".to_string(),
+        Token::Equal => "=".to_string(),
+        Token::NotEqual => "<>".to_string(),
+        Token::LessThan => "<".to_string(),
+        Token::LessThanOrEqual => "<=".to_string(),
+        Token::GreaterThan => ">".to_string(),
+        Token::GreaterThanOrEqual => ">=".to_string(),
+        Token::Concat => "||".to_string(),
+        Token::Select => "SELECT".to_string(),
+        Token::Exists => "EXISTS".to_string(),
+        Token::Distinct => "DISTINCT".to_string(),
+        Token::From => "FROM".to_string(),
+        Token::Where => "WHERE".to_string(),
+        Token::Insert => "INSERT".to_string(),
+        Token::Into => "INTO".to_string(),
+        Token::Values => "VALUES".to_string(),
+        Token::Update => "UPDATE".to_string(),
+        Token::Set => "SET".to_string(),
+        Token::Delete => "DELETE".to_string(),
+        Token::Create => "CREATE".to_string(),
+        Token::Table => "TABLE".to_string(),
+        Token::Drop => "DROP".to_string(),
+        Token::Alter => "ALTER".to_string(),
+        Token::Add => "ADD".to_string(),
+        Token::Column => "COLUMN".to_string(),
+        Token::Rename => "RENAME".to_string(),
+        Token::To => "TO".to_string(),
+        Token::And => "AND".to_string(),
+        Token::Or => "OR".to_string(),
+        Token::Not => "NOT".to_string(),
+        Token::Order => "ORDER".to_string(),
+        Token::By => "BY".to_string(),
+        Token::Asc => "ASC".to_string(),
+        Token::Desc => "DESC".to_string(),
+        Token::Limit => "LIMIT".to_string(),
+        Token::Offset => "OFFSET".to_string(),
+        Token::Group => "GROUP".to_string(),
+        Token::Having => "HAVING".to_string(),
+        Token::Count => "COUNT".to_string(),
+        Token::Sum => "SUM".to_string(),
+        Token::Avg => "AVG".to_string(),
+        Token::Min => "MIN".to_string(),
+        Token::Max => "MAX".to_string(),
+        Token::As => "AS".to_string(),
+        Token::Join => "JOIN".to_string(),
+        Token::Inner => "INNER".to_string(),
+        Token::Left => "LEFT".to_string(),
+        Token::Right => "RIGHT".to_string(),
+        Token::Full => "FULL".to_string(),
+        Token::On => "ON".to_string(),
+        Token::In => "IN".to_string(),
+        Token::Like => "LIKE".to_string(),
+        Token::Between => "BETWEEN".to_string(),
+        Token::Is => "IS".to_string(),
+        Token::Null => "NULL".to_string(),
+        Token::Boolean => "BOOLEAN".to_string(),
+        Token::Date => "DATE".to_string(),
+        Token::Time => "TIME".to_string(),
+        Token::DateTime => "DATETIME".to_string(),
+        Token::Foreign => "FOREIGN".to_string(),
+        Token::Key => "KEY".to_string(),
+        Token::References => "REFERENCES".to_string(),
+        Token::Cascade => "CASCADE".to_string(),
+        Token::Restrict => "RESTRICT".to_string(),
+        Token::No => "NO".to_string(),
+        Token::Action => "ACTION".to_string(),
+        Token::Union => "UNION".to_string(),
+        Token::All => "ALL".to_string(),
+        Token::Primary => "PRIMARY".to_string(),
+        Token::Unique => "UNIQUE".to_string(),
+        Token::Default => "DEFAULT".to_string(),
+        Token::Index => "INDEX".to_string(),
+        Token::Case => "CASE".to_string(),
+        Token::When => "WHEN".to_string(),
+        Token::Then => "THEN".to_string(),
+        Token::Else => "ELSE".to_string(),
+        Token::End => "END".to_string(),
+        Token::Upper => "UPPER".to_string(),
+        Token::Lower => "LOWER".to_string(),
+        Token::Length => "LENGTH".to_string(),
+        Token::Substring => "SUBSTRING".to_string(),
+        Token::Abs => "ABS".to_string(),
+        Token::Round => "ROUND".to_string(),
+        Token::Coalesce => "COALESCE".to_string(),
+        Token::Cross => "CROSS".to_string(),
+        Token::Natural => "NATURAL".to_string(),
+        Token::Check => "CHECK".to_string(),
+        Token::With => "WITH".to_string(),
+        Token::Over => "OVER".to_string(),
+        Token::Partition => "PARTITION".to_string(),
+        Token::RowNumber => "ROW_NUMBER".to_string(),
+        Token::Rank => "RANK".to_string(),
+        Token::DenseRank => "DENSE_RANK".to_string(),
+        Token::Stddev => "STDDEV".to_string(),
+        Token::Variance => "VARIANCE".to_string(),
+        Token::Lag => "LAG".to_string(),
+        Token::Lead => "LEAD".to_string(),
+        Token::Ntile => "NTILE".to_string(),
+        Token::GroupConcat => "GROUP_CONCAT".to_string(),
+        Token::StringAgg => "STRING_AGG".to_string(),
+        Token::BoolAnd => "BOOL_AND".to_string(),
+        Token::BoolOr => "BOOL_OR".to_string(),
+        Token::Every => "EVERY".to_string(),
+        Token::Median => "MEDIAN".to_string(),
+        Token::Mode => "MODE".to_string(),
+        Token::PercentileCont => "PERCENTILE_CONT".to_string(),
+        Token::PercentileDisc => "PERCENTILE_DISC".to_string(),
+        Token::FirstValue => "FIRST_VALUE".to_string(),
+        Token::LastValue => "LAST_VALUE".to_string(),
+        Token::NthValue => "NTH_VALUE".to_string(),
+        Token::PercentRank => "PERCENT_RANK".to_string(),
+        Token::CumeDist => "CUME_DIST".to_string(),
+        Token::Separator => "SEPARATOR".to_string(),
+        Token::Within => "WITHIN".to_string(),
+        Token::Rows => "ROWS".to_string(),
+        Token::RangeFrame => "RANGE".to_string(),
+        Token::Unbounded => "UNBOUNDED".to_string(),
+        Token::Preceding => "PRECEDING".to_string(),
+        Token::Following => "FOLLOWING".to_string(),
+        Token::Current => "CURRENT".to_string(),
+        Token::Cast => "CAST".to_string(),
+        Token::ConcatFn => "CONCAT".to_string(),
+        Token::Trim => "TRIM".to_string(),
+        Token::Replace => "REPLACE".to_string(),
+        Token::Position => "POSITION".to_string(),
+        Token::Instr => "INSTR".to_string(),
+        Token::Ceil => "CEIL".to_string(),
+        Token::Ceiling => "CEILING".to_string(),
+        Token::Floor => "FLOOR".to_string(),
+        Token::Sqrt => "SQRT".to_string(),
+        Token::Power => "POWER".to_string(),
+        Token::Mod => "MOD".to_string(),
+        Token::Now => "NOW".to_string(),
+        Token::Year => "YEAR".to_string(),
+        Token::Month => "MONTH".to_string(),
+        Token::Day => "DAY".to_string(),
+        Token::DateAdd => "DATE_ADD".to_string(),
+        Token::Datediff => "DATEDIFF".to_string(),
+        Token::Truncate => "TRUNCATE".to_string(),
+        Token::View => "VIEW".to_string(),
         _ => format!("{:?}", tok),
     }
 }

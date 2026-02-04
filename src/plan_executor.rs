@@ -1107,6 +1107,275 @@ impl<'a> PlanExecutor<'a> {
 
                 Ok(max_val.unwrap_or(Value::Null))
             }
+            AggregateFunctionType::Variance => {
+                let mut values = Vec::new();
+
+                for row in rows {
+                    let val = eval_expr_for_row(row)?;
+                    if matches!(val, Value::Null) {
+                        continue;
+                    }
+                    if agg.distinct && !seen.insert(val.clone()) {
+                        continue;
+                    }
+                    match val {
+                        Value::Integer(i) => values.push(i as f64),
+                        Value::Float(f) => values.push(f),
+                        _ => {
+                            return Err(RustqlError::AggregateError(
+                                "VARIANCE requires numeric values".to_string(),
+                            ));
+                        }
+                    }
+                }
+
+                if values.is_empty() {
+                    return Ok(Value::Null);
+                }
+
+                let mean = values.iter().sum::<f64>() / values.len() as f64;
+                let variance =
+                    values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / values.len() as f64;
+                Ok(Value::Float(variance))
+            }
+            AggregateFunctionType::Stddev => {
+                let mut values = Vec::new();
+
+                for row in rows {
+                    let val = eval_expr_for_row(row)?;
+                    if matches!(val, Value::Null) {
+                        continue;
+                    }
+                    if agg.distinct && !seen.insert(val.clone()) {
+                        continue;
+                    }
+                    match val {
+                        Value::Integer(i) => values.push(i as f64),
+                        Value::Float(f) => values.push(f),
+                        _ => {
+                            return Err(RustqlError::AggregateError(
+                                "STDDEV requires numeric values".to_string(),
+                            ));
+                        }
+                    }
+                }
+
+                if values.is_empty() {
+                    return Ok(Value::Null);
+                }
+
+                let mean = values.iter().sum::<f64>() / values.len() as f64;
+                let variance =
+                    values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / values.len() as f64;
+                Ok(Value::Float(variance.sqrt()))
+            }
+            AggregateFunctionType::GroupConcat => {
+                let sep = agg.separator.as_deref().unwrap_or(",");
+                let mut parts: Vec<String> = Vec::new();
+                for row in rows {
+                    let val = eval_expr_for_row(row)?;
+                    if matches!(val, Value::Null) {
+                        continue;
+                    }
+                    if agg.distinct && !seen.insert(val.clone()) {
+                        continue;
+                    }
+                    parts.push(match &val {
+                        Value::Integer(n) => n.to_string(),
+                        Value::Float(f) => format!("{}", f),
+                        Value::Text(s) => s.clone(),
+                        Value::Boolean(b) => b.to_string(),
+                        Value::Date(d) => d.clone(),
+                        Value::Time(t) => t.clone(),
+                        Value::DateTime(dt) => dt.clone(),
+                        Value::Null => "NULL".to_string(),
+                    });
+                }
+                if parts.is_empty() {
+                    Ok(Value::Null)
+                } else {
+                    Ok(Value::Text(parts.join(sep)))
+                }
+            }
+            AggregateFunctionType::BoolAnd => {
+                let mut result = true;
+                let mut has_value = false;
+                for row in rows {
+                    let val = eval_expr_for_row(row)?;
+                    if matches!(val, Value::Null) {
+                        continue;
+                    }
+                    has_value = true;
+                    match val {
+                        Value::Boolean(b) => {
+                            if !b {
+                                result = false;
+                            }
+                        }
+                        Value::Integer(n) => {
+                            if n == 0 {
+                                result = false;
+                            }
+                        }
+                        _ => {
+                            return Err(RustqlError::AggregateError(
+                                "BOOL_AND requires boolean or integer values".to_string(),
+                            ));
+                        }
+                    }
+                }
+                if has_value {
+                    Ok(Value::Boolean(result))
+                } else {
+                    Ok(Value::Null)
+                }
+            }
+            AggregateFunctionType::BoolOr => {
+                let mut result = false;
+                let mut has_value = false;
+                for row in rows {
+                    let val = eval_expr_for_row(row)?;
+                    if matches!(val, Value::Null) {
+                        continue;
+                    }
+                    has_value = true;
+                    match val {
+                        Value::Boolean(b) => {
+                            if b {
+                                result = true;
+                            }
+                        }
+                        Value::Integer(n) => {
+                            if n != 0 {
+                                result = true;
+                            }
+                        }
+                        _ => {
+                            return Err(RustqlError::AggregateError(
+                                "BOOL_OR requires boolean or integer values".to_string(),
+                            ));
+                        }
+                    }
+                }
+                if has_value {
+                    Ok(Value::Boolean(result))
+                } else {
+                    Ok(Value::Null)
+                }
+            }
+            AggregateFunctionType::Median => {
+                let mut values: Vec<f64> = Vec::new();
+                for row in rows {
+                    let val = eval_expr_for_row(row)?;
+                    if matches!(val, Value::Null) {
+                        continue;
+                    }
+                    if agg.distinct && !seen.insert(val.clone()) {
+                        continue;
+                    }
+                    match val {
+                        Value::Integer(i) => values.push(i as f64),
+                        Value::Float(f) => values.push(f),
+                        _ => {
+                            return Err(RustqlError::AggregateError(
+                                "MEDIAN requires numeric values".to_string(),
+                            ));
+                        }
+                    }
+                }
+                if values.is_empty() {
+                    return Ok(Value::Null);
+                }
+                values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
+                let mid = values.len() / 2;
+                if values.len() % 2 == 0 {
+                    Ok(Value::Float((values[mid - 1] + values[mid]) / 2.0))
+                } else {
+                    Ok(Value::Float(values[mid]))
+                }
+            }
+            AggregateFunctionType::Mode => {
+                let mut counts: Vec<(Value, usize)> = Vec::new();
+                for row in rows {
+                    let val = eval_expr_for_row(row)?;
+                    if matches!(val, Value::Null) {
+                        continue;
+                    }
+                    if agg.distinct && !seen.insert(val.clone()) {
+                        continue;
+                    }
+                    if let Some(entry) = counts.iter_mut().find(|(v, _)| *v == val) {
+                        entry.1 += 1;
+                    } else {
+                        counts.push((val, 1));
+                    }
+                }
+                if counts.is_empty() {
+                    return Ok(Value::Null);
+                }
+                counts.sort_by(|a, b| b.1.cmp(&a.1));
+                Ok(counts[0].0.clone())
+            }
+            AggregateFunctionType::PercentileCont => {
+                let frac = agg.percentile.unwrap_or(0.5);
+                let mut values: Vec<f64> = Vec::new();
+                for row in rows {
+                    let val = eval_expr_for_row(row)?;
+                    if matches!(val, Value::Null) {
+                        continue;
+                    }
+                    if agg.distinct && !seen.insert(val.clone()) {
+                        continue;
+                    }
+                    match val {
+                        Value::Integer(i) => values.push(i as f64),
+                        Value::Float(f) => values.push(f),
+                        _ => {
+                            return Err(RustqlError::AggregateError(
+                                "PERCENTILE_CONT requires numeric values".to_string(),
+                            ));
+                        }
+                    }
+                }
+                if values.is_empty() {
+                    return Ok(Value::Null);
+                }
+                values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
+                let n = values.len();
+                if n == 1 {
+                    return Ok(Value::Float(values[0]));
+                }
+                let pos = frac * (n - 1) as f64;
+                let lower = pos.floor() as usize;
+                let upper = pos.ceil() as usize;
+                if lower == upper {
+                    Ok(Value::Float(values[lower]))
+                } else {
+                    let w = pos - lower as f64;
+                    Ok(Value::Float(values[lower] * (1.0 - w) + values[upper] * w))
+                }
+            }
+            AggregateFunctionType::PercentileDisc => {
+                let frac = agg.percentile.unwrap_or(0.5);
+                let mut values: Vec<Value> = Vec::new();
+                for row in rows {
+                    let val = eval_expr_for_row(row)?;
+                    if matches!(val, Value::Null) {
+                        continue;
+                    }
+                    if agg.distinct && !seen.insert(val.clone()) {
+                        continue;
+                    }
+                    values.push(val);
+                }
+                if values.is_empty() {
+                    return Ok(Value::Null);
+                }
+                values.sort();
+                let idx = ((frac * values.len() as f64).ceil() as usize).saturating_sub(1);
+                let idx = idx.min(values.len() - 1);
+                Ok(values[idx].clone())
+            }
         }
     }
 

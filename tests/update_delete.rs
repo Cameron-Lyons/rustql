@@ -31,6 +31,7 @@ fn test_update_and_delete() {
                 nullable: false,
             },
         ],
+        as_query: None,
     }))
     .unwrap();
 
@@ -39,6 +40,7 @@ fn test_update_and_delete() {
         columns: Some(vec!["id".into(), "name".into()]),
         values: vec![vec![Value::Integer(1), Value::Text("Alice".into())]],
         source_query: None,
+        on_conflict: None,
     }))
     .unwrap();
 
@@ -46,9 +48,10 @@ fn test_update_and_delete() {
         table: "users".into(),
         assignments: vec![Assignment {
             column: "name".into(),
-            value: Value::Text("Alicia".into()),
+            value: Expression::Value(Value::Text("Alicia".into())),
         }],
         where_clause: None,
+        from: None,
     });
 
     assert_eq!(execute(update).unwrap(), "1 row(s) updated");

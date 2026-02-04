@@ -39,6 +39,7 @@ fn test_scalar_subquery_basic() {
                 nullable: false,
             },
         ],
+        as_query: None,
     }))
     .unwrap();
 
@@ -50,6 +51,7 @@ fn test_scalar_subquery_basic() {
             vec![Value::Integer(2), Value::Text("Bob".into())],
         ],
         source_query: None,
+        on_conflict: None,
     }))
     .unwrap();
 
@@ -79,6 +81,7 @@ fn test_scalar_subquery_basic() {
                 nullable: false,
             },
         ],
+        as_query: None,
     }))
     .unwrap();
 
@@ -90,6 +93,7 @@ fn test_scalar_subquery_basic() {
             vec![Value::Integer(2), Value::Float(50.0)],
         ],
         source_query: None,
+        on_conflict: None,
     }))
     .unwrap();
 
@@ -171,6 +175,7 @@ fn test_scalar_subquery_null() {
                 nullable: false,
             },
         ],
+        as_query: None,
     }))
     .unwrap();
 
@@ -179,6 +184,7 @@ fn test_scalar_subquery_null() {
         columns: Some(vec!["id".into(), "name".into()]),
         values: vec![vec![Value::Integer(1), Value::Text("Alice".into())]],
         source_query: None,
+        on_conflict: None,
     }))
     .unwrap();
 
@@ -208,6 +214,7 @@ fn test_scalar_subquery_null() {
                 nullable: false,
             },
         ],
+        as_query: None,
     }))
     .unwrap();
 
@@ -289,6 +296,7 @@ fn test_scalar_subquery_aggregate() {
                 nullable: false,
             },
         ],
+        as_query: None,
     }))
     .unwrap();
 
@@ -300,6 +308,7 @@ fn test_scalar_subquery_aggregate() {
             vec![Value::Integer(2), Value::Text("Bob".into())],
         ],
         source_query: None,
+        on_conflict: None,
     }))
     .unwrap();
 
@@ -329,6 +338,7 @@ fn test_scalar_subquery_aggregate() {
                 nullable: false,
             },
         ],
+        as_query: None,
     }))
     .unwrap();
 
@@ -341,6 +351,7 @@ fn test_scalar_subquery_aggregate() {
             vec![Value::Integer(2), Value::Float(200.0)],
         ],
         source_query: None,
+        on_conflict: None,
     }))
     .unwrap();
 
@@ -365,6 +376,8 @@ fn test_scalar_subquery_aggregate() {
                     expr: Box::new(Expression::Column("*".into())),
                     distinct: false,
                     alias: None,
+                    separator: None,
+                    percentile: None,
                 })],
                 from: "orders_agg".into(),
                 joins: vec![],
@@ -425,6 +438,7 @@ fn test_scalar_subquery_aggregate_sum() {
                 nullable: false,
             },
         ],
+        as_query: None,
     }))
     .unwrap();
 
@@ -433,6 +447,7 @@ fn test_scalar_subquery_aggregate_sum() {
         columns: Some(vec!["id".into(), "name".into()]),
         values: vec![vec![Value::Integer(1), Value::Text("Alice".into())]],
         source_query: None,
+        on_conflict: None,
     }))
     .unwrap();
 
@@ -462,6 +477,7 @@ fn test_scalar_subquery_aggregate_sum() {
                 nullable: false,
             },
         ],
+        as_query: None,
     }))
     .unwrap();
 
@@ -474,6 +490,7 @@ fn test_scalar_subquery_aggregate_sum() {
             vec![Value::Integer(1), Value::Float(25.0)],
         ],
         source_query: None,
+        on_conflict: None,
     }))
     .unwrap();
 
@@ -498,6 +515,8 @@ fn test_scalar_subquery_aggregate_sum() {
                     expr: Box::new(Expression::Column("amount".into())),
                     distinct: false,
                     alias: None,
+                    separator: None,
+                    percentile: None,
                 })],
                 from: "orders_sum".into(),
                 joins: vec![],
@@ -556,6 +575,7 @@ fn test_scalar_subquery_nested() {
                 nullable: false,
             },
         ],
+        as_query: None,
     }))
     .unwrap();
 
@@ -564,6 +584,7 @@ fn test_scalar_subquery_nested() {
         columns: Some(vec!["id".into(), "name".into()]),
         values: vec![vec![Value::Integer(1), Value::Text("Alice".into())]],
         source_query: None,
+        on_conflict: None,
     }))
     .unwrap();
 
@@ -593,6 +614,7 @@ fn test_scalar_subquery_nested() {
                 nullable: false,
             },
         ],
+        as_query: None,
     }))
     .unwrap();
 
@@ -601,6 +623,7 @@ fn test_scalar_subquery_nested() {
         columns: Some(vec!["user_id".into(), "amount".into()]),
         values: vec![vec![Value::Integer(1), Value::Float(150.0)]],
         source_query: None,
+        on_conflict: None,
     }))
     .unwrap();
 
@@ -641,6 +664,7 @@ fn test_scalar_subquery_nested() {
                 nullable: false,
             },
         ],
+        as_query: None,
     }))
     .unwrap();
 
@@ -653,6 +677,7 @@ fn test_scalar_subquery_nested() {
             Value::Float(50.0),
         ]],
         source_query: None,
+        on_conflict: None,
     }))
     .unwrap();
 
@@ -753,6 +778,7 @@ fn test_scalar_subquery_with_join() {
                 nullable: false,
             },
         ],
+        as_query: None,
     }))
     .unwrap();
 
@@ -764,6 +790,7 @@ fn test_scalar_subquery_with_join() {
             vec![Value::Integer(2), Value::Text("Bob".into())],
         ],
         source_query: None,
+        on_conflict: None,
     }))
     .unwrap();
 
@@ -804,6 +831,7 @@ fn test_scalar_subquery_with_join() {
                 nullable: false,
             },
         ],
+        as_query: None,
     }))
     .unwrap();
 
@@ -815,6 +843,7 @@ fn test_scalar_subquery_with_join() {
             vec![Value::Integer(11), Value::Integer(2), Value::Float(50.0)],
         ],
         source_query: None,
+        on_conflict: None,
     }))
     .unwrap();
 
@@ -906,6 +935,7 @@ fn test_scalar_subquery_with_join_and_aggregate() {
                 nullable: false,
             },
         ],
+        as_query: None,
     }))
     .unwrap();
 
@@ -917,6 +947,7 @@ fn test_scalar_subquery_with_join_and_aggregate() {
             vec![Value::Integer(2), Value::Text("Bob".into())],
         ],
         source_query: None,
+        on_conflict: None,
     }))
     .unwrap();
 
@@ -957,6 +988,7 @@ fn test_scalar_subquery_with_join_and_aggregate() {
                 nullable: false,
             },
         ],
+        as_query: None,
     }))
     .unwrap();
 
@@ -969,6 +1001,7 @@ fn test_scalar_subquery_with_join_and_aggregate() {
             vec![Value::Integer(12), Value::Integer(2), Value::Float(200.0)],
         ],
         source_query: None,
+        on_conflict: None,
     }))
     .unwrap();
 
@@ -998,6 +1031,7 @@ fn test_scalar_subquery_with_join_and_aggregate() {
                 nullable: false,
             },
         ],
+        as_query: None,
     }))
     .unwrap();
 
@@ -1010,6 +1044,7 @@ fn test_scalar_subquery_with_join_and_aggregate() {
             vec![Value::Integer(12), Value::Float(30.0)],
         ],
         source_query: None,
+        on_conflict: None,
     }))
     .unwrap();
 
@@ -1034,6 +1069,8 @@ fn test_scalar_subquery_with_join_and_aggregate() {
                     expr: Box::new(Expression::Column("products_join_agg.price".into())),
                     distinct: false,
                     alias: None,
+                    separator: None,
+                    percentile: None,
                 })],
                 from: "orders_join_agg".into(),
                 joins: vec![Join {

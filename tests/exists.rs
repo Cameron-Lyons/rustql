@@ -29,6 +29,7 @@ fn test_where_exists_true() {
                 nullable: false,
             },
         ],
+        as_query: None,
     }))
     .unwrap();
 
@@ -40,6 +41,7 @@ fn test_where_exists_true() {
             vec![Value::Integer(2), Value::Text("Bob".into())],
         ],
         source_query: None,
+        on_conflict: None,
     }))
     .unwrap();
 
@@ -69,6 +71,7 @@ fn test_where_exists_true() {
                 nullable: false,
             },
         ],
+        as_query: None,
     }))
     .unwrap();
 
@@ -80,6 +83,7 @@ fn test_where_exists_true() {
             vec![Value::Integer(2), Value::Float(50.0)],
         ],
         source_query: None,
+        on_conflict: None,
     }))
     .unwrap();
 
@@ -152,6 +156,7 @@ fn test_where_exists_false_filters_all() {
                 nullable: false,
             },
         ],
+        as_query: None,
     }))
     .unwrap();
 
@@ -163,6 +168,7 @@ fn test_where_exists_false_filters_all() {
             vec![Value::Integer(2), Value::Text("Bob".into())],
         ],
         source_query: None,
+        on_conflict: None,
     }))
     .unwrap();
 
@@ -192,6 +198,7 @@ fn test_where_exists_false_filters_all() {
                 nullable: false,
             },
         ],
+        as_query: None,
     }))
     .unwrap();
 
@@ -203,6 +210,7 @@ fn test_where_exists_false_filters_all() {
             vec![Value::Integer(2), Value::Float(50.0)],
         ],
         source_query: None,
+        on_conflict: None,
     }))
     .unwrap();
 
@@ -275,6 +283,7 @@ fn test_where_not_exists_true_filters_all() {
                 nullable: false,
             },
         ],
+        as_query: None,
     }))
     .unwrap();
 
@@ -286,6 +295,7 @@ fn test_where_not_exists_true_filters_all() {
             vec![Value::Integer(2), Value::Text("Bob".into())],
         ],
         source_query: None,
+        on_conflict: None,
     }))
     .unwrap();
 
@@ -315,6 +325,7 @@ fn test_where_not_exists_true_filters_all() {
                 nullable: false,
             },
         ],
+        as_query: None,
     }))
     .unwrap();
 
@@ -326,6 +337,7 @@ fn test_where_not_exists_true_filters_all() {
             vec![Value::Integer(2), Value::Float(50.0)],
         ],
         source_query: None,
+        on_conflict: None,
     }))
     .unwrap();
 
@@ -401,6 +413,7 @@ fn test_where_exists_correlated_true() {
                 nullable: false,
             },
         ],
+        as_query: None,
     }))
     .unwrap();
 
@@ -412,6 +425,7 @@ fn test_where_exists_correlated_true() {
             vec![Value::Integer(2), Value::Text("Bob".into())],
         ],
         source_query: None,
+        on_conflict: None,
     }))
     .unwrap();
 
@@ -441,6 +455,7 @@ fn test_where_exists_correlated_true() {
                 nullable: false,
             },
         ],
+        as_query: None,
     }))
     .unwrap();
 
@@ -452,6 +467,7 @@ fn test_where_exists_correlated_true() {
             vec![Value::Integer(2), Value::Float(50.0)],
         ],
         source_query: None,
+        on_conflict: None,
     }))
     .unwrap();
 
@@ -532,6 +548,7 @@ fn test_where_not_exists_false() {
                 nullable: false,
             },
         ],
+        as_query: None,
     }))
     .unwrap();
 
@@ -543,6 +560,7 @@ fn test_where_not_exists_false() {
             vec![Value::Integer(2), Value::Text("Bob".into())],
         ],
         source_query: None,
+        on_conflict: None,
     }))
     .unwrap();
 
@@ -572,6 +590,7 @@ fn test_where_not_exists_false() {
                 nullable: false,
             },
         ],
+        as_query: None,
     }))
     .unwrap();
 
@@ -583,6 +602,7 @@ fn test_where_not_exists_false() {
             vec![Value::Integer(2), Value::Float(50.0)],
         ],
         source_query: None,
+        on_conflict: None,
     }))
     .unwrap();
 
@@ -658,6 +678,7 @@ fn test_where_exists_correlated_false() {
                 nullable: false,
             },
         ],
+        as_query: None,
     }))
     .unwrap();
 
@@ -669,6 +690,7 @@ fn test_where_exists_correlated_false() {
             vec![Value::Integer(2), Value::Text("Bob".into())],
         ],
         source_query: None,
+        on_conflict: None,
     }))
     .unwrap();
 
@@ -698,6 +720,7 @@ fn test_where_exists_correlated_false() {
                 nullable: false,
             },
         ],
+        as_query: None,
     }))
     .unwrap();
 
@@ -709,6 +732,7 @@ fn test_where_exists_correlated_false() {
             vec![Value::Integer(2), Value::Float(30.0)],
         ],
         source_query: None,
+        on_conflict: None,
     }))
     .unwrap();
 
@@ -789,6 +813,7 @@ fn test_where_exists_with_join() {
                 nullable: false,
             },
         ],
+        as_query: None,
     }))
     .unwrap();
 
@@ -800,6 +825,7 @@ fn test_where_exists_with_join() {
             vec![Value::Integer(2), Value::Text("Bob".into())],
         ],
         source_query: None,
+        on_conflict: None,
     }))
     .unwrap();
 
@@ -829,6 +855,7 @@ fn test_where_exists_with_join() {
                 nullable: false,
             },
         ],
+        as_query: None,
     }))
     .unwrap();
 
@@ -840,6 +867,7 @@ fn test_where_exists_with_join() {
             vec![Value::Integer(2), Value::Integer(1)],
         ],
         source_query: None,
+        on_conflict: None,
     }))
     .unwrap();
 
@@ -869,6 +897,7 @@ fn test_where_exists_with_join() {
                 nullable: false,
             },
         ],
+        as_query: None,
     }))
     .unwrap();
 
@@ -877,6 +906,7 @@ fn test_where_exists_with_join() {
         columns: Some(vec!["id".into(), "order_id".into()]),
         values: vec![vec![Value::Integer(1), Value::Integer(1)]],
         source_query: None,
+        on_conflict: None,
     }))
     .unwrap();
 

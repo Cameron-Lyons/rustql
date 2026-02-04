@@ -733,16 +733,23 @@ impl<'a> QueryPlanner<'a> {
                 }
             }
             Expression::WindowFunction {
+                args,
                 partition_by,
                 order_by,
                 ..
             } => {
+                for arg in args {
+                    self.collect_table_refs(arg, tables);
+                }
                 for expr in partition_by {
                     self.collect_table_refs(expr, tables);
                 }
                 for ob in order_by {
                     self.collect_table_refs(&ob.expr, tables);
                 }
+            }
+            Expression::Cast { expr, .. } => {
+                self.collect_table_refs(expr, tables);
             }
             Expression::Subquery(_) | Expression::Exists(_) | Expression::Value(_) => {}
         }

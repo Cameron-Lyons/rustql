@@ -31,6 +31,7 @@ fn test_create_and_drop_table() {
                 nullable: false,
             },
         ],
+        as_query: None,
     });
 
     let drop = Statement::DropTable(DropTableStatement {

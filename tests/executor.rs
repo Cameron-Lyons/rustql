@@ -36,6 +36,7 @@ fn test_create_table() {
                 nullable: false,
             },
         ],
+        as_query: None,
     });
     assert!(execute(stmt).is_ok());
 }
