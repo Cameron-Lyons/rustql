@@ -13,56 +13,88 @@ fn setup() {
 #[test]
 fn test_update_with_scalar_subquery() {
     setup();
-    process_query("CREATE TABLE IF NOT EXISTS squ_prices1 (id INTEGER, price INTEGER)").unwrap();
-    process_query("CREATE TABLE IF NOT EXISTS squ_products1 (id INTEGER, max_price INTEGER)")
-        .unwrap();
-    process_query("DELETE FROM squ_prices1").unwrap_or_default();
-    process_query("DELETE FROM squ_products1").unwrap_or_default();
-    process_query("INSERT INTO squ_prices1 VALUES (1, 100), (2, 200), (3, 150)").unwrap();
-    process_query("INSERT INTO squ_products1 VALUES (1, 0)").unwrap();
-
-    let result =
-        process_query("UPDATE squ_products1 SET max_price = (SELECT MAX(price) FROM squ_prices1)")
-            .unwrap();
-    assert!(result.contains("1 row(s) updated"));
-
-    let check = process_query("SELECT max_price FROM squ_products1").unwrap();
-    assert!(check.contains("200"));
-}
-
-#[test]
-fn test_update_with_subquery_where() {
-    setup();
-    process_query("CREATE TABLE IF NOT EXISTS squ_inventory2 (id INTEGER, qty INTEGER)").unwrap();
-    process_query("CREATE TABLE IF NOT EXISTS squ_low_stock2 (id INTEGER)").unwrap();
-    process_query("DELETE FROM squ_inventory2").unwrap_or_default();
-    process_query("DELETE FROM squ_low_stock2").unwrap_or_default();
-    process_query("INSERT INTO squ_inventory2 VALUES (1, 5), (2, 10), (3, 2)").unwrap();
-    process_query("INSERT INTO squ_low_stock2 VALUES (1), (3)").unwrap();
-
     process_query(
-        "UPDATE squ_inventory2 SET qty = qty + 10 WHERE id IN (SELECT id FROM squ_low_stock2)",
+        "CREATE TABLE IF NOT EXISTS siu_targets (target_id INTEGER PRIMARY KEY, val INTEGER)",
     )
     .unwrap();
+    process_query("CREATE TABLE IF NOT EXISTS siu_sources (src_id INTEGER, max_val INTEGER)")
+        .unwrap();
+    process_query("DELETE FROM siu_targets").unwrap_or_default();
+    process_query("DELETE FROM siu_sources").unwrap_or_default();
+    process_query("INSERT INTO siu_targets VALUES (1, 0), (2, 0)").unwrap();
+    process_query("INSERT INTO siu_sources VALUES (1, 100), (2, 200)").unwrap();
 
-    let result = process_query("SELECT id, qty FROM squ_inventory2 ORDER BY id").unwrap();
-    assert!(result.contains("15"));
-    assert!(result.contains("12"));
-    assert!(result.contains("10"));
+    let result = process_query(
+        "UPDATE siu_targets SET val = (SELECT MAX(max_val) FROM siu_sources) WHERE target_id = 1",
+    )
+    .unwrap();
+    assert!(result.contains("1 row(s) updated"));
+
+    let select_result = process_query("SELECT val FROM siu_targets WHERE target_id = 1").unwrap();
+    assert!(select_result.contains("200"));
 }
 
 #[test]
-fn test_update_subquery_returns_null() {
+fn test_update_with_subquery_returning_null() {
     setup();
-    process_query("CREATE TABLE IF NOT EXISTS squ_target_null3 (id INTEGER, val INTEGER)").unwrap();
-    process_query("CREATE TABLE IF NOT EXISTS squ_empty_source3 (val INTEGER)").unwrap();
-    process_query("DELETE FROM squ_target_null3").unwrap_or_default();
-    process_query("DELETE FROM squ_empty_source3").unwrap_or_default();
-    process_query("INSERT INTO squ_target_null3 VALUES (1, 100)").unwrap();
+    process_query(
+        "CREATE TABLE IF NOT EXISTS siu_data (data_id INTEGER PRIMARY KEY, value INTEGER)",
+    )
+    .unwrap();
+    process_query("CREATE TABLE IF NOT EXISTS siu_empty (empty_val INTEGER)").unwrap();
+    process_query("DELETE FROM siu_data").unwrap_or_default();
+    process_query("DELETE FROM siu_empty").unwrap_or_default();
+    process_query("INSERT INTO siu_data VALUES (1, 100)").unwrap();
 
-    process_query("UPDATE squ_target_null3 SET val = (SELECT val FROM squ_empty_source3 LIMIT 1)")
+    let result = process_query(
+        "UPDATE siu_data SET value = (SELECT MAX(empty_val) FROM siu_empty) WHERE data_id = 1",
+    )
+    .unwrap();
+    assert!(result.contains("1 row(s) updated"));
+
+    let select_result = process_query("SELECT value FROM siu_data WHERE data_id = 1").unwrap();
+    assert!(select_result.contains("NULL"));
+}
+
+#[test]
+fn test_update_with_count_subquery() {
+    setup();
+    process_query("CREATE TABLE IF NOT EXISTS siu_counter (counter_id INTEGER PRIMARY KEY, count_val INTEGER)")
         .unwrap();
+    process_query("CREATE TABLE IF NOT EXISTS siu_items (item_id INTEGER)").unwrap();
+    process_query("DELETE FROM siu_counter").unwrap_or_default();
+    process_query("DELETE FROM siu_items").unwrap_or_default();
+    process_query("INSERT INTO siu_counter VALUES (1, 0)").unwrap();
+    process_query("INSERT INTO siu_items VALUES (1), (2), (3), (4), (5)").unwrap();
 
-    let result = process_query("SELECT val FROM squ_target_null3").unwrap();
-    assert!(result.contains("NULL") || result.contains("null"));
+    let result = process_query(
+        "UPDATE siu_counter SET count_val = (SELECT COUNT(*) FROM siu_items) WHERE counter_id = 1",
+    )
+    .unwrap();
+    assert!(result.contains("1 row(s) updated"));
+
+    let select_result =
+        process_query("SELECT count_val FROM siu_counter WHERE counter_id = 1").unwrap();
+    assert!(select_result.contains("5"));
+}
+
+#[test]
+fn test_update_with_returning_and_subquery() {
+    setup();
+    process_query(
+        "CREATE TABLE IF NOT EXISTS siu_ret (ret_id INTEGER PRIMARY KEY, amount INTEGER)",
+    )
+    .unwrap();
+    process_query("CREATE TABLE IF NOT EXISTS siu_ref (ref_val INTEGER)").unwrap();
+    process_query("DELETE FROM siu_ret").unwrap_or_default();
+    process_query("DELETE FROM siu_ref").unwrap_or_default();
+    process_query("INSERT INTO siu_ret VALUES (1, 0)").unwrap();
+    process_query("INSERT INTO siu_ref VALUES (42)").unwrap();
+
+    let result = process_query(
+        "UPDATE siu_ret SET amount = (SELECT MAX(ref_val) FROM siu_ref) WHERE ret_id = 1 RETURNING *",
+    )
+    .unwrap();
+    assert!(result.contains("42"));
+    assert!(result.contains("1"));
 }

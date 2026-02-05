@@ -13,62 +13,70 @@ fn setup() {
 #[test]
 fn test_insert_returning_star() {
     setup();
-    process_query("CREATE TABLE IF NOT EXISTS ret_star_tbl (id INTEGER, name TEXT)").unwrap();
-    let result =
-        process_query("INSERT INTO ret_star_tbl (id, name) VALUES (100, 'Alice') RETURNING *")
-            .unwrap();
-    assert!(result.contains("id"));
-    assert!(result.contains("name"));
-    assert!(result.contains("100"));
+    process_query("CREATE TABLE IF NOT EXISTS ret_ins (ret_id INTEGER PRIMARY KEY, name TEXT)")
+        .unwrap();
+    process_query("DELETE FROM ret_ins").unwrap_or_default();
+
+    let result = process_query("INSERT INTO ret_ins VALUES (1, 'Alice') RETURNING *").unwrap();
+    assert!(result.contains("1"));
     assert!(result.contains("Alice"));
 }
 
 #[test]
 fn test_insert_returning_specific_columns() {
     setup();
-    process_query("CREATE TABLE IF NOT EXISTS ret_spec_tbl (id INTEGER, name TEXT, age INTEGER)")
-        .unwrap();
-    let result = process_query(
-        "INSERT INTO ret_spec_tbl (id, name, age) VALUES (200, 'Bob', 30) RETURNING id, name",
+    process_query(
+        "CREATE TABLE IF NOT EXISTS ret_ins2 (id2 INTEGER PRIMARY KEY, name2 TEXT, age2 INTEGER)",
     )
     .unwrap();
-    assert!(result.contains("id"));
-    assert!(result.contains("name"));
-    assert!(result.contains("200"));
-    assert!(result.contains("Bob"));
-}
+    process_query("DELETE FROM ret_ins2").unwrap_or_default();
 
-#[test]
-fn test_update_returning() {
-    setup();
-    process_query("CREATE TABLE IF NOT EXISTS ret_upd_tbl (id INTEGER, name TEXT)").unwrap();
-    process_query("INSERT INTO ret_upd_tbl VALUES (300, 'Original')").unwrap();
     let result =
-        process_query("UPDATE ret_upd_tbl SET name = 'Updated300' WHERE id = 300 RETURNING *")
-            .unwrap();
-    assert!(result.contains("300"));
-    assert!(result.contains("Updated300"));
+        process_query("INSERT INTO ret_ins2 VALUES (1, 'Bob', 30) RETURNING name2, age2").unwrap();
+    assert!(result.contains("Bob"));
+    assert!(result.contains("30"));
 }
 
 #[test]
-fn test_delete_returning() {
+fn test_update_returning_star() {
     setup();
-    process_query("CREATE TABLE IF NOT EXISTS ret_del_tbl (id INTEGER, name TEXT)").unwrap();
-    process_query("INSERT INTO ret_del_tbl VALUES (400, 'ToDelete400')").unwrap();
-    let result = process_query("DELETE FROM ret_del_tbl WHERE id = 400 RETURNING *").unwrap();
-    assert!(result.contains("400"));
-    assert!(result.contains("ToDelete400"));
+    process_query("CREATE TABLE IF NOT EXISTS ret_upd (upd_id INTEGER PRIMARY KEY, value INTEGER)")
+        .unwrap();
+    process_query("DELETE FROM ret_upd").unwrap_or_default();
+    process_query("INSERT INTO ret_upd VALUES (1, 100), (2, 200)").unwrap();
+
+    let result =
+        process_query("UPDATE ret_upd SET value = 999 WHERE upd_id = 1 RETURNING *").unwrap();
+    assert!(result.contains("1"));
+    assert!(result.contains("999"));
+    assert!(!result.contains("200"));
+}
+
+#[test]
+fn test_delete_returning_star() {
+    setup();
+    process_query("CREATE TABLE IF NOT EXISTS ret_del (del_id INTEGER, item TEXT)").unwrap();
+    process_query("DELETE FROM ret_del").unwrap_or_default();
+    process_query("INSERT INTO ret_del VALUES (1, 'Delete Me'), (2, 'Keep Me')").unwrap();
+
+    let result = process_query("DELETE FROM ret_del WHERE del_id = 1 RETURNING *").unwrap();
+    assert!(result.contains("Delete Me"));
+    assert!(!result.contains("Keep Me"));
 }
 
 #[test]
 fn test_insert_multiple_returning() {
     setup();
-    process_query("CREATE TABLE IF NOT EXISTS ret_multi_tbl (id INTEGER, val TEXT)").unwrap();
-    let result = process_query(
-        "INSERT INTO ret_multi_tbl VALUES (501, 'A'), (502, 'B'), (503, 'C') RETURNING id",
-    )
-    .unwrap();
-    assert!(result.contains("501"));
-    assert!(result.contains("502"));
-    assert!(result.contains("503"));
+    process_query("CREATE TABLE IF NOT EXISTS ret_multi (multi_id INTEGER, val INTEGER)").unwrap();
+    process_query("DELETE FROM ret_multi").unwrap_or_default();
+
+    let result =
+        process_query("INSERT INTO ret_multi VALUES (1, 10), (2, 20), (3, 30) RETURNING *")
+            .unwrap();
+    assert!(result.contains("1"));
+    assert!(result.contains("2"));
+    assert!(result.contains("3"));
+    assert!(result.contains("10"));
+    assert!(result.contains("20"));
+    assert!(result.contains("30"));
 }

@@ -24,6 +24,11 @@ pub fn execute_select(stmt: SelectStatement) -> Result<String, RustqlError> {
         return execute_select_with_ctes(stmt);
     }
 
+    if stmt.from.is_empty() {
+        let result = execute_select_without_from(stmt)?;
+        return Ok(format_select_result(&result));
+    }
+
     {
         let db = get_database_read();
         if !db.tables.contains_key(&stmt.from)
@@ -418,6 +423,30 @@ fn execute_set_operation(
     }
 
     Ok(result)
+}
+
+fn format_select_result(result: &SelectResult) -> String {
+    let mut output = String::new();
+    for (idx, header) in result.headers.iter().enumerate() {
+        if idx > 0 {
+            output.push('\t');
+        }
+        output.push_str(header);
+    }
+    output.push('\n');
+    output.push_str(&"-".repeat(40));
+    output.push('\n');
+
+    for row in &result.rows {
+        for (idx, val) in row.iter().enumerate() {
+            if idx > 0 {
+                output.push('\t');
+            }
+            output.push_str(&format_value(val));
+        }
+        output.push('\n');
+    }
+    output
 }
 
 fn execute_select_without_from(stmt: SelectStatement) -> Result<SelectResult, RustqlError> {

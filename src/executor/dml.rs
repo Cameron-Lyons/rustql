@@ -633,6 +633,9 @@ pub fn execute_delete(stmt: DeleteStatement) -> Result<String, RustqlError> {
         returning_rows
     };
 
+    let deleted_count = rows_to_delete_indices.len();
+    rows_to_delete_indices.reverse();
+
     {
         let table = db
             .tables
@@ -649,9 +652,6 @@ pub fn execute_delete(stmt: DeleteStatement) -> Result<String, RustqlError> {
             table.rows.remove(*idx);
         }
     }
-
-    let deleted_count = rows_to_delete_indices.len();
-    rows_to_delete_indices.reverse();
     super::ddl::update_indexes_on_delete(&mut db, &stmt.table, &rows_to_delete_indices)?;
 
     save_if_not_in_transaction(&db)?;
