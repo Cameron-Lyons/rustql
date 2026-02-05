@@ -155,7 +155,12 @@ impl<'a> QueryPlanner<'a> {
                 })
                 .collect();
 
-            plan = self.plan_aggregate(plan, group_by.clone(), aggregates, stmt.having.clone());
+            plan = self.plan_aggregate(
+                plan,
+                group_by.exprs().to_vec(),
+                aggregates,
+                stmt.having.clone(),
+            );
         }
 
         if let Some(ref order_by) = stmt.order_by {
@@ -750,6 +755,13 @@ impl<'a> QueryPlanner<'a> {
             }
             Expression::Cast { expr, .. } => {
                 self.collect_table_refs(expr, tables);
+            }
+            Expression::Any { left, .. } | Expression::All { left, .. } => {
+                self.collect_table_refs(left, tables);
+            }
+            Expression::IsDistinctFrom { left, right, .. } => {
+                self.collect_table_refs(left, tables);
+                self.collect_table_refs(right, tables);
             }
             Expression::Subquery(_) | Expression::Exists(_) | Expression::Value(_) => {}
         }

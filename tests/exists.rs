@@ -96,8 +96,10 @@ fn test_where_exists_true() {
     let sub = SelectStatement {
         ctes: Vec::new(),
         from_subquery: None,
+        from_function: None,
         set_op: None,
         distinct: false,
+        distinct_on: None,
         columns: vec![Column::All],
         from: "orders_ex1".into(),
         from_alias: None,
@@ -112,13 +114,16 @@ fn test_where_exists_true() {
         order_by: None,
         limit: None,
         offset: None,
+        fetch: None,
     };
 
     let stmt = Statement::Select(SelectStatement {
         ctes: Vec::new(),
         from_subquery: None,
+        from_function: None,
         set_op: None,
         distinct: false,
+        distinct_on: None,
         from: "users_ex1".into(),
         from_alias: None,
         columns: vec![Column::All],
@@ -129,6 +134,7 @@ fn test_where_exists_true() {
         order_by: None,
         limit: None,
         offset: None,
+        fetch: None,
     });
 
     let output = execute(stmt).unwrap();
@@ -231,8 +237,10 @@ fn test_where_exists_false_filters_all() {
     let sub = SelectStatement {
         ctes: Vec::new(),
         from_subquery: None,
+        from_function: None,
         set_op: None,
         distinct: false,
+        distinct_on: None,
         columns: vec![Column::All],
         from: "orders_ex2".into(),
         from_alias: None,
@@ -247,13 +255,16 @@ fn test_where_exists_false_filters_all() {
         order_by: None,
         limit: None,
         offset: None,
+        fetch: None,
     };
 
     let stmt = Statement::Select(SelectStatement {
         ctes: Vec::new(),
         from_subquery: None,
+        from_function: None,
         set_op: None,
         distinct: false,
+        distinct_on: None,
         from: "users_ex2".into(),
         from_alias: None,
         columns: vec![Column::All],
@@ -264,6 +275,7 @@ fn test_where_exists_false_filters_all() {
         order_by: None,
         limit: None,
         offset: None,
+        fetch: None,
     });
 
     let output = execute(stmt).unwrap();
@@ -366,8 +378,10 @@ fn test_where_not_exists_true_filters_all() {
     let sub = SelectStatement {
         ctes: Vec::new(),
         from_subquery: None,
+        from_function: None,
         set_op: None,
         distinct: false,
+        distinct_on: None,
         columns: vec![Column::All],
         from: "t_orders_ne1".into(),
         from_alias: None,
@@ -382,13 +396,16 @@ fn test_where_not_exists_true_filters_all() {
         order_by: None,
         limit: None,
         offset: None,
+        fetch: None,
     };
 
     let stmt = Statement::Select(SelectStatement {
         ctes: Vec::new(),
         from_subquery: None,
+        from_function: None,
         set_op: None,
         distinct: false,
+        distinct_on: None,
         from: "t_users_ne1".into(),
         from_alias: None,
         columns: vec![Column::All],
@@ -402,6 +419,7 @@ fn test_where_not_exists_true_filters_all() {
         order_by: None,
         limit: None,
         offset: None,
+        fetch: None,
     });
 
     let output = execute(stmt).unwrap();
@@ -504,8 +522,10 @@ fn test_where_exists_correlated_true() {
     let sub = SelectStatement {
         ctes: Vec::new(),
         from_subquery: None,
+        from_function: None,
         set_op: None,
         distinct: false,
+        distinct_on: None,
         columns: vec![Column::All],
         from: "orders_corr1".into(),
         from_alias: None,
@@ -528,13 +548,16 @@ fn test_where_exists_correlated_true() {
         order_by: None,
         limit: None,
         offset: None,
+        fetch: None,
     };
 
     let stmt = Statement::Select(SelectStatement {
         ctes: Vec::new(),
         from_subquery: None,
+        from_function: None,
         set_op: None,
         distinct: false,
+        distinct_on: None,
         from: "users_corr1".into(),
         from_alias: None,
         columns: vec![Column::All],
@@ -545,6 +568,7 @@ fn test_where_exists_correlated_true() {
         order_by: None,
         limit: None,
         offset: None,
+        fetch: None,
     });
 
     let output = execute(stmt).unwrap();
@@ -647,8 +671,10 @@ fn test_where_not_exists_false() {
     let sub = SelectStatement {
         ctes: Vec::new(),
         from_subquery: None,
+        from_function: None,
         set_op: None,
         distinct: false,
+        distinct_on: None,
         columns: vec![Column::All],
         from: "t_orders_ne2".into(),
         from_alias: None,
@@ -663,13 +689,16 @@ fn test_where_not_exists_false() {
         order_by: None,
         limit: None,
         offset: None,
+        fetch: None,
     };
 
     let stmt = Statement::Select(SelectStatement {
         ctes: Vec::new(),
         from_subquery: None,
+        from_function: None,
         set_op: None,
         distinct: false,
+        distinct_on: None,
         from: "t_users_ne2".into(),
         from_alias: None,
         columns: vec![Column::All],
@@ -683,6 +712,7 @@ fn test_where_not_exists_false() {
         order_by: None,
         limit: None,
         offset: None,
+        fetch: None,
     });
 
     let output = execute(stmt).unwrap();
@@ -785,8 +815,10 @@ fn test_where_exists_correlated_false() {
     let sub = SelectStatement {
         ctes: Vec::new(),
         from_subquery: None,
+        from_function: None,
         set_op: None,
         distinct: false,
+        distinct_on: None,
         columns: vec![Column::All],
         from: "orders_corr2".into(),
         from_alias: None,
@@ -809,13 +841,16 @@ fn test_where_exists_correlated_false() {
         order_by: None,
         limit: None,
         offset: None,
+        fetch: None,
     };
 
     let stmt = Statement::Select(SelectStatement {
         ctes: Vec::new(),
         from_subquery: None,
+        from_function: None,
         set_op: None,
         distinct: false,
+        distinct_on: None,
         from: "users_corr2".into(),
         from_alias: None,
         columns: vec![Column::All],
@@ -826,6 +861,7 @@ fn test_where_exists_correlated_false() {
         order_by: None,
         limit: None,
         offset: None,
+        fetch: None,
     });
 
     let output = execute(stmt).unwrap();
@@ -970,8 +1006,10 @@ fn test_where_exists_with_join() {
     let sub = SelectStatement {
         ctes: Vec::new(),
         from_subquery: None,
+        from_function: None,
         set_op: None,
         distinct: false,
+        distinct_on: None,
         columns: vec![Column::All],
         from: "orders_join1".into(),
         from_alias: None,
@@ -984,6 +1022,9 @@ fn test_where_exists_with_join() {
                 op: BinaryOperator::Equal,
                 right: Box::new(Expression::Column("payments_join1.order_id".into())),
             }),
+            using_columns: None,
+            lateral: false,
+            subquery: None,
         }],
         where_clause: Some(Expression::BinaryOp {
             left: Box::new(Expression::Column("orders_join1.user_id".into())),
@@ -995,13 +1036,16 @@ fn test_where_exists_with_join() {
         order_by: None,
         limit: None,
         offset: None,
+        fetch: None,
     };
 
     let stmt = Statement::Select(SelectStatement {
         ctes: Vec::new(),
         from_subquery: None,
+        from_function: None,
         set_op: None,
         distinct: false,
+        distinct_on: None,
         from: "users_join1".into(),
         from_alias: None,
         columns: vec![Column::All],
@@ -1012,6 +1056,7 @@ fn test_where_exists_with_join() {
         order_by: None,
         limit: None,
         offset: None,
+        fetch: None,
     });
 
     let output = execute(stmt).unwrap();

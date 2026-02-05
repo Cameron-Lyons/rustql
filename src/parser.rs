@@ -118,16 +118,34 @@ impl Parser {
     fn parse_select_inner(&mut self, ctes: Vec<Cte>) -> Result<SelectStatement, RustqlError> {
         self.consume(Token::Select)?;
 
-        let distinct = if *self.current_token() == Token::Distinct {
+        let (distinct, distinct_on) = if *self.current_token() == Token::Distinct {
             self.advance();
-            true
+            if *self.current_token() == Token::On {
+                self.advance();
+                self.consume(Token::LeftParen)?;
+                let mut exprs = Vec::new();
+                loop {
+                    exprs.push(self.parse_expression()?);
+                    if *self.current_token() == Token::Comma {
+                        self.advance();
+                    } else {
+                        break;
+                    }
+                }
+                self.consume(Token::RightParen)?;
+                (true, Some(exprs))
+            } else {
+                (true, None)
+            }
         } else {
-            false
+            (false, None)
         };
 
         let columns = self.parse_columns()?;
 
-        let (table, from_subquery, from_alias) = if *self.current_token() == Token::From {
+        let (table, from_subquery, from_alias, from_function) = if *self.current_token()
+            == Token::From
+        {
             self.advance();
             if *self.current_token() == Token::LeftParen
                 && self.current + 1 < self.tokens.len()
@@ -147,7 +165,39 @@ impl Parser {
                         ));
                     }
                 };
-                (alias.clone(), Some((Box::new(subquery), alias)), None)
+                (alias.clone(), Some((Box::new(subquery), alias)), None, None)
+            } else if *self.current_token() == Token::GenerateSeries {
+                self.advance();
+                self.consume(Token::LeftParen)?;
+                let mut args = Vec::new();
+                loop {
+                    args.push(self.parse_expression()?);
+                    if *self.current_token() == Token::Comma {
+                        self.advance();
+                    } else {
+                        break;
+                    }
+                }
+                self.consume(Token::RightParen)?;
+                let alias = if self.is_alias_token() {
+                    if *self.current_token() == Token::As {
+                        self.advance();
+                    }
+                    match self.advance() {
+                        Token::Identifier(a) => Some(a),
+                        _ => {
+                            return Err(RustqlError::ParseError("Expected alias name".to_string()));
+                        }
+                    }
+                } else {
+                    None
+                };
+                let tf = TableFunction {
+                    name: "generate_series".to_string(),
+                    args,
+                    alias: alias.clone(),
+                };
+                (alias.unwrap_or_default(), None, None, Some(tf))
             } else {
                 let name = match self.advance() {
                     Token::Identifier(name) => name,
@@ -166,10 +216,10 @@ impl Parser {
                 } else {
                     None
                 };
-                (name, None, alias)
+                (name, None, alias, None)
             }
         } else {
-            ("".to_string(), None, None)
+            ("".to_string(), None, None, None)
         };
 
         let mut joins = Vec::new();
@@ -201,16 +251,45 @@ impl Parser {
             if let Some(join_type) = join_type {
                 self.consume(Token::Join)?;
 
-                let join_table = match self.advance() {
-                    Token::Identifier(name) => name,
-                    _ => {
-                        return Err(RustqlError::ParseError(
-                            "Expected table name after JOIN".to_string(),
-                        ));
-                    }
+                let lateral = if *self.current_token() == Token::Lateral {
+                    self.advance();
+                    true
+                } else {
+                    false
                 };
 
-                let join_alias = if self.is_alias_token() {
+                let (join_table, join_subquery) = if *self.current_token() == Token::LeftParen
+                    && self.current + 1 < self.tokens.len()
+                    && self.tokens[self.current + 1] == Token::Select
+                {
+                    self.advance();
+                    let subquery = self.parse_select_inner(Vec::new())?;
+                    self.consume(Token::RightParen)?;
+                    if *self.current_token() == Token::As {
+                        self.advance();
+                    }
+                    let alias = match self.advance() {
+                        Token::Identifier(name) => name,
+                        _ => {
+                            return Err(RustqlError::ParseError(
+                                "Expected alias for subquery in JOIN".to_string(),
+                            ));
+                        }
+                    };
+                    (alias.clone(), Some((Box::new(subquery), alias)))
+                } else {
+                    let name = match self.advance() {
+                        Token::Identifier(name) => name,
+                        _ => {
+                            return Err(RustqlError::ParseError(
+                                "Expected table name after JOIN".to_string(),
+                            ));
+                        }
+                    };
+                    (name, None)
+                };
+
+                let join_alias = if join_subquery.is_none() && self.is_alias_token() {
                     if *self.current_token() == Token::As {
                         self.advance();
                     }
@@ -224,23 +303,55 @@ impl Parser {
                     None
                 };
 
-                let on_expr = if matches!(join_type, JoinType::Cross | JoinType::Natural) {
-                    if *self.current_token() == Token::On {
+                let (on_expr, using_cols) =
+                    if matches!(join_type, JoinType::Cross | JoinType::Natural) {
+                        if *self.current_token() == Token::On {
+                            self.advance();
+                            (Some(self.parse_expression()?), None)
+                        } else {
+                            (None, None)
+                        }
+                    } else if lateral && join_subquery.is_some() {
+                        if *self.current_token() == Token::On {
+                            self.advance();
+                            (Some(self.parse_expression()?), None)
+                        } else {
+                            (None, None)
+                        }
+                    } else if *self.current_token() == Token::Using {
                         self.advance();
-                        Some(self.parse_expression()?)
+                        self.consume(Token::LeftParen)?;
+                        let mut cols = Vec::new();
+                        loop {
+                            match self.advance() {
+                                Token::Identifier(name) => cols.push(name),
+                                _ => {
+                                    return Err(RustqlError::ParseError(
+                                        "Expected column name in USING clause".to_string(),
+                                    ));
+                                }
+                            }
+                            if *self.current_token() == Token::Comma {
+                                self.advance();
+                            } else {
+                                break;
+                            }
+                        }
+                        self.consume(Token::RightParen)?;
+                        (None, Some(cols))
                     } else {
-                        None
-                    }
-                } else {
-                    self.consume(Token::On)?;
-                    Some(self.parse_expression()?)
-                };
+                        self.consume(Token::On)?;
+                        (Some(self.parse_expression()?), None)
+                    };
 
                 joins.push(Join {
                     join_type,
                     table: join_table,
                     table_alias: join_alias,
                     on: on_expr,
+                    using_columns: using_cols,
+                    lateral,
+                    subquery: join_subquery,
                 });
             } else {
                 break;
@@ -305,6 +416,37 @@ impl Parser {
             None
         };
 
+        let fetch = if *self.current_token() == Token::Fetch {
+            self.advance();
+            if *self.current_token() == Token::First || *self.current_token() == Token::Next {
+                self.advance();
+            }
+            let count = match self.advance() {
+                Token::Number(n) => n as usize,
+                _ => {
+                    return Err(RustqlError::ParseError(
+                        "Expected number after FETCH FIRST/NEXT".to_string(),
+                    ));
+                }
+            };
+            if *self.current_token() == Token::Row || *self.current_token() == Token::Rows {
+                self.advance();
+            }
+            let with_ties = if *self.current_token() == Token::With {
+                self.advance();
+                self.consume(Token::Ties)?;
+                true
+            } else {
+                if *self.current_token() == Token::Only {
+                    self.advance();
+                }
+                false
+            };
+            Some(FetchClause { count, with_ties })
+        } else {
+            None
+        };
+
         let set_op = if matches!(
             self.current_token(),
             Token::Union | Token::Intersect | Token::Except
@@ -347,10 +489,12 @@ impl Parser {
         Ok(SelectStatement {
             ctes,
             distinct,
+            distinct_on,
             columns,
             from: table,
             from_alias,
             from_subquery,
+            from_function,
             joins,
             where_clause,
             group_by,
@@ -358,6 +502,7 @@ impl Parser {
             order_by,
             limit,
             offset,
+            fetch,
             set_op,
         })
     }
@@ -535,7 +680,24 @@ impl Parser {
                     | Token::Exp
                     | Token::Sign
                     | Token::DateTrunc
-                    | Token::Extract => {
+                    | Token::Extract
+                    | Token::Ltrim
+                    | Token::Rtrim
+                    | Token::Ascii
+                    | Token::Chr
+                    | Token::Sin
+                    | Token::Cos
+                    | Token::Tan
+                    | Token::Asin
+                    | Token::Acos
+                    | Token::Atan
+                    | Token::Atan2
+                    | Token::Random
+                    | Token::Degrees
+                    | Token::Radians
+                    | Token::Quarter
+                    | Token::Week
+                    | Token::DayOfWeek => {
                         let expr = self.parse_scalar_function()?;
                         let alias = if *self.current_token() == Token::As {
                             self.advance();
@@ -907,15 +1069,15 @@ impl Parser {
     }
 
     fn parse_arithmetic_primary(&mut self) -> Result<Expression, RustqlError> {
-        match self.current_token() {
+        let expr = match self.current_token() {
             Token::LeftParen => {
                 self.advance();
                 let expr = self.parse_arithmetic_expression()?;
                 self.consume(Token::RightParen)?;
-                Ok(expr)
+                expr
             }
-            Token::Case => self.parse_case_expression(),
-            Token::Cast => self.parse_cast_expression(),
+            Token::Case => self.parse_case_expression()?,
+            Token::Cast => self.parse_cast_expression()?,
             Token::Upper
             | Token::Lower
             | Token::Length
@@ -939,32 +1101,77 @@ impl Parser {
             | Token::Day
             | Token::DateAdd
             | Token::Datediff
-            | Token::ConcatFn => self.parse_scalar_function(),
+            | Token::ConcatFn
+            | Token::Ltrim
+            | Token::Rtrim
+            | Token::Ascii
+            | Token::Chr
+            | Token::Sin
+            | Token::Cos
+            | Token::Tan
+            | Token::Asin
+            | Token::Acos
+            | Token::Atan
+            | Token::Atan2
+            | Token::Random
+            | Token::Degrees
+            | Token::Radians
+            | Token::Quarter
+            | Token::Week
+            | Token::DayOfWeek => self.parse_scalar_function()?,
             Token::Identifier(name) => {
                 let name = name.clone();
                 self.advance();
-                Ok(Expression::Column(name))
+                Expression::Column(name)
             }
             Token::Number(n) => {
                 let n = *n;
                 self.advance();
-                Ok(Expression::Value(Value::Integer(n)))
+                Expression::Value(Value::Integer(n))
             }
             Token::Float(n) => {
                 let n = *n;
                 self.advance();
-                Ok(Expression::Value(Value::Float(n)))
+                Expression::Value(Value::Float(n))
             }
             Token::StringLiteral(s) => {
                 let s = s.clone();
                 self.advance();
-                Ok(Expression::Value(Value::Text(s)))
+                Expression::Value(Value::Text(s))
             }
-            _ => Err(RustqlError::ParseError(format!(
-                "Unexpected token in expression: {:?}",
-                self.current_token()
-            ))),
+            Token::GenerateSeries
+            | Token::Filter
+            | Token::Lateral
+            | Token::Grouping
+            | Token::Sets
+            | Token::Cube
+            | Token::Rollup
+            | Token::Fetch
+            | Token::First
+            | Token::Next
+            | Token::Only
+            | Token::Ties
+            | Token::Row => {
+                let name = token_to_string(self.current_token()).to_lowercase();
+                self.advance();
+                Expression::Column(name)
+            }
+            _ => {
+                return Err(RustqlError::ParseError(format!(
+                    "Unexpected token in expression: {:?}",
+                    self.current_token()
+                )));
+            }
+        };
+        if *self.current_token() == Token::DoubleColon {
+            self.advance();
+            let data_type = self.parse_data_type()?;
+            return Ok(Expression::Cast {
+                expr: Box::new(expr),
+                data_type,
+            });
         }
+        Ok(expr)
     }
 
     fn parse_case_expression(&mut self) -> Result<Expression, RustqlError> {
@@ -1048,6 +1255,23 @@ impl Parser {
             Token::Sign => ScalarFunctionType::Sign,
             Token::DateTrunc => ScalarFunctionType::DateTrunc,
             Token::Extract => ScalarFunctionType::Extract,
+            Token::Ltrim => ScalarFunctionType::Ltrim,
+            Token::Rtrim => ScalarFunctionType::Rtrim,
+            Token::Ascii => ScalarFunctionType::Ascii,
+            Token::Chr => ScalarFunctionType::Chr,
+            Token::Sin => ScalarFunctionType::Sin,
+            Token::Cos => ScalarFunctionType::Cos,
+            Token::Tan => ScalarFunctionType::Tan,
+            Token::Asin => ScalarFunctionType::Asin,
+            Token::Acos => ScalarFunctionType::Acos,
+            Token::Atan => ScalarFunctionType::Atan,
+            Token::Atan2 => ScalarFunctionType::Atan2,
+            Token::Random => ScalarFunctionType::Random,
+            Token::Degrees => ScalarFunctionType::Degrees,
+            Token::Radians => ScalarFunctionType::Radians,
+            Token::Quarter => ScalarFunctionType::Quarter,
+            Token::Week => ScalarFunctionType::Week,
+            Token::DayOfWeek => ScalarFunctionType::DayOfWeek,
             _ => {
                 return Err(RustqlError::ParseError(
                     "Expected scalar function name".to_string(),
@@ -1074,9 +1298,21 @@ impl Parser {
                     self.advance();
                     "DAY".to_string()
                 }
+                Token::Quarter => {
+                    self.advance();
+                    "QUARTER".to_string()
+                }
+                Token::Week => {
+                    self.advance();
+                    "WEEK".to_string()
+                }
+                Token::DayOfWeek => {
+                    self.advance();
+                    "DOW".to_string()
+                }
                 _ => {
                     return Err(RustqlError::ParseError(
-                        "Expected date part (YEAR, MONTH, DAY, HOUR, MINUTE, SECOND) after EXTRACT("
+                        "Expected date part (YEAR, MONTH, DAY, HOUR, MINUTE, SECOND, QUARTER, WEEK, DOW) after EXTRACT("
                             .to_string(),
                     ));
                 }
@@ -1200,6 +1436,7 @@ impl Parser {
                             alias,
                             separator: None,
                             percentile,
+                            filter: None,
                         }));
                     } else {
                         return Err(RustqlError::ParseError(
@@ -1250,6 +1487,17 @@ impl Parser {
 
         self.consume(Token::RightParen)?;
 
+        let filter = if *self.current_token() == Token::Filter {
+            self.advance();
+            self.consume(Token::LeftParen)?;
+            self.consume(Token::Where)?;
+            let filter_expr = self.parse_expression()?;
+            self.consume(Token::RightParen)?;
+            Some(Box::new(filter_expr))
+        } else {
+            None
+        };
+
         if *self.current_token() == Token::Over {
             let agg_type = func_type;
             let (partition_by, order_by, frame) = self.parse_over_clause()?;
@@ -1299,23 +1547,83 @@ impl Parser {
             alias,
             separator,
             percentile,
+            filter,
         }))
     }
 
-    fn parse_group_by(&mut self) -> Result<Vec<Expression>, RustqlError> {
-        let mut exprs = Vec::new();
+    fn parse_group_by(&mut self) -> Result<GroupByClause, RustqlError> {
+        if *self.current_token() == Token::Rollup {
+            self.advance();
+            self.consume(Token::LeftParen)?;
+            let mut exprs = Vec::new();
+            loop {
+                exprs.push(self.parse_expression()?);
+                if *self.current_token() == Token::Comma {
+                    self.advance();
+                } else {
+                    break;
+                }
+            }
+            self.consume(Token::RightParen)?;
+            return Ok(GroupByClause::Rollup(exprs));
+        }
 
+        if *self.current_token() == Token::Cube {
+            self.advance();
+            self.consume(Token::LeftParen)?;
+            let mut exprs = Vec::new();
+            loop {
+                exprs.push(self.parse_expression()?);
+                if *self.current_token() == Token::Comma {
+                    self.advance();
+                } else {
+                    break;
+                }
+            }
+            self.consume(Token::RightParen)?;
+            return Ok(GroupByClause::Cube(exprs));
+        }
+
+        if *self.current_token() == Token::Grouping {
+            self.advance();
+            self.consume(Token::Sets)?;
+            self.consume(Token::LeftParen)?;
+            let mut sets = Vec::new();
+            loop {
+                self.consume(Token::LeftParen)?;
+                let mut exprs = Vec::new();
+                if *self.current_token() != Token::RightParen {
+                    loop {
+                        exprs.push(self.parse_expression()?);
+                        if *self.current_token() == Token::Comma {
+                            self.advance();
+                        } else {
+                            break;
+                        }
+                    }
+                }
+                self.consume(Token::RightParen)?;
+                sets.push(exprs);
+                if *self.current_token() == Token::Comma {
+                    self.advance();
+                } else {
+                    break;
+                }
+            }
+            self.consume(Token::RightParen)?;
+            return Ok(GroupByClause::GroupingSets(sets));
+        }
+
+        let mut exprs = Vec::new();
         loop {
             exprs.push(self.parse_expression()?);
-
             if *self.current_token() == Token::Comma {
                 self.advance();
             } else {
                 break;
             }
         }
-
-        Ok(exprs)
+        Ok(GroupByClause::Simple(exprs))
     }
 
     fn is_alias_token(&self) -> bool {
@@ -1346,6 +1654,7 @@ impl Parser {
                     | Token::From
                     | Token::Using
                     | Token::Returning
+                    | Token::Fetch
             )
         } else {
             false
@@ -1577,6 +1886,9 @@ impl Parser {
                         table: join_table,
                         table_alias: None,
                         on: Some(on_expr),
+                        using_columns: None,
+                        lateral: false,
+                        subquery: None,
                     });
                 } else {
                     break;
@@ -1708,6 +2020,9 @@ impl Parser {
                         table: join_table,
                         table_alias: None,
                         on: Some(on_expr),
+                        using_columns: None,
+                        lateral: false,
+                        subquery: None,
                     });
                 } else {
                     break;
@@ -2561,6 +2876,35 @@ impl Parser {
         Ok(expr)
     }
 
+    fn try_parse_any_all(
+        &mut self,
+        left: Expression,
+        op: BinaryOperator,
+    ) -> Result<Option<Expression>, RustqlError> {
+        if *self.current_token() == Token::Any || *self.current_token() == Token::All {
+            let is_any = *self.current_token() == Token::Any;
+            self.advance();
+            self.consume(Token::LeftParen)?;
+            let subquery = self.parse_select_inner(Vec::new())?;
+            self.consume(Token::RightParen)?;
+            if is_any {
+                Ok(Some(Expression::Any {
+                    left: Box::new(left),
+                    op,
+                    subquery: Box::new(subquery),
+                }))
+            } else {
+                Ok(Some(Expression::All {
+                    left: Box::new(left),
+                    op,
+                    subquery: Box::new(subquery),
+                }))
+            }
+        } else {
+            Ok(None)
+        }
+    }
+
     fn parse_comparison(&mut self) -> Result<Expression, RustqlError> {
         let mut expr = self.parse_term()?;
 
@@ -2568,57 +2912,93 @@ impl Parser {
             match self.current_token() {
                 Token::Equal => {
                     self.advance();
-                    let right = self.parse_term()?;
-                    expr = Expression::BinaryOp {
-                        left: Box::new(expr),
-                        op: BinaryOperator::Equal,
-                        right: Box::new(right),
-                    };
+                    if let Some(any_all) =
+                        self.try_parse_any_all(expr.clone(), BinaryOperator::Equal)?
+                    {
+                        expr = any_all;
+                    } else {
+                        let right = self.parse_term()?;
+                        expr = Expression::BinaryOp {
+                            left: Box::new(expr),
+                            op: BinaryOperator::Equal,
+                            right: Box::new(right),
+                        };
+                    }
                 }
                 Token::NotEqual => {
                     self.advance();
-                    let right = self.parse_term()?;
-                    expr = Expression::BinaryOp {
-                        left: Box::new(expr),
-                        op: BinaryOperator::NotEqual,
-                        right: Box::new(right),
-                    };
+                    if let Some(any_all) =
+                        self.try_parse_any_all(expr.clone(), BinaryOperator::NotEqual)?
+                    {
+                        expr = any_all;
+                    } else {
+                        let right = self.parse_term()?;
+                        expr = Expression::BinaryOp {
+                            left: Box::new(expr),
+                            op: BinaryOperator::NotEqual,
+                            right: Box::new(right),
+                        };
+                    }
                 }
                 Token::LessThan => {
                     self.advance();
-                    let right = self.parse_term()?;
-                    expr = Expression::BinaryOp {
-                        left: Box::new(expr),
-                        op: BinaryOperator::LessThan,
-                        right: Box::new(right),
-                    };
+                    if let Some(any_all) =
+                        self.try_parse_any_all(expr.clone(), BinaryOperator::LessThan)?
+                    {
+                        expr = any_all;
+                    } else {
+                        let right = self.parse_term()?;
+                        expr = Expression::BinaryOp {
+                            left: Box::new(expr),
+                            op: BinaryOperator::LessThan,
+                            right: Box::new(right),
+                        };
+                    }
                 }
                 Token::LessThanOrEqual => {
                     self.advance();
-                    let right = self.parse_term()?;
-                    expr = Expression::BinaryOp {
-                        left: Box::new(expr),
-                        op: BinaryOperator::LessThanOrEqual,
-                        right: Box::new(right),
-                    };
+                    if let Some(any_all) =
+                        self.try_parse_any_all(expr.clone(), BinaryOperator::LessThanOrEqual)?
+                    {
+                        expr = any_all;
+                    } else {
+                        let right = self.parse_term()?;
+                        expr = Expression::BinaryOp {
+                            left: Box::new(expr),
+                            op: BinaryOperator::LessThanOrEqual,
+                            right: Box::new(right),
+                        };
+                    }
                 }
                 Token::GreaterThan => {
                     self.advance();
-                    let right = self.parse_term()?;
-                    expr = Expression::BinaryOp {
-                        left: Box::new(expr),
-                        op: BinaryOperator::GreaterThan,
-                        right: Box::new(right),
-                    };
+                    if let Some(any_all) =
+                        self.try_parse_any_all(expr.clone(), BinaryOperator::GreaterThan)?
+                    {
+                        expr = any_all;
+                    } else {
+                        let right = self.parse_term()?;
+                        expr = Expression::BinaryOp {
+                            left: Box::new(expr),
+                            op: BinaryOperator::GreaterThan,
+                            right: Box::new(right),
+                        };
+                    }
                 }
                 Token::GreaterThanOrEqual => {
                     self.advance();
-                    let right = self.parse_term()?;
-                    expr = Expression::BinaryOp {
-                        left: Box::new(expr),
-                        op: BinaryOperator::GreaterThanOrEqual,
-                        right: Box::new(right),
-                    };
+                    if let Some(any_all) =
+                        self.try_parse_any_all(expr.clone(), BinaryOperator::GreaterThanOrEqual)?
+                    {
+                        expr = any_all;
+                    } else {
+                        let right = self.parse_term()?;
+                        expr = Expression::BinaryOp {
+                            left: Box::new(expr),
+                            op: BinaryOperator::GreaterThanOrEqual,
+                            right: Box::new(right),
+                        };
+                    }
                 }
                 Token::Like => {
                     self.advance();
@@ -2692,11 +3072,22 @@ impl Parser {
                     } else {
                         false
                     };
-                    self.consume(Token::Null)?;
-                    expr = Expression::IsNull {
-                        expr: Box::new(expr),
-                        not,
-                    };
+                    if *self.current_token() == Token::Distinct {
+                        self.advance();
+                        self.consume(Token::From)?;
+                        let right = self.parse_term()?;
+                        expr = Expression::IsDistinctFrom {
+                            left: Box::new(expr),
+                            right: Box::new(right),
+                            not,
+                        };
+                    } else {
+                        self.consume(Token::Null)?;
+                        expr = Expression::IsNull {
+                            expr: Box::new(expr),
+                            not,
+                        };
+                    }
                 }
                 _ => break,
             }
@@ -2771,6 +3162,19 @@ impl Parser {
     }
 
     fn parse_primary(&mut self) -> Result<Expression, RustqlError> {
+        let expr = self.parse_primary_inner()?;
+        if *self.current_token() == Token::DoubleColon {
+            self.advance();
+            let data_type = self.parse_data_type()?;
+            return Ok(Expression::Cast {
+                expr: Box::new(expr),
+                data_type,
+            });
+        }
+        Ok(expr)
+    }
+
+    fn parse_primary_inner(&mut self) -> Result<Expression, RustqlError> {
         match self.current_token().clone() {
             Token::Exists => {
                 self.advance();
@@ -2816,7 +3220,24 @@ impl Parser {
             | Token::Exp
             | Token::Sign
             | Token::DateTrunc
-            | Token::Extract => self.parse_scalar_function(),
+            | Token::Extract
+            | Token::Ltrim
+            | Token::Rtrim
+            | Token::Ascii
+            | Token::Chr
+            | Token::Sin
+            | Token::Cos
+            | Token::Tan
+            | Token::Asin
+            | Token::Acos
+            | Token::Atan
+            | Token::Atan2
+            | Token::Random
+            | Token::Degrees
+            | Token::Radians
+            | Token::Quarter
+            | Token::Week
+            | Token::DayOfWeek => self.parse_scalar_function(),
             Token::Left | Token::Right => {
                 if self.current + 1 < self.tokens.len()
                     && self.tokens[self.current + 1] == Token::LeftParen
@@ -2886,6 +3307,23 @@ impl Parser {
                     self.consume(Token::RightParen)?;
                     Ok(expr)
                 }
+            }
+            Token::GenerateSeries
+            | Token::Filter
+            | Token::Lateral
+            | Token::Grouping
+            | Token::Sets
+            | Token::Cube
+            | Token::Rollup
+            | Token::Fetch
+            | Token::First
+            | Token::Next
+            | Token::Only
+            | Token::Ties
+            | Token::Row => {
+                let name = token_to_string(self.current_token()).to_lowercase();
+                self.advance();
+                Ok(Expression::Column(name))
             }
             _ => Err(RustqlError::ParseError(format!(
                 "Unexpected token in expression: {:?}",
@@ -3103,6 +3541,38 @@ fn token_to_string(tok: &Token) -> String {
         Token::Sign => "SIGN".to_string(),
         Token::DateTrunc => "DATE_TRUNC".to_string(),
         Token::Extract => "EXTRACT".to_string(),
+        Token::Ltrim => "LTRIM".to_string(),
+        Token::Rtrim => "RTRIM".to_string(),
+        Token::Ascii => "ASCII".to_string(),
+        Token::Chr => "CHR".to_string(),
+        Token::Sin => "SIN".to_string(),
+        Token::Cos => "COS".to_string(),
+        Token::Tan => "TAN".to_string(),
+        Token::Asin => "ASIN".to_string(),
+        Token::Acos => "ACOS".to_string(),
+        Token::Atan => "ATAN".to_string(),
+        Token::Atan2 => "ATAN2".to_string(),
+        Token::Random => "RANDOM".to_string(),
+        Token::Degrees => "DEGREES".to_string(),
+        Token::Radians => "RADIANS".to_string(),
+        Token::Quarter => "QUARTER".to_string(),
+        Token::Week => "WEEK".to_string(),
+        Token::DayOfWeek => "DAYOFWEEK".to_string(),
+        Token::Any => "ANY".to_string(),
+        Token::Filter => "FILTER".to_string(),
+        Token::Lateral => "LATERAL".to_string(),
+        Token::Grouping => "GROUPING".to_string(),
+        Token::Sets => "SETS".to_string(),
+        Token::Cube => "CUBE".to_string(),
+        Token::Rollup => "ROLLUP".to_string(),
+        Token::Fetch => "FETCH".to_string(),
+        Token::First => "FIRST".to_string(),
+        Token::Next => "NEXT".to_string(),
+        Token::Only => "ONLY".to_string(),
+        Token::Ties => "TIES".to_string(),
+        Token::Row => "ROW".to_string(),
+        Token::DoubleColon => "::".to_string(),
+        Token::GenerateSeries => "GENERATE_SERIES".to_string(),
         _ => format!("{:?}", tok),
     }
 }
@@ -3297,6 +3767,38 @@ fn token_to_sql(tok: &Token) -> String {
         Token::Using => "USING".to_string(),
         Token::Returning => "RETURNING".to_string(),
         Token::Recursive => "RECURSIVE".to_string(),
+        Token::Ltrim => "LTRIM".to_string(),
+        Token::Rtrim => "RTRIM".to_string(),
+        Token::Ascii => "ASCII".to_string(),
+        Token::Chr => "CHR".to_string(),
+        Token::Sin => "SIN".to_string(),
+        Token::Cos => "COS".to_string(),
+        Token::Tan => "TAN".to_string(),
+        Token::Asin => "ASIN".to_string(),
+        Token::Acos => "ACOS".to_string(),
+        Token::Atan => "ATAN".to_string(),
+        Token::Atan2 => "ATAN2".to_string(),
+        Token::Random => "RANDOM".to_string(),
+        Token::Degrees => "DEGREES".to_string(),
+        Token::Radians => "RADIANS".to_string(),
+        Token::Quarter => "QUARTER".to_string(),
+        Token::Week => "WEEK".to_string(),
+        Token::DayOfWeek => "DAYOFWEEK".to_string(),
+        Token::Any => "ANY".to_string(),
+        Token::Filter => "FILTER".to_string(),
+        Token::Lateral => "LATERAL".to_string(),
+        Token::Grouping => "GROUPING".to_string(),
+        Token::Sets => "SETS".to_string(),
+        Token::Cube => "CUBE".to_string(),
+        Token::Rollup => "ROLLUP".to_string(),
+        Token::Fetch => "FETCH".to_string(),
+        Token::First => "FIRST".to_string(),
+        Token::Next => "NEXT".to_string(),
+        Token::Only => "ONLY".to_string(),
+        Token::Ties => "TIES".to_string(),
+        Token::Row => "ROW".to_string(),
+        Token::DoubleColon => "::".to_string(),
+        Token::GenerateSeries => "GENERATE_SERIES".to_string(),
         _ => format!("{:?}", tok),
     }
 }

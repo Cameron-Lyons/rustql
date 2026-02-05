@@ -64,8 +64,10 @@ fn test_select_all() {
         from_subquery: None,
         set_op: None,
         distinct: false,
+        distinct_on: None,
         from: "users".into(),
         from_alias: None,
+        from_function: None,
         columns: vec![Column::All],
         joins: vec![],
         where_clause: None,
@@ -74,6 +76,7 @@ fn test_select_all() {
         order_by: None,
         limit: None,
         offset: None,
+        fetch: None,
     });
 
     let output = execute(select).unwrap();
@@ -136,8 +139,10 @@ fn test_count_distinct_values() {
         from_subquery: None,
         set_op: None,
         distinct: false,
+        distinct_on: None,
         from: "cities".into(),
         from_alias: None,
+        from_function: None,
         columns: vec![Column::Function(AggregateFunction {
             function: AggregateFunctionType::Count,
             expr: Box::new(Expression::Column("city".into())),
@@ -145,6 +150,7 @@ fn test_count_distinct_values() {
             alias: Some("unique_cities".into()),
             separator: None,
             percentile: None,
+            filter: None,
         })],
         joins: vec![],
         where_clause: None,
@@ -153,6 +159,7 @@ fn test_count_distinct_values() {
         order_by: None,
         limit: None,
         offset: None,
+        fetch: None,
     });
 
     let output = execute(stmt).unwrap();
@@ -215,8 +222,10 @@ fn test_sum_distinct_values() {
         from_subquery: None,
         set_op: None,
         distinct: false,
+        distinct_on: None,
         from: "purchases".into(),
         from_alias: None,
+        from_function: None,
         columns: vec![Column::Function(AggregateFunction {
             function: AggregateFunctionType::Sum,
             expr: Box::new(Expression::Column("amount".into())),
@@ -224,6 +233,7 @@ fn test_sum_distinct_values() {
             alias: Some("distinct_sum".into()),
             separator: None,
             percentile: None,
+            filter: None,
         })],
         joins: vec![],
         where_clause: None,
@@ -232,6 +242,7 @@ fn test_sum_distinct_values() {
         order_by: None,
         limit: None,
         offset: None,
+        fetch: None,
     });
 
     let output = execute(stmt).unwrap();
@@ -295,8 +306,10 @@ fn test_min_distinct_values() {
         from_subquery: None,
         set_op: None,
         distinct: false,
+        distinct_on: None,
         from: "scores".into(),
         from_alias: None,
+        from_function: None,
         columns: vec![Column::Function(AggregateFunction {
             function: AggregateFunctionType::Min,
             expr: Box::new(Expression::Column("score".into())),
@@ -304,6 +317,7 @@ fn test_min_distinct_values() {
             alias: Some("min_distinct_score".into()),
             separator: None,
             percentile: None,
+            filter: None,
         })],
         joins: vec![],
         where_clause: None,
@@ -312,6 +326,7 @@ fn test_min_distinct_values() {
         order_by: None,
         limit: None,
         offset: None,
+        fetch: None,
     });
 
     let output = execute(stmt).unwrap();
@@ -376,8 +391,10 @@ fn test_max_distinct_values() {
         from_subquery: None,
         set_op: None,
         distinct: false,
+        distinct_on: None,
         from: "prices".into(),
         from_alias: None,
+        from_function: None,
         columns: vec![Column::Function(AggregateFunction {
             function: AggregateFunctionType::Max,
             expr: Box::new(Expression::Column("price".into())),
@@ -385,6 +402,7 @@ fn test_max_distinct_values() {
             alias: Some("max_distinct_price".into()),
             separator: None,
             percentile: None,
+            filter: None,
         })],
         joins: vec![],
         where_clause: None,
@@ -393,6 +411,7 @@ fn test_max_distinct_values() {
         order_by: None,
         limit: None,
         offset: None,
+        fetch: None,
     });
 
     let output = execute(stmt).unwrap();
@@ -457,8 +476,10 @@ fn test_avg_distinct_values() {
         from_subquery: None,
         set_op: None,
         distinct: false,
+        distinct_on: None,
         from: "grades".into(),
         from_alias: None,
+        from_function: None,
         columns: vec![Column::Function(AggregateFunction {
             function: AggregateFunctionType::Avg,
             expr: Box::new(Expression::Column("grade".into())),
@@ -466,6 +487,7 @@ fn test_avg_distinct_values() {
             alias: Some("avg_distinct_grade".into()),
             separator: None,
             percentile: None,
+            filter: None,
         })],
         joins: vec![],
         where_clause: None,
@@ -474,6 +496,7 @@ fn test_avg_distinct_values() {
         order_by: None,
         limit: None,
         offset: None,
+        fetch: None,
     });
 
     let output = execute(stmt).unwrap();

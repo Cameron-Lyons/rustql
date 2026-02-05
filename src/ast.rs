@@ -40,18 +40,59 @@ pub enum SetOperation {
 pub struct SelectStatement {
     pub ctes: Vec<Cte>,
     pub distinct: bool,
+    pub distinct_on: Option<Vec<Expression>>,
     pub columns: Vec<Column>,
     pub from: String,
     pub from_alias: Option<String>,
     pub from_subquery: Option<(Box<SelectStatement>, String)>,
+    pub from_function: Option<TableFunction>,
     pub joins: Vec<Join>,
     pub where_clause: Option<Expression>,
-    pub group_by: Option<Vec<Expression>>,
+    pub group_by: Option<GroupByClause>,
     pub having: Option<Expression>,
     pub order_by: Option<Vec<OrderByExpr>>,
     pub limit: Option<usize>,
     pub offset: Option<usize>,
+    pub fetch: Option<FetchClause>,
     pub set_op: Option<(SetOperation, Box<SelectStatement>)>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct FetchClause {
+    pub count: usize,
+    pub with_ties: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum GroupByClause {
+    Simple(Vec<Expression>),
+    GroupingSets(Vec<Vec<Expression>>),
+    Rollup(Vec<Expression>),
+    Cube(Vec<Expression>),
+}
+
+impl GroupByClause {
+    pub fn exprs(&self) -> &[Expression] {
+        match self {
+            GroupByClause::Simple(exprs) => exprs,
+            GroupByClause::Rollup(exprs) => exprs,
+            GroupByClause::Cube(exprs) => exprs,
+            GroupByClause::GroupingSets(sets) => {
+                if let Some(first) = sets.first() {
+                    first
+                } else {
+                    &[]
+                }
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TableFunction {
+    pub name: String,
+    pub args: Vec<Expression>,
+    pub alias: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -67,6 +108,9 @@ pub struct Join {
     pub table: String,
     pub table_alias: Option<String>,
     pub on: Option<Expression>,
+    pub using_columns: Option<Vec<String>>,
+    pub lateral: bool,
+    pub subquery: Option<(Box<SelectStatement>, String)>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -102,6 +146,7 @@ pub struct AggregateFunction {
     pub alias: Option<String>,
     pub separator: Option<String>,
     pub percentile: Option<f64>,
+    pub filter: Option<Box<Expression>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -300,6 +345,16 @@ pub enum Expression {
     },
     Subquery(Box<SelectStatement>),
     Exists(Box<SelectStatement>),
+    Any {
+        left: Box<Expression>,
+        op: BinaryOperator,
+        subquery: Box<SelectStatement>,
+    },
+    All {
+        left: Box<Expression>,
+        op: BinaryOperator,
+        subquery: Box<SelectStatement>,
+    },
     Column(String),
     Value(Value),
     Function(AggregateFunction),
@@ -322,6 +377,11 @@ pub enum Expression {
     Cast {
         expr: Box<Expression>,
         data_type: DataType,
+    },
+    IsDistinctFrom {
+        left: Box<Expression>,
+        right: Box<Expression>,
+        not: bool,
     },
 }
 
@@ -364,6 +424,23 @@ pub enum ScalarFunctionType {
     Sign,
     DateTrunc,
     Extract,
+    Ltrim,
+    Rtrim,
+    Ascii,
+    Chr,
+    Sin,
+    Cos,
+    Tan,
+    Asin,
+    Acos,
+    Atan,
+    Atan2,
+    Random,
+    Degrees,
+    Radians,
+    Quarter,
+    Week,
+    DayOfWeek,
 }
 
 #[derive(Debug, Clone, PartialEq)]

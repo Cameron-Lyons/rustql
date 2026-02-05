@@ -84,10 +84,39 @@ pub fn evaluate_expression(
                 db.ok_or_else(|| "EXISTS subquery not allowed in this context".to_string())?;
             super::select::eval_subquery_exists_with_outer(db_ref, subquery_stmt, columns, row)
         }
+        Expression::Any { left, op, subquery } => {
+            let left_val = evaluate_value_expression_with_db(left, columns, row, db)?;
+            let db_ref =
+                db.ok_or_else(|| "ANY subquery not allowed in this context".to_string())?;
+            let sub_vals = super::select::eval_subquery_values(db_ref, subquery)?;
+            Ok(sub_vals
+                .iter()
+                .any(|v| compare_values(&left_val, op, v).unwrap_or(false)))
+        }
+        Expression::All { left, op, subquery } => {
+            let left_val = evaluate_value_expression_with_db(left, columns, row, db)?;
+            let db_ref =
+                db.ok_or_else(|| "ALL subquery not allowed in this context".to_string())?;
+            let sub_vals = super::select::eval_subquery_values(db_ref, subquery)?;
+            Ok(sub_vals.is_empty()
+                || sub_vals
+                    .iter()
+                    .all(|v| compare_values(&left_val, op, v).unwrap_or(false)))
+        }
         Expression::IsNull { expr, not } => {
             let value = evaluate_value_expression(expr, columns, row)?;
             let is_null = matches!(value, Value::Null);
             Ok(if *not { !is_null } else { is_null })
+        }
+        Expression::IsDistinctFrom { left, right, not } => {
+            let left_val = evaluate_value_expression(left, columns, row)?;
+            let right_val = evaluate_value_expression(right, columns, row)?;
+            let is_distinct = match (&left_val, &right_val) {
+                (Value::Null, Value::Null) => false,
+                (Value::Null, _) | (_, Value::Null) => true,
+                _ => left_val != right_val,
+            };
+            Ok(if *not { !is_distinct } else { is_distinct })
         }
         Expression::UnaryOp { op, expr } => match op {
             UnaryOperator::Not => Ok(!evaluate_expression(db, expr, columns, row)?),
@@ -1026,12 +1055,214 @@ pub fn evaluate_value_expression_with_db(
                                 _ => unreachable!(),
                             }
                         }
+                        "quarter" => {
+                            let (_, m, _) = parse_date_components(&date_str).ok_or_else(|| {
+                                RustqlError::TypeMismatch("Invalid date format".to_string())
+                            })?;
+                            Ok(Value::Integer((m - 1) / 3 + 1))
+                        }
+                        "week" => {
+                            let (y, m, d) = parse_date_components(&date_str).ok_or_else(|| {
+                                RustqlError::TypeMismatch("Invalid date format".to_string())
+                            })?;
+                            let day_of_year = ymd_to_days(y, m, d) - ymd_to_days(y, 1, 1);
+                            Ok(Value::Integer(day_of_year / 7 + 1))
+                        }
+                        "dow" | "dayofweek" => {
+                            let (y, m, d) = parse_date_components(&date_str).ok_or_else(|| {
+                                RustqlError::TypeMismatch("Invalid date format".to_string())
+                            })?;
+                            let days = ymd_to_days(y, m, d);
+                            Ok(Value::Integer(((days % 7 + 7 + 4) % 7) + 1))
+                        }
                         _ => Err(RustqlError::TypeMismatch(format!(
                             "EXTRACT unsupported part: {}",
                             part
                         ))),
                     }
                 }
+                ScalarFunctionType::Ltrim => match evaluated_args.first() {
+                    Some(Value::Text(s)) => Ok(Value::Text(s.trim_start().to_string())),
+                    Some(Value::Null) => Ok(Value::Null),
+                    _ => Err(RustqlError::TypeMismatch(
+                        "LTRIM requires a text argument".to_string(),
+                    )),
+                },
+                ScalarFunctionType::Rtrim => match evaluated_args.first() {
+                    Some(Value::Text(s)) => Ok(Value::Text(s.trim_end().to_string())),
+                    Some(Value::Null) => Ok(Value::Null),
+                    _ => Err(RustqlError::TypeMismatch(
+                        "RTRIM requires a text argument".to_string(),
+                    )),
+                },
+                ScalarFunctionType::Ascii => match evaluated_args.first() {
+                    Some(Value::Text(s)) => {
+                        if s.is_empty() {
+                            Ok(Value::Null)
+                        } else {
+                            Ok(Value::Integer(s.chars().next().unwrap() as i64))
+                        }
+                    }
+                    Some(Value::Null) => Ok(Value::Null),
+                    _ => Err(RustqlError::TypeMismatch(
+                        "ASCII requires a text argument".to_string(),
+                    )),
+                },
+                ScalarFunctionType::Chr => match evaluated_args.first() {
+                    Some(Value::Integer(i)) => match char::from_u32(*i as u32) {
+                        Some(c) => Ok(Value::Text(c.to_string())),
+                        None => Ok(Value::Null),
+                    },
+                    Some(Value::Null) => Ok(Value::Null),
+                    _ => Err(RustqlError::TypeMismatch(
+                        "CHR requires an integer argument".to_string(),
+                    )),
+                },
+                ScalarFunctionType::Sin => match evaluated_args.first() {
+                    Some(Value::Float(f)) => Ok(Value::Float(f.sin())),
+                    Some(Value::Integer(i)) => Ok(Value::Float((*i as f64).sin())),
+                    Some(Value::Null) => Ok(Value::Null),
+                    _ => Err(RustqlError::TypeMismatch(
+                        "SIN requires a numeric argument".to_string(),
+                    )),
+                },
+                ScalarFunctionType::Cos => match evaluated_args.first() {
+                    Some(Value::Float(f)) => Ok(Value::Float(f.cos())),
+                    Some(Value::Integer(i)) => Ok(Value::Float((*i as f64).cos())),
+                    Some(Value::Null) => Ok(Value::Null),
+                    _ => Err(RustqlError::TypeMismatch(
+                        "COS requires a numeric argument".to_string(),
+                    )),
+                },
+                ScalarFunctionType::Tan => match evaluated_args.first() {
+                    Some(Value::Float(f)) => Ok(Value::Float(f.tan())),
+                    Some(Value::Integer(i)) => Ok(Value::Float((*i as f64).tan())),
+                    Some(Value::Null) => Ok(Value::Null),
+                    _ => Err(RustqlError::TypeMismatch(
+                        "TAN requires a numeric argument".to_string(),
+                    )),
+                },
+                ScalarFunctionType::Asin => match evaluated_args.first() {
+                    Some(Value::Float(f)) => Ok(Value::Float(f.asin())),
+                    Some(Value::Integer(i)) => Ok(Value::Float((*i as f64).asin())),
+                    Some(Value::Null) => Ok(Value::Null),
+                    _ => Err(RustqlError::TypeMismatch(
+                        "ASIN requires a numeric argument".to_string(),
+                    )),
+                },
+                ScalarFunctionType::Acos => match evaluated_args.first() {
+                    Some(Value::Float(f)) => Ok(Value::Float(f.acos())),
+                    Some(Value::Integer(i)) => Ok(Value::Float((*i as f64).acos())),
+                    Some(Value::Null) => Ok(Value::Null),
+                    _ => Err(RustqlError::TypeMismatch(
+                        "ACOS requires a numeric argument".to_string(),
+                    )),
+                },
+                ScalarFunctionType::Atan => match evaluated_args.first() {
+                    Some(Value::Float(f)) => Ok(Value::Float(f.atan())),
+                    Some(Value::Integer(i)) => Ok(Value::Float((*i as f64).atan())),
+                    Some(Value::Null) => Ok(Value::Null),
+                    _ => Err(RustqlError::TypeMismatch(
+                        "ATAN requires a numeric argument".to_string(),
+                    )),
+                },
+                ScalarFunctionType::Atan2 => {
+                    let y = match evaluated_args.first() {
+                        Some(Value::Float(f)) => *f,
+                        Some(Value::Integer(i)) => *i as f64,
+                        Some(Value::Null) => return Ok(Value::Null),
+                        _ => {
+                            return Err(RustqlError::TypeMismatch(
+                                "ATAN2 requires numeric arguments".to_string(),
+                            ));
+                        }
+                    };
+                    let x = match evaluated_args.get(1) {
+                        Some(Value::Float(f)) => *f,
+                        Some(Value::Integer(i)) => *i as f64,
+                        Some(Value::Null) => return Ok(Value::Null),
+                        _ => {
+                            return Err(RustqlError::TypeMismatch(
+                                "ATAN2 requires numeric arguments".to_string(),
+                            ));
+                        }
+                    };
+                    Ok(Value::Float(y.atan2(x)))
+                }
+                ScalarFunctionType::Random => {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default();
+                    let nanos = now.subsec_nanos() as u64;
+                    let secs = now.as_secs();
+                    let seed = secs.wrapping_mul(6364136223846793005).wrapping_add(nanos);
+                    let val = (seed as f64) / (u64::MAX as f64);
+                    Ok(Value::Float(val.abs()))
+                }
+                ScalarFunctionType::Degrees => match evaluated_args.first() {
+                    Some(Value::Float(f)) => Ok(Value::Float(f.to_degrees())),
+                    Some(Value::Integer(i)) => Ok(Value::Float((*i as f64).to_degrees())),
+                    Some(Value::Null) => Ok(Value::Null),
+                    _ => Err(RustqlError::TypeMismatch(
+                        "DEGREES requires a numeric argument".to_string(),
+                    )),
+                },
+                ScalarFunctionType::Radians => match evaluated_args.first() {
+                    Some(Value::Float(f)) => Ok(Value::Float(f.to_radians())),
+                    Some(Value::Integer(i)) => Ok(Value::Float((*i as f64).to_radians())),
+                    Some(Value::Null) => Ok(Value::Null),
+                    _ => Err(RustqlError::TypeMismatch(
+                        "RADIANS requires a numeric argument".to_string(),
+                    )),
+                },
+                ScalarFunctionType::Quarter => match evaluated_args.first() {
+                    Some(Value::Date(d)) | Some(Value::DateTime(d)) | Some(Value::Text(d)) => {
+                        match parse_date_components(d) {
+                            Some((_, m, _)) => Ok(Value::Integer((m - 1) / 3 + 1)),
+                            None => Err(RustqlError::TypeMismatch(
+                                "Cannot extract QUARTER from value".to_string(),
+                            )),
+                        }
+                    }
+                    Some(Value::Null) => Ok(Value::Null),
+                    _ => Err(RustqlError::TypeMismatch(
+                        "QUARTER requires a date argument".to_string(),
+                    )),
+                },
+                ScalarFunctionType::Week => match evaluated_args.first() {
+                    Some(Value::Date(d)) | Some(Value::DateTime(d)) | Some(Value::Text(d)) => {
+                        match parse_date_components(d) {
+                            Some((y, m, d_val)) => {
+                                let day_of_year = ymd_to_days(y, m, d_val) - ymd_to_days(y, 1, 1);
+                                Ok(Value::Integer(day_of_year / 7 + 1))
+                            }
+                            None => Err(RustqlError::TypeMismatch(
+                                "Cannot extract WEEK from value".to_string(),
+                            )),
+                        }
+                    }
+                    Some(Value::Null) => Ok(Value::Null),
+                    _ => Err(RustqlError::TypeMismatch(
+                        "WEEK requires a date argument".to_string(),
+                    )),
+                },
+                ScalarFunctionType::DayOfWeek => match evaluated_args.first() {
+                    Some(Value::Date(d)) | Some(Value::DateTime(d)) | Some(Value::Text(d)) => {
+                        match parse_date_components(d) {
+                            Some((y, m, d_val)) => {
+                                let days = ymd_to_days(y, m, d_val);
+                                Ok(Value::Integer(((days % 7 + 7 + 4) % 7) + 1))
+                            }
+                            None => Err(RustqlError::TypeMismatch(
+                                "Cannot extract DAYOFWEEK from value".to_string(),
+                            )),
+                        }
+                    }
+                    Some(Value::Null) => Ok(Value::Null),
+                    _ => Err(RustqlError::TypeMismatch(
+                        "DAYOFWEEK requires a date argument".to_string(),
+                    )),
+                },
             }
         }
         Expression::Cast { expr, data_type } => {
