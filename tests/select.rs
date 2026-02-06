@@ -27,6 +27,7 @@ fn test_select_all() {
                 foreign_key: None,
                 check: None,
                 auto_increment: false,
+                generated: None,
             },
             ColumnDefinition {
                 name: "name".into(),
@@ -38,6 +39,7 @@ fn test_select_all() {
                 foreign_key: None,
                 check: None,
                 auto_increment: false,
+                generated: None,
             },
         ],
         constraints: vec![],
@@ -77,6 +79,8 @@ fn test_select_all() {
         limit: None,
         offset: None,
         fetch: None,
+        window_definitions: Vec::new(),
+        from_values: None,
     });
 
     let output = execute(select).unwrap();
@@ -98,6 +102,7 @@ fn test_count_distinct_values() {
                 foreign_key: None,
                 check: None,
                 auto_increment: false,
+                generated: None,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
@@ -109,6 +114,7 @@ fn test_count_distinct_values() {
                 foreign_key: None,
                 check: None,
                 auto_increment: false,
+                generated: None,
                 name: "city".into(),
                 data_type: DataType::Text,
                 nullable: false,
@@ -160,6 +166,8 @@ fn test_count_distinct_values() {
         limit: None,
         offset: None,
         fetch: None,
+        window_definitions: Vec::new(),
+        from_values: None,
     });
 
     let output = execute(stmt).unwrap();
@@ -180,6 +188,7 @@ fn test_sum_distinct_values() {
                 foreign_key: None,
                 check: None,
                 auto_increment: false,
+                generated: None,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
@@ -191,6 +200,7 @@ fn test_sum_distinct_values() {
                 foreign_key: None,
                 check: None,
                 auto_increment: false,
+                generated: None,
                 name: "amount".into(),
                 data_type: DataType::Float,
                 nullable: true,
@@ -243,6 +253,8 @@ fn test_sum_distinct_values() {
         limit: None,
         offset: None,
         fetch: None,
+        window_definitions: Vec::new(),
+        from_values: None,
     });
 
     let output = execute(stmt).unwrap();
@@ -263,6 +275,7 @@ fn test_min_distinct_values() {
                 foreign_key: None,
                 check: None,
                 auto_increment: false,
+                generated: None,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
@@ -274,6 +287,7 @@ fn test_min_distinct_values() {
                 foreign_key: None,
                 check: None,
                 auto_increment: false,
+                generated: None,
                 name: "score".into(),
                 data_type: DataType::Integer,
                 nullable: true,
@@ -327,6 +341,8 @@ fn test_min_distinct_values() {
         limit: None,
         offset: None,
         fetch: None,
+        window_definitions: Vec::new(),
+        from_values: None,
     });
 
     let output = execute(stmt).unwrap();
@@ -348,6 +364,7 @@ fn test_max_distinct_values() {
                 foreign_key: None,
                 check: None,
                 auto_increment: false,
+                generated: None,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
@@ -359,6 +376,7 @@ fn test_max_distinct_values() {
                 foreign_key: None,
                 check: None,
                 auto_increment: false,
+                generated: None,
                 name: "price".into(),
                 data_type: DataType::Float,
                 nullable: true,
@@ -412,6 +430,8 @@ fn test_max_distinct_values() {
         limit: None,
         offset: None,
         fetch: None,
+        window_definitions: Vec::new(),
+        from_values: None,
     });
 
     let output = execute(stmt).unwrap();
@@ -433,6 +453,7 @@ fn test_avg_distinct_values() {
                 foreign_key: None,
                 check: None,
                 auto_increment: false,
+                generated: None,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
@@ -444,6 +465,7 @@ fn test_avg_distinct_values() {
                 foreign_key: None,
                 check: None,
                 auto_increment: false,
+                generated: None,
                 name: "grade".into(),
                 data_type: DataType::Float,
                 nullable: true,
@@ -497,6 +519,8 @@ fn test_avg_distinct_values() {
         limit: None,
         offset: None,
         fetch: None,
+        window_definitions: Vec::new(),
+        from_values: None,
     });
 
     let output = execute(stmt).unwrap();

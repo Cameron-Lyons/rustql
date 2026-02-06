@@ -66,6 +66,14 @@ pub fn execute(statement: Statement) -> Result<String, RustqlError> {
         Statement::TruncateTable { table_name } => ddl::execute_truncate_table(table_name),
         Statement::CreateView { name, query_sql } => ddl::execute_create_view(name, query_sql),
         Statement::DropView { name, if_exists } => ddl::execute_drop_view(name, if_exists),
+        Statement::Merge(stmt) => dml::execute_merge(stmt),
+        Statement::Do { statements } => {
+            let mut results = Vec::new();
+            for s in statements {
+                results.push(execute(s)?);
+            }
+            Ok(results.join("\n"))
+        }
     }
 }
 

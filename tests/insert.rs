@@ -18,6 +18,7 @@ fn test_insert() {
                 foreign_key: None,
                 check: None,
                 auto_increment: false,
+                generated: None,
             },
             ColumnDefinition {
                 primary_key: false,
@@ -29,6 +30,7 @@ fn test_insert() {
                 foreign_key: None,
                 check: None,
                 auto_increment: false,
+                generated: None,
             },
         ],
         constraints: vec![],
