@@ -108,8 +108,10 @@ fn test_scalar_subquery_basic() {
         from_subquery: None,
         set_op: None,
         distinct: false,
+        distinct_on: None,
         from: "users_scalar1".into(),
         from_alias: None,
+        from_function: None,
         columns: vec![
             Column::Named {
                 name: "name".into(),
@@ -120,12 +122,14 @@ fn test_scalar_subquery_basic() {
                 from_subquery: None,
                 set_op: None,
                 distinct: false,
+                distinct_on: None,
                 columns: vec![Column::Named {
                     name: "amount".into(),
                     alias: None,
                 }],
                 from: "orders_scalar1".into(),
                 from_alias: None,
+                from_function: None,
                 joins: vec![],
                 where_clause: Some(Expression::BinaryOp {
                     left: Box::new(Expression::Column("user_id".into())),
@@ -137,6 +141,7 @@ fn test_scalar_subquery_basic() {
                 order_by: None,
                 limit: None,
                 offset: None,
+                fetch: None,
             })),
         ],
         joins: vec![],
@@ -146,6 +151,7 @@ fn test_scalar_subquery_basic() {
         order_by: None,
         limit: None,
         offset: None,
+        fetch: None,
     });
 
     let output = execute(stmt).unwrap();
@@ -236,8 +242,10 @@ fn test_scalar_subquery_null() {
         from_subquery: None,
         set_op: None,
         distinct: false,
+        distinct_on: None,
         from: "users_scalar2".into(),
         from_alias: None,
+        from_function: None,
         columns: vec![
             Column::Named {
                 name: "name".into(),
@@ -248,12 +256,14 @@ fn test_scalar_subquery_null() {
                 from_subquery: None,
                 set_op: None,
                 distinct: false,
+                distinct_on: None,
                 columns: vec![Column::Named {
                     name: "amount".into(),
                     alias: None,
                 }],
                 from: "orders_scalar2".into(),
                 from_alias: None,
+                from_function: None,
                 joins: vec![],
                 where_clause: Some(Expression::BinaryOp {
                     left: Box::new(Expression::Column("user_id".into())),
@@ -265,6 +275,7 @@ fn test_scalar_subquery_null() {
                 order_by: None,
                 limit: Some(1),
                 offset: None,
+                fetch: None,
             })),
         ],
         joins: vec![],
@@ -274,6 +285,7 @@ fn test_scalar_subquery_null() {
         order_by: None,
         limit: None,
         offset: None,
+        fetch: None,
     });
 
     let output = execute(stmt).unwrap();
@@ -381,8 +393,10 @@ fn test_scalar_subquery_aggregate() {
         from_subquery: None,
         set_op: None,
         distinct: false,
+        distinct_on: None,
         from: "users_agg".into(),
         from_alias: None,
+        from_function: None,
         columns: vec![
             Column::Named {
                 name: "name".into(),
@@ -393,6 +407,7 @@ fn test_scalar_subquery_aggregate() {
                 from_subquery: None,
                 set_op: None,
                 distinct: false,
+                distinct_on: None,
                 columns: vec![Column::Function(AggregateFunction {
                     function: AggregateFunctionType::Count,
                     expr: Box::new(Expression::Column("*".into())),
@@ -400,9 +415,11 @@ fn test_scalar_subquery_aggregate() {
                     alias: None,
                     separator: None,
                     percentile: None,
+                    filter: None,
                 })],
                 from: "orders_agg".into(),
                 from_alias: None,
+                from_function: None,
                 joins: vec![],
                 where_clause: Some(Expression::BinaryOp {
                     left: Box::new(Expression::Column("user_id".into())),
@@ -414,6 +431,7 @@ fn test_scalar_subquery_aggregate() {
                 order_by: None,
                 limit: None,
                 offset: None,
+                fetch: None,
             })),
         ],
         joins: vec![],
@@ -423,6 +441,7 @@ fn test_scalar_subquery_aggregate() {
         order_by: None,
         limit: None,
         offset: None,
+        fetch: None,
     });
 
     let output = execute(stmt).unwrap();
@@ -528,8 +547,10 @@ fn test_scalar_subquery_aggregate_sum() {
         from_subquery: None,
         set_op: None,
         distinct: false,
+        distinct_on: None,
         from: "users_sum".into(),
         from_alias: None,
+        from_function: None,
         columns: vec![
             Column::Named {
                 name: "name".into(),
@@ -540,6 +561,7 @@ fn test_scalar_subquery_aggregate_sum() {
                 from_subquery: None,
                 set_op: None,
                 distinct: false,
+                distinct_on: None,
                 columns: vec![Column::Function(AggregateFunction {
                     function: AggregateFunctionType::Sum,
                     expr: Box::new(Expression::Column("amount".into())),
@@ -547,9 +569,11 @@ fn test_scalar_subquery_aggregate_sum() {
                     alias: None,
                     separator: None,
                     percentile: None,
+                    filter: None,
                 })],
                 from: "orders_sum".into(),
                 from_alias: None,
+                from_function: None,
                 joins: vec![],
                 where_clause: Some(Expression::BinaryOp {
                     left: Box::new(Expression::Column("user_id".into())),
@@ -561,6 +585,7 @@ fn test_scalar_subquery_aggregate_sum() {
                 order_by: None,
                 limit: None,
                 offset: None,
+                fetch: None,
             })),
         ],
         joins: vec![],
@@ -570,6 +595,7 @@ fn test_scalar_subquery_aggregate_sum() {
         order_by: None,
         limit: None,
         offset: None,
+        fetch: None,
     });
 
     let output = execute(stmt).unwrap();
@@ -726,8 +752,10 @@ fn test_scalar_subquery_nested() {
         from_subquery: None,
         set_op: None,
         distinct: false,
+        distinct_on: None,
         from: "users_nested".into(),
         from_alias: None,
+        from_function: None,
         columns: vec![
             Column::Named {
                 name: "name".into(),
@@ -738,17 +766,20 @@ fn test_scalar_subquery_nested() {
                 from_subquery: None,
                 set_op: None,
                 distinct: false,
+                distinct_on: None,
                 columns: vec![Column::Subquery(Box::new(SelectStatement {
                     ctes: Vec::new(),
                     from_subquery: None,
                     set_op: None,
                     distinct: false,
+                    distinct_on: None,
                     columns: vec![Column::Named {
                         name: "price".into(),
                         alias: None,
                     }],
                     from: "items_nested".into(),
                     from_alias: None,
+                    from_function: None,
                     joins: vec![],
                     where_clause: Some(Expression::BinaryOp {
                         left: Box::new(Expression::Column("order_id".into())),
@@ -760,9 +791,11 @@ fn test_scalar_subquery_nested() {
                     order_by: None,
                     limit: None,
                     offset: None,
+                    fetch: None,
                 }))],
                 from: "orders_nested".into(),
                 from_alias: None,
+                from_function: None,
                 joins: vec![],
                 where_clause: Some(Expression::BinaryOp {
                     left: Box::new(Expression::Column("user_id".into())),
@@ -774,6 +807,7 @@ fn test_scalar_subquery_nested() {
                 order_by: None,
                 limit: None,
                 offset: None,
+                fetch: None,
             })),
         ],
         joins: vec![],
@@ -783,6 +817,7 @@ fn test_scalar_subquery_nested() {
         order_by: None,
         limit: None,
         offset: None,
+        fetch: None,
     });
 
     let output = execute(stmt).unwrap();
@@ -901,8 +936,10 @@ fn test_scalar_subquery_with_join() {
         from_subquery: None,
         set_op: None,
         distinct: false,
+        distinct_on: None,
         from: "users_join".into(),
         from_alias: None,
+        from_function: None,
         columns: vec![
             Column::Named {
                 name: "name".into(),
@@ -913,12 +950,14 @@ fn test_scalar_subquery_with_join() {
                 from_subquery: None,
                 set_op: None,
                 distinct: false,
+                distinct_on: None,
                 columns: vec![Column::Named {
                     name: "amount".into(),
                     alias: None,
                 }],
                 from: "orders_join".into(),
                 from_alias: None,
+                from_function: None,
                 joins: vec![Join {
                     join_type: JoinType::Inner,
                     table: "users_join".into(),
@@ -928,6 +967,9 @@ fn test_scalar_subquery_with_join() {
                         op: BinaryOperator::Equal,
                         right: Box::new(Expression::Column("users_join.id".into())),
                     }),
+                    using_columns: None,
+                    lateral: false,
+                    subquery: None,
                 }],
                 where_clause: Some(Expression::BinaryOp {
                     left: Box::new(Expression::Column("orders_join.user_id".into())),
@@ -939,6 +981,7 @@ fn test_scalar_subquery_with_join() {
                 order_by: None,
                 limit: None,
                 offset: None,
+                fetch: None,
             })),
         ],
         joins: vec![],
@@ -948,6 +991,7 @@ fn test_scalar_subquery_with_join() {
         order_by: None,
         limit: None,
         offset: None,
+        fetch: None,
     });
 
     let output = execute(stmt).unwrap();
@@ -1114,8 +1158,10 @@ fn test_scalar_subquery_with_join_and_aggregate() {
         from_subquery: None,
         set_op: None,
         distinct: false,
+        distinct_on: None,
         from: "users_join_agg".into(),
         from_alias: None,
+        from_function: None,
         columns: vec![
             Column::Named {
                 name: "name".into(),
@@ -1126,6 +1172,7 @@ fn test_scalar_subquery_with_join_and_aggregate() {
                 from_subquery: None,
                 set_op: None,
                 distinct: false,
+                distinct_on: None,
                 columns: vec![Column::Function(AggregateFunction {
                     function: AggregateFunctionType::Sum,
                     expr: Box::new(Expression::Column("products_join_agg.price".into())),
@@ -1133,9 +1180,11 @@ fn test_scalar_subquery_with_join_and_aggregate() {
                     alias: None,
                     separator: None,
                     percentile: None,
+                    filter: None,
                 })],
                 from: "orders_join_agg".into(),
                 from_alias: None,
+                from_function: None,
                 joins: vec![Join {
                     join_type: JoinType::Inner,
                     table: "products_join_agg".into(),
@@ -1145,6 +1194,9 @@ fn test_scalar_subquery_with_join_and_aggregate() {
                         op: BinaryOperator::Equal,
                         right: Box::new(Expression::Column("products_join_agg.order_id".into())),
                     }),
+                    using_columns: None,
+                    lateral: false,
+                    subquery: None,
                 }],
                 where_clause: Some(Expression::BinaryOp {
                     left: Box::new(Expression::Column("orders_join_agg.user_id".into())),
@@ -1156,6 +1208,7 @@ fn test_scalar_subquery_with_join_and_aggregate() {
                 order_by: None,
                 limit: None,
                 offset: None,
+                fetch: None,
             })),
         ],
         joins: vec![],
@@ -1165,6 +1218,7 @@ fn test_scalar_subquery_with_join_and_aggregate() {
         order_by: None,
         limit: None,
         offset: None,
+        fetch: None,
     });
 
     let output = execute(stmt).unwrap();

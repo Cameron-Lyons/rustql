@@ -171,6 +171,38 @@ pub enum Token {
     Using,
     Returning,
     Recursive,
+    Ltrim,
+    Rtrim,
+    Ascii,
+    Chr,
+    Sin,
+    Cos,
+    Tan,
+    Asin,
+    Acos,
+    Atan,
+    Atan2,
+    Random,
+    Degrees,
+    Radians,
+    Quarter,
+    Week,
+    DayOfWeek,
+    Any,
+    Filter,
+    Lateral,
+    Grouping,
+    Sets,
+    Cube,
+    Rollup,
+    Fetch,
+    First,
+    Next,
+    Only,
+    Ties,
+    Row,
+    DoubleColon,
+    GenerateSeries,
 
     Identifier(String),
     Number(i64),
@@ -297,6 +329,17 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, RustqlError> {
                 } else {
                     return Err(RustqlError::ParseError(
                         "Unexpected character: !".to_string(),
+                    ));
+                }
+            }
+            ':' => {
+                chars.next();
+                if let Some(&':') = chars.peek() {
+                    tokens.push(Token::DoubleColon);
+                    chars.next();
+                } else {
+                    return Err(RustqlError::ParseError(
+                        "Unexpected character: :".to_string(),
                     ));
                 }
             }
@@ -605,6 +648,37 @@ fn match_keyword(ident: &str) -> Token {
         "USING" => Token::Using,
         "RETURNING" => Token::Returning,
         "RECURSIVE" => Token::Recursive,
+        "LTRIM" => Token::Ltrim,
+        "RTRIM" => Token::Rtrim,
+        "ASCII" => Token::Ascii,
+        "CHR" => Token::Chr,
+        "SIN" => Token::Sin,
+        "COS" => Token::Cos,
+        "TAN" => Token::Tan,
+        "ASIN" => Token::Asin,
+        "ACOS" => Token::Acos,
+        "ATAN" => Token::Atan,
+        "ATAN2" => Token::Atan2,
+        "RANDOM" | "RAND" => Token::Random,
+        "DEGREES" => Token::Degrees,
+        "RADIANS" => Token::Radians,
+        "QUARTER" => Token::Quarter,
+        "WEEK" | "WEEKOFYEAR" => Token::Week,
+        "DAYOFWEEK" | "WEEKDAY" => Token::DayOfWeek,
+        "ANY" | "SOME" => Token::Any,
+        "FILTER" => Token::Filter,
+        "LATERAL" => Token::Lateral,
+        "GROUPING" => Token::Grouping,
+        "SETS" => Token::Sets,
+        "CUBE" => Token::Cube,
+        "ROLLUP" => Token::Rollup,
+        "FETCH" => Token::Fetch,
+        "FIRST" => Token::First,
+        "NEXT" => Token::Next,
+        "ONLY" => Token::Only,
+        "TIES" => Token::Ties,
+        "ROW" => Token::Row,
+        "GENERATE_SERIES" => Token::GenerateSeries,
         _ => Token::Identifier(ident.to_string()),
     }
 }

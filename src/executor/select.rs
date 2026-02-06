@@ -24,6 +24,12 @@ pub fn execute_select(stmt: SelectStatement) -> Result<String, RustqlError> {
         return execute_select_with_ctes(stmt);
     }
 
+    if let Some(ref tf) = stmt.from_function {
+        if tf.name == "generate_series" {
+            return execute_generate_series(stmt.clone(), tf);
+        }
+    }
+
     if stmt.from.is_empty() {
         let result = execute_select_without_from(stmt)?;
         return Ok(format_select_result(&result));
@@ -47,10 +53,12 @@ pub fn execute_select(stmt: SelectStatement) -> Result<String, RustqlError> {
         let left_stmt = SelectStatement {
             ctes: Vec::new(),
             distinct: stmt.distinct,
+            distinct_on: stmt.distinct_on.clone(),
             columns: stmt.columns.clone(),
             from: stmt.from.clone(),
             from_alias: stmt.from_alias.clone(),
             from_subquery: stmt.from_subquery.clone(),
+            from_function: stmt.from_function.clone(),
             joins: stmt.joins.clone(),
             where_clause: stmt.where_clause.clone(),
             group_by: stmt.group_by.clone(),
@@ -58,6 +66,7 @@ pub fn execute_select(stmt: SelectStatement) -> Result<String, RustqlError> {
             order_by: stmt.order_by.clone(),
             limit: stmt.limit,
             offset: stmt.offset,
+            fetch: stmt.fetch.clone(),
             set_op: None,
         };
         return execute_set_operation(left_stmt, other_stmt.as_ref().clone(), set_op_type, &db);
@@ -261,8 +270,54 @@ pub fn execute_select(stmt: SelectStatement) -> Result<String, RustqlError> {
         });
     }
 
+    if let Some(ref distinct_on_exprs) = stmt.distinct_on {
+        let mut seen_keys: Vec<Vec<Value>> = Vec::new();
+        let mut deduped: Vec<(Vec<Value>, Vec<Value>)> = Vec::new();
+        for (projected, order_vals) in outputs {
+            let key: Vec<Value> = distinct_on_exprs
+                .iter()
+                .map(|expr| {
+                    if let Expression::Column(name) = expr {
+                        for (i, (header, _)) in column_specs.iter().enumerate() {
+                            if header == name {
+                                return projected[i].clone();
+                            }
+                        }
+                    }
+                    evaluate_value_expression(expr, &table.columns, &projected)
+                        .unwrap_or(Value::Null)
+                })
+                .collect();
+            if !seen_keys.iter().any(|k| k == &key) {
+                seen_keys.push(key);
+                deduped.push((projected, order_vals));
+            }
+        }
+        outputs = deduped;
+    }
+
     let offset = stmt.offset.unwrap_or(0);
-    let limit = stmt.limit.unwrap_or(outputs.len());
+    let base_limit = stmt.limit.unwrap_or(outputs.len());
+
+    let limit = if let Some(ref fetch) = stmt.fetch {
+        if fetch.with_ties && stmt.order_by.is_some() {
+            let target = offset + fetch.count;
+            if target < outputs.len() {
+                let last_included = &outputs[target - 1].1;
+                let mut extended = target;
+                while extended < outputs.len() && outputs[extended].1 == *last_included {
+                    extended += 1;
+                }
+                extended - offset
+            } else {
+                fetch.count
+            }
+        } else {
+            fetch.count
+        }
+    } else {
+        base_limit
+    };
 
     use std::collections::BTreeSet;
     let mut seen: BTreeSet<Vec<Value>> = BTreeSet::new();
@@ -488,6 +543,143 @@ fn execute_select_without_from(stmt: SelectStatement) -> Result<SelectResult, Ru
         headers,
         rows: vec![result_row],
     })
+}
+
+fn execute_generate_series(
+    stmt: SelectStatement,
+    tf: &TableFunction,
+) -> Result<String, RustqlError> {
+    let empty_columns: Vec<ColumnDefinition> = Vec::new();
+    let empty_row: Vec<Value> = Vec::new();
+
+    let start = match evaluate_value_expression(&tf.args[0], &empty_columns, &empty_row)? {
+        Value::Integer(n) => n,
+        _ => {
+            return Err(RustqlError::TypeMismatch(
+                "GENERATE_SERIES arguments must be integers".to_string(),
+            ));
+        }
+    };
+    let stop = match evaluate_value_expression(&tf.args[1], &empty_columns, &empty_row)? {
+        Value::Integer(n) => n,
+        _ => {
+            return Err(RustqlError::TypeMismatch(
+                "GENERATE_SERIES arguments must be integers".to_string(),
+            ));
+        }
+    };
+    let step = if tf.args.len() > 2 {
+        match evaluate_value_expression(&tf.args[2], &empty_columns, &empty_row)? {
+            Value::Integer(n) => n,
+            _ => {
+                return Err(RustqlError::TypeMismatch(
+                    "GENERATE_SERIES step must be an integer".to_string(),
+                ));
+            }
+        }
+    } else if start <= stop {
+        1
+    } else {
+        -1
+    };
+
+    if step == 0 {
+        return Err(RustqlError::Internal(
+            "GENERATE_SERIES step cannot be zero".to_string(),
+        ));
+    }
+
+    let col_name = tf
+        .alias
+        .clone()
+        .unwrap_or_else(|| "generate_series".to_string());
+
+    let series_col = ColumnDefinition {
+        name: col_name.clone(),
+        data_type: DataType::Integer,
+        nullable: false,
+        primary_key: false,
+        unique: false,
+        default_value: None,
+        foreign_key: None,
+        check: None,
+        auto_increment: false,
+    };
+
+    let mut series_rows: Vec<Vec<Value>> = Vec::new();
+    let mut current = start;
+    if step > 0 {
+        while current <= stop {
+            series_rows.push(vec![Value::Integer(current)]);
+            current += step;
+        }
+    } else {
+        while current >= stop {
+            series_rows.push(vec![Value::Integer(current)]);
+            current += step;
+        }
+    }
+
+    let all_columns = vec![series_col];
+
+    let mut filtered_rows: Vec<&Vec<Value>> = Vec::new();
+    for row in &series_rows {
+        let include = if let Some(ref where_expr) = stmt.where_clause {
+            evaluate_expression(None, where_expr, &all_columns, row)?
+        } else {
+            true
+        };
+        if include {
+            filtered_rows.push(row);
+        }
+    }
+
+    let headers: Vec<String> = stmt
+        .columns
+        .iter()
+        .map(|col| match col {
+            Column::All => col_name.clone(),
+            Column::Named { name, alias } => alias.clone().unwrap_or_else(|| name.clone()),
+            Column::Expression { alias, .. } => {
+                alias.clone().unwrap_or_else(|| "<expr>".to_string())
+            }
+            _ => "<col>".to_string(),
+        })
+        .collect();
+
+    let mut result = String::new();
+    for h in &headers {
+        result.push_str(&format!("{}\t", h));
+    }
+    result.push('\n');
+    result.push_str(&"-".repeat(40));
+    result.push('\n');
+
+    let offset = stmt.offset.unwrap_or(0);
+    let limit = stmt.limit.unwrap_or(filtered_rows.len());
+
+    for row in filtered_rows.iter().skip(offset).take(limit) {
+        for col in &stmt.columns {
+            let val = match col {
+                Column::All => row[0].clone(),
+                Column::Named { name, .. } => {
+                    let idx = all_columns
+                        .iter()
+                        .position(|c| c.name == *name)
+                        .unwrap_or(0);
+                    row.get(idx).cloned().unwrap_or(Value::Null)
+                }
+                Column::Expression { expr, .. } => {
+                    evaluate_value_expression(expr, &all_columns, row)?
+                }
+                _ => Value::Null,
+            };
+            result.push_str(&format!("{}\t", format_value(&val)));
+        }
+        result.push('\n');
+    }
+
+    Ok(result)
 }
 
 pub(crate) fn execute_select_internal(
@@ -839,11 +1031,12 @@ pub fn eval_subquery_values(
             Ok(values)
         }
         Column::Function(agg) => {
-            if let Some(group_by_exprs) = &subquery.group_by {
+            if let Some(group_by_clause) = &subquery.group_by {
+                let gb_exprs = group_by_clause.exprs();
                 let mut groups: std::collections::BTreeMap<Vec<Value>, Vec<&Vec<Value>>> =
                     std::collections::BTreeMap::new();
                 for row in &filtered_rows {
-                    let key: Vec<Value> = group_by_exprs
+                    let key: Vec<Value> = gb_exprs
                         .iter()
                         .map(|expr| {
                             evaluate_value_expression(expr, &table.columns, row)
@@ -876,11 +1069,12 @@ pub fn eval_subquery_values(
             }
         }
         Column::Named { name, .. } => {
-            if let Some(group_by_exprs) = &subquery.group_by {
+            if let Some(group_by_clause) = &subquery.group_by {
+                let gb_exprs = group_by_clause.exprs();
                 let mut groups: std::collections::BTreeMap<Vec<Value>, Vec<&Vec<Value>>> =
                     std::collections::BTreeMap::new();
                 for row in &filtered_rows {
-                    let key: Vec<Value> = group_by_exprs
+                    let key: Vec<Value> = gb_exprs
                         .iter()
                         .map(|expr| {
                             evaluate_value_expression(expr, &table.columns, row)
@@ -895,9 +1089,9 @@ pub fn eval_subquery_values(
                     .iter()
                     .position(|c| &c.name == name)
                     .ok_or_else(|| RustqlError::ColumnNotFound(name.clone()))?;
-                let is_in_group_by = group_by_exprs.iter().any(|expr| {
+                let is_in_group_by = gb_exprs.iter().any(|expr| {
                     matches!(expr, Expression::Column(col_name) if col_name == name
-                        || col_name.split('.').next_back() == Some(name))
+                        || col_name.split('.').next_back() == Some(name.as_str()))
                 });
                 if !is_in_group_by {
                     return Err(RustqlError::Internal(format!(

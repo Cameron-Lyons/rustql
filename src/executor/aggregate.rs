@@ -62,6 +62,42 @@ pub fn compute_aggregate_with_options(
     compute_aggregate_inner(func, expr, table, rows, distinct, separator, percentile)
 }
 
+pub fn compute_aggregate_filtered(
+    agg: &AggregateFunction,
+    table: &Table,
+    rows: &[&Vec<Value>],
+) -> Result<Value, RustqlError> {
+    if let Some(ref filter_expr) = agg.filter {
+        let filtered: Vec<&Vec<Value>> = rows
+            .iter()
+            .filter(|row| {
+                super::expr::evaluate_expression(None, filter_expr, &table.columns, row)
+                    .unwrap_or(false)
+            })
+            .copied()
+            .collect();
+        compute_aggregate_inner(
+            &agg.function,
+            &agg.expr,
+            table,
+            &filtered,
+            agg.distinct,
+            agg.separator.as_deref(),
+            agg.percentile,
+        )
+    } else {
+        compute_aggregate_inner(
+            &agg.function,
+            &agg.expr,
+            table,
+            rows,
+            agg.distinct,
+            agg.separator.as_deref(),
+            agg.percentile,
+        )
+    }
+}
+
 pub fn compute_aggregate(
     func: &AggregateFunctionType,
     expr: &Expression,
@@ -530,15 +566,7 @@ fn evaluate_having_value(
     rows: &[&Vec<Value>],
 ) -> Result<Value, RustqlError> {
     match expr {
-        Expression::Function(agg) => compute_aggregate_with_options(
-            &agg.function,
-            &agg.expr,
-            table,
-            rows,
-            agg.distinct,
-            agg.separator.as_deref(),
-            agg.percentile,
-        ),
+        Expression::Function(agg) => compute_aggregate_filtered(agg, table, rows),
         Expression::Value(val) => Ok(val.clone()),
         Expression::Column(name) => {
             if !rows.is_empty() {
@@ -597,15 +625,7 @@ pub fn execute_select_with_aggregates(
     for col in &stmt.columns {
         match col {
             Column::Function(agg) => {
-                let value = compute_aggregate_with_options(
-                    &agg.function,
-                    &agg.expr,
-                    table,
-                    &rows,
-                    agg.distinct,
-                    agg.separator.as_deref(),
-                    agg.percentile,
-                )?;
+                let value = compute_aggregate_filtered(agg, table, &rows)?;
                 result.push_str(&format!("{}\t", format_value(&value)));
             }
             _ => {
@@ -624,16 +644,46 @@ pub fn execute_select_with_grouping(
     table: &Table,
     rows: Vec<&Vec<Value>>,
 ) -> Result<String, RustqlError> {
-    let raw_group_by = stmt.group_by.as_ref().unwrap();
+    let raw_group_by = stmt.group_by.clone().unwrap();
+
+    match &raw_group_by {
+        GroupByClause::GroupingSets(sets) => {
+            return execute_multi_grouping_sets(stmt, table, rows, sets);
+        }
+        GroupByClause::Rollup(exprs) => {
+            let mut sets: Vec<Vec<Expression>> = Vec::new();
+            for i in (0..=exprs.len()).rev() {
+                sets.push(exprs[..i].to_vec());
+            }
+            return execute_multi_grouping_sets(stmt, table, rows, &sets);
+        }
+        GroupByClause::Cube(exprs) => {
+            let n = exprs.len();
+            let mut sets: Vec<Vec<Expression>> = Vec::new();
+            for mask in (0..(1u32 << n)).rev() {
+                let mut set = Vec::new();
+                for (i, expr) in exprs.iter().enumerate() {
+                    if mask & (1u32 << (n - 1 - i)) != 0 {
+                        set.push(expr.clone());
+                    }
+                }
+                sets.push(set);
+            }
+            return execute_multi_grouping_sets(stmt, table, rows, &sets);
+        }
+        GroupByClause::Simple(_) => {}
+    }
+
+    let gb_exprs = raw_group_by.exprs();
     let mut group_by_info: Vec<(Expression, Option<(String, usize)>)> =
-        Vec::with_capacity(raw_group_by.len());
-    for expr in raw_group_by {
+        Vec::with_capacity(gb_exprs.len());
+    for expr in gb_exprs {
         let col_info = if let Expression::Column(col_name) = expr {
             let normalized = if col_name.contains('.') {
                 col_name
                     .split('.')
                     .next_back()
-                    .unwrap_or(col_name)
+                    .unwrap_or(col_name.as_str())
                     .to_string()
             } else {
                 col_name.clone()
@@ -709,15 +759,7 @@ pub fn execute_select_with_grouping(
         for (_, col_spec) in &column_specs {
             match col_spec {
                 Column::Function(agg) => {
-                    let value = compute_aggregate_with_options(
-                        &agg.function,
-                        &agg.expr,
-                        table,
-                        &group_rows,
-                        agg.distinct,
-                        agg.separator.as_deref(),
-                        agg.percentile,
-                    )?;
+                    let value = compute_aggregate_filtered(agg, table, &group_rows)?;
                     projected_row.push(value);
                 }
                 Column::Named { name, .. } => {
@@ -873,15 +915,7 @@ pub fn evaluate_group_order_expression(
                 name
             )))
         }
-        Expression::Function(agg) => compute_aggregate_with_options(
-            &agg.function,
-            &agg.expr,
-            table,
-            group_rows,
-            agg.distinct,
-            agg.separator.as_deref(),
-            agg.percentile,
-        ),
+        Expression::Function(agg) => compute_aggregate_filtered(agg, table, group_rows),
         Expression::Value(val) => {
             if allow_ordinal
                 && let Value::Integer(ord) = val
@@ -1608,4 +1642,220 @@ pub fn evaluate_window_functions(
         }
     }
     Ok(())
+}
+
+fn execute_multi_grouping_sets(
+    stmt: SelectStatement,
+    table: &Table,
+    rows: Vec<&Vec<Value>>,
+    sets: &[Vec<Expression>],
+) -> Result<String, RustqlError> {
+    let all_gb_exprs: Vec<Expression> = {
+        let mut all = Vec::new();
+        for set in sets {
+            for expr in set {
+                if !all.iter().any(|e| e == expr) {
+                    all.push(expr.clone());
+                }
+            }
+        }
+        all
+    };
+
+    let all_gb_info: Vec<(Expression, Option<(String, usize)>)> = all_gb_exprs
+        .iter()
+        .map(|expr| {
+            let col_info = if let Expression::Column(col_name) = expr {
+                let normalized = if col_name.contains('.') {
+                    col_name
+                        .split('.')
+                        .next_back()
+                        .unwrap_or(col_name.as_str())
+                        .to_string()
+                } else {
+                    col_name.clone()
+                };
+                table
+                    .columns
+                    .iter()
+                    .position(|c| c.name == normalized)
+                    .map(|idx| (normalized, idx))
+            } else {
+                None
+            };
+            (expr.clone(), col_info)
+        })
+        .collect();
+
+    let mut column_specs: Vec<(String, Column)> = Vec::new();
+    for col in &stmt.columns {
+        match col {
+            Column::Function(agg) => {
+                let header = format_aggregate_header(agg);
+                column_specs.push((header, col.clone()));
+            }
+            Column::Named { name, alias } => {
+                let header = alias.clone().unwrap_or_else(|| name.clone());
+                column_specs.push((header, col.clone()));
+            }
+            Column::Expression { alias, .. } => {
+                let header = alias.clone().unwrap_or_else(|| "<expression>".to_string());
+                column_specs.push((header, col.clone()));
+            }
+            _ => {}
+        }
+    }
+
+    let mut result = String::new();
+    for (header, _) in &column_specs {
+        result.push_str(&format!("{}\t", header));
+    }
+    result.push('\n');
+    result.push_str(&"-".repeat(40));
+    result.push('\n');
+
+    let mut all_output_rows: Vec<Vec<Value>> = Vec::new();
+
+    for set in sets {
+        let set_gb_info: Vec<(Expression, Option<(String, usize)>)> = set
+            .iter()
+            .map(|expr| {
+                all_gb_info
+                    .iter()
+                    .find(|(e, _)| e == expr)
+                    .cloned()
+                    .unwrap_or((expr.clone(), None))
+            })
+            .collect();
+
+        let active_exprs: Vec<&Expression> = set.iter().collect();
+
+        let mut groups: BTreeMap<Vec<Value>, Vec<&Vec<Value>>> = BTreeMap::new();
+        for row in &rows {
+            let key: Vec<Value> = set_gb_info
+                .iter()
+                .map(|(expr, col_info)| {
+                    if let Some((_, idx)) = col_info {
+                        row[*idx].clone()
+                    } else {
+                        evaluate_value_expression(expr, &table.columns, row).unwrap_or(Value::Null)
+                    }
+                })
+                .collect();
+            groups.entry(key).or_default().push(*row);
+        }
+
+        let group_by_normalized_with_indices: Vec<(String, usize)> = set_gb_info
+            .iter()
+            .filter_map(|(_, col_info)| col_info.clone())
+            .collect();
+
+        for (_group_key, group_rows) in &groups {
+            if let Some(ref having_expr) = stmt.having {
+                let should_include =
+                    evaluate_having(having_expr, &stmt.columns, table, group_rows)?;
+                if !should_include {
+                    continue;
+                }
+            }
+            let mut projected_row: Vec<Value> = Vec::with_capacity(column_specs.len());
+            for (_, col_spec) in &column_specs {
+                match col_spec {
+                    Column::Function(agg) => {
+                        let value = compute_aggregate_filtered(agg, table, group_rows)?;
+                        projected_row.push(value);
+                    }
+                    Column::Named { name, .. } => {
+                        let column_name = if name.contains('.') {
+                            name.split('.').next_back().unwrap_or(name)
+                        } else {
+                            name.as_str()
+                        };
+                        let is_active = all_gb_info.iter().any(|(expr, _)| {
+                            if let Expression::Column(cn) = expr {
+                                let cn_norm = if cn.contains('.') {
+                                    cn.split('.').next_back().unwrap_or(cn)
+                                } else {
+                                    cn.as_str()
+                                };
+                                cn_norm == column_name && active_exprs.iter().any(|e| e == &expr)
+                            } else {
+                                false
+                            }
+                        });
+                        if is_active {
+                            if let Some((_, group_idx)) = group_by_normalized_with_indices
+                                .iter()
+                                .find(|(normalized, _)| normalized == column_name)
+                            {
+                                projected_row.push(group_rows[0][*group_idx].clone());
+                            } else {
+                                projected_row.push(Value::Null);
+                            }
+                        } else {
+                            projected_row.push(Value::Null);
+                        }
+                    }
+                    Column::Expression { expr, .. } => {
+                        let value = evaluate_group_order_expression(
+                            expr,
+                            table,
+                            group_rows,
+                            &column_specs,
+                            &projected_row,
+                            &group_by_normalized_with_indices,
+                            false,
+                        )?;
+                        projected_row.push(value);
+                    }
+                    _ => {}
+                }
+            }
+            all_output_rows.push(projected_row);
+        }
+    }
+
+    if let Some(ref order_by) = stmt.order_by {
+        all_output_rows.sort_by(|a, b| {
+            for (idx, order_expr) in order_by.iter().enumerate() {
+                if let Expression::Value(Value::Integer(ordinal)) = &order_expr.expr {
+                    let col_idx = (*ordinal as usize).saturating_sub(1);
+                    if col_idx < a.len() {
+                        let cmp = compare_values_for_sort(&a[col_idx], &b[col_idx]);
+                        if cmp != Ordering::Equal {
+                            return if order_expr.asc { cmp } else { cmp.reverse() };
+                        }
+                    }
+                } else if idx < a.len() {
+                    let cmp = compare_values_for_sort(&a[idx], &b[idx]);
+                    if cmp != Ordering::Equal {
+                        return if order_expr.asc { cmp } else { cmp.reverse() };
+                    }
+                }
+            }
+            Ordering::Equal
+        });
+    }
+
+    let offset = stmt.offset.unwrap_or(0);
+    let limit = stmt.limit.unwrap_or(all_output_rows.len());
+
+    let mut emitted = 0usize;
+    let mut skipped = 0usize;
+    for row_values in all_output_rows {
+        if skipped < offset {
+            skipped += 1;
+            continue;
+        }
+        if emitted >= limit {
+            break;
+        }
+        for val in &row_values {
+            result.push_str(&format!("{}\t", format_value(val)));
+        }
+        result.push('\n');
+        emitted += 1;
+    }
+
+    Ok(result)
 }

@@ -567,6 +567,16 @@ impl<'a> PlanExecutor<'a> {
                     "Unsupported unary operation in WHERE clause".to_string(),
                 )),
             },
+            Expression::IsDistinctFrom { left, right, not } => {
+                let left_val = self.evaluate_value_expression(left, columns, row)?;
+                let right_val = self.evaluate_value_expression(right, columns, row)?;
+                let is_distinct = match (&left_val, &right_val) {
+                    (Value::Null, Value::Null) => false,
+                    (Value::Null, _) | (_, Value::Null) => true,
+                    _ => left_val != right_val,
+                };
+                Ok(if *not { !is_distinct } else { is_distinct })
+            }
             _ => Err(RustqlError::Internal(
                 "Invalid expression in WHERE clause".to_string(),
             )),
