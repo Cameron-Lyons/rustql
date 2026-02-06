@@ -11,7 +11,8 @@
           "default_value": null,
           "foreign_key": null,
           "check": null,
-          "auto_increment": false
+          "auto_increment": false,
+          "generated": null
         },
         {
           "name": "rep",
@@ -22,7 +23,8 @@
           "default_value": null,
           "foreign_key": null,
           "check": null,
-          "auto_increment": false
+          "auto_increment": false,
+          "generated": null
         },
         {
           "name": "region",
@@ -33,7 +35,8 @@
           "default_value": null,
           "foreign_key": null,
           "check": null,
-          "auto_increment": false
+          "auto_increment": false,
+          "generated": null
         },
         {
           "name": "amount",
@@ -44,7 +47,8 @@
           "default_value": null,
           "foreign_key": null,
           "check": null,
-          "auto_increment": false
+          "auto_increment": false,
+          "generated": null
         }
       ],
       "rows": [

@@ -15,7 +15,13 @@ use super::expr::{
 use super::join::perform_multiple_joins;
 use super::{SelectResult, get_database_read, get_database_write};
 
-pub fn execute_select(stmt: SelectStatement) -> Result<String, RustqlError> {
+pub fn execute_select(mut stmt: SelectStatement) -> Result<String, RustqlError> {
+    resolve_window_definitions(&mut stmt);
+
+    if let Some((ref values_rows, ref alias, ref col_aliases)) = stmt.from_values {
+        return execute_select_from_values(stmt.clone(), values_rows, alias, col_aliases);
+    }
+
     if let Some((ref subquery, ref alias)) = stmt.from_subquery {
         return execute_select_from_subquery(stmt.clone(), subquery, alias);
     }
@@ -68,6 +74,8 @@ pub fn execute_select(stmt: SelectStatement) -> Result<String, RustqlError> {
             offset: stmt.offset,
             fetch: stmt.fetch.clone(),
             set_op: None,
+            window_definitions: Vec::new(),
+            from_values: None,
         };
         return execute_set_operation(left_stmt, other_stmt.as_ref().clone(), set_op_type, &db);
     }
@@ -604,6 +612,7 @@ fn execute_generate_series(
         foreign_key: None,
         check: None,
         auto_increment: false,
+        generated: None,
     };
 
     let mut series_rows: Vec<Vec<Value>> = Vec::new();
@@ -1676,6 +1685,7 @@ fn execute_select_from_subquery(
                 foreign_key: None,
                 check: None,
                 auto_increment: false,
+                generated: None,
             }
         })
         .collect();
@@ -1756,6 +1766,7 @@ fn execute_select_from_view(
                 foreign_key: None,
                 check: None,
                 auto_increment: false,
+                generated: None,
             }
         })
         .collect();
@@ -1815,6 +1826,7 @@ fn execute_select_with_ctes(mut stmt: SelectStatement) -> Result<String, RustqlE
                         foreign_key: None,
                         check: None,
                         auto_increment: false,
+                        generated: None,
                     })
                     .collect();
 
@@ -1889,6 +1901,7 @@ fn execute_select_with_ctes(mut stmt: SelectStatement) -> Result<String, RustqlE
                         foreign_key: None,
                         check: None,
                         auto_increment: false,
+                        generated: None,
                     })
                     .collect();
                 db.tables.insert(
@@ -1915,6 +1928,7 @@ fn execute_select_with_ctes(mut stmt: SelectStatement) -> Result<String, RustqlE
                     foreign_key: None,
                     check: None,
                     auto_increment: false,
+                    generated: None,
                 })
                 .collect();
             db.tables.insert(
@@ -1936,6 +1950,119 @@ fn execute_select_with_ctes(mut stmt: SelectStatement) -> Result<String, RustqlE
     let mut db = get_database_write();
     for name in temp_table_names {
         db.tables.remove(&name);
+    }
+
+    result
+}
+
+fn resolve_window_definitions(stmt: &mut SelectStatement) {
+    if stmt.window_definitions.is_empty() {
+        return;
+    }
+    let defs = stmt.window_definitions.clone();
+    for col in &mut stmt.columns {
+        if let Column::Expression {
+            expr:
+                Expression::WindowFunction {
+                    partition_by,
+                    order_by,
+                    frame,
+                    ..
+                },
+            ..
+        } = col
+        {
+            if partition_by.len() == 1 {
+                if let Expression::Column(ref name) = partition_by[0] {
+                    if let Some(ref_name) = name.strip_prefix("__window_ref:") {
+                        if let Some(def) = defs.iter().find(|d| d.name == ref_name) {
+                            *partition_by = def.partition_by.clone();
+                            *order_by = def.order_by.clone();
+                            *frame = def.frame.clone();
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn execute_select_from_values(
+    stmt: SelectStatement,
+    values_rows: &[Vec<Expression>],
+    alias: &str,
+    col_aliases: &[String],
+) -> Result<String, RustqlError> {
+    let empty_columns: Vec<ColumnDefinition> = Vec::new();
+    let empty_row: Vec<Value> = Vec::new();
+
+    let mut evaluated_rows: Vec<Vec<Value>> = Vec::new();
+    for expr_row in values_rows {
+        let mut row: Vec<Value> = Vec::new();
+        for expr in expr_row {
+            let val = evaluate_value_expression(expr, &empty_columns, &empty_row)?;
+            row.push(val);
+        }
+        evaluated_rows.push(row);
+    }
+
+    let num_cols = evaluated_rows.first().map(|r| r.len()).unwrap_or(0);
+    let columns: Vec<ColumnDefinition> = (0..num_cols)
+        .map(|i| {
+            let name = if i < col_aliases.len() {
+                col_aliases[i].clone()
+            } else {
+                format!("column{}", i + 1)
+            };
+            let data_type = evaluated_rows
+                .first()
+                .and_then(|row| row.get(i))
+                .map(|val| match val {
+                    Value::Integer(_) => DataType::Integer,
+                    Value::Float(_) => DataType::Float,
+                    Value::Boolean(_) => DataType::Boolean,
+                    Value::Date(_) => DataType::Date,
+                    Value::Time(_) => DataType::Time,
+                    Value::DateTime(_) => DataType::DateTime,
+                    _ => DataType::Text,
+                })
+                .unwrap_or(DataType::Text);
+            ColumnDefinition {
+                name,
+                data_type,
+                nullable: true,
+                primary_key: false,
+                unique: false,
+                default_value: None,
+                foreign_key: None,
+                check: None,
+                auto_increment: false,
+                generated: None,
+            }
+        })
+        .collect();
+
+    {
+        let mut db = get_database_write();
+        db.tables.insert(
+            alias.to_string(),
+            Table {
+                columns,
+                rows: evaluated_rows,
+                constraints: vec![],
+            },
+        );
+    }
+
+    let mut new_stmt = stmt;
+    new_stmt.from = alias.to_string();
+    new_stmt.from_values = None;
+
+    let result = execute_select(new_stmt);
+
+    {
+        let mut db = get_database_write();
+        db.tables.remove(alias);
     }
 
     result

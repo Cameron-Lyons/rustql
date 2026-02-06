@@ -211,16 +211,26 @@ pub fn evaluate_value_expression_with_db(
             if name == "*" {
                 return Ok(Value::Integer(1));
             }
-            let col_name = if name.contains('.') {
-                name.split('.').next_back().unwrap_or(name)
+            if let Some(idx) = columns.iter().position(|c| c.name == *name) {
+                return Ok(row[idx].clone());
+            }
+            if name.contains('.') {
+                let col_name = name.split('.').next_back().unwrap_or(name);
+                if let Some(idx) = columns.iter().position(|c| {
+                    c.name == col_name
+                        || c.name.split('.').next_back().unwrap_or(&c.name) == col_name
+                }) {
+                    return Ok(row[idx].clone());
+                }
             } else {
-                name
-            };
-            let idx = columns
-                .iter()
-                .position(|c| c.name == col_name)
-                .ok_or_else(|| RustqlError::ColumnNotFound(name.clone()))?;
-            Ok(row[idx].clone())
+                if let Some(idx) = columns
+                    .iter()
+                    .position(|c| c.name.split('.').next_back().unwrap_or(&c.name) == name.as_str())
+                {
+                    return Ok(row[idx].clone());
+                }
+            }
+            Err(RustqlError::ColumnNotFound(name.clone()))
         }
         Expression::Value(val) => Ok(val.clone()),
         Expression::BinaryOp { left, op, right } => {
@@ -1263,6 +1273,197 @@ pub fn evaluate_value_expression_with_db(
                         "DAYOFWEEK requires a date argument".to_string(),
                     )),
                 },
+                ScalarFunctionType::Pi => Ok(Value::Float(std::f64::consts::PI)),
+                ScalarFunctionType::Trunc => {
+                    let val = evaluate_value_expression_with_db(&args[0], columns, row, db)?;
+                    let precision = if args.len() > 1 {
+                        match evaluate_value_expression_with_db(&args[1], columns, row, db)? {
+                            Value::Integer(n) => n as i32,
+                            Value::Float(f) => f as i32,
+                            _ => 0,
+                        }
+                    } else {
+                        0
+                    };
+                    match val {
+                        Value::Float(f) => {
+                            let factor = 10f64.powi(precision);
+                            Ok(Value::Float((f * factor).trunc() / factor))
+                        }
+                        Value::Integer(n) => {
+                            if precision >= 0 {
+                                Ok(Value::Integer(n))
+                            } else {
+                                let factor = 10i64.pow((-precision) as u32);
+                                Ok(Value::Integer((n / factor) * factor))
+                            }
+                        }
+                        _ => Ok(Value::Null),
+                    }
+                }
+                ScalarFunctionType::Log10 => {
+                    let val = evaluate_value_expression_with_db(&args[0], columns, row, db)?;
+                    match val {
+                        Value::Float(f) => Ok(Value::Float(f.log10())),
+                        Value::Integer(n) => Ok(Value::Float((n as f64).log10())),
+                        _ => Ok(Value::Null),
+                    }
+                }
+                ScalarFunctionType::Log2 => {
+                    let val = evaluate_value_expression_with_db(&args[0], columns, row, db)?;
+                    match val {
+                        Value::Float(f) => Ok(Value::Float(f.log2())),
+                        Value::Integer(n) => Ok(Value::Float((n as f64).log2())),
+                        _ => Ok(Value::Null),
+                    }
+                }
+                ScalarFunctionType::Cbrt => {
+                    let val = evaluate_value_expression_with_db(&args[0], columns, row, db)?;
+                    match val {
+                        Value::Float(f) => Ok(Value::Float(f.cbrt())),
+                        Value::Integer(n) => Ok(Value::Float((n as f64).cbrt())),
+                        _ => Ok(Value::Null),
+                    }
+                }
+                ScalarFunctionType::Gcd => {
+                    let a = evaluate_value_expression_with_db(&args[0], columns, row, db)?;
+                    let b = evaluate_value_expression_with_db(&args[1], columns, row, db)?;
+                    match (a, b) {
+                        (Value::Integer(mut a), Value::Integer(mut b)) => {
+                            a = a.abs();
+                            b = b.abs();
+                            while b != 0 {
+                                let t = b;
+                                b = a % b;
+                                a = t;
+                            }
+                            Ok(Value::Integer(a))
+                        }
+                        _ => Ok(Value::Null),
+                    }
+                }
+                ScalarFunctionType::Lcm => {
+                    let a = evaluate_value_expression_with_db(&args[0], columns, row, db)?;
+                    let b = evaluate_value_expression_with_db(&args[1], columns, row, db)?;
+                    match (a, b) {
+                        (Value::Integer(a), Value::Integer(b)) => {
+                            if a == 0 && b == 0 {
+                                Ok(Value::Integer(0))
+                            } else {
+                                let mut ga = a.abs();
+                                let mut gb = b.abs();
+                                let prod = ga * gb;
+                                while gb != 0 {
+                                    let t = gb;
+                                    gb = ga % gb;
+                                    ga = t;
+                                }
+                                Ok(Value::Integer(prod / ga))
+                            }
+                        }
+                        _ => Ok(Value::Null),
+                    }
+                }
+                ScalarFunctionType::Initcap => {
+                    let val = evaluate_value_expression_with_db(&args[0], columns, row, db)?;
+                    match val {
+                        Value::Text(s) => {
+                            let mut result = String::new();
+                            let mut capitalize_next = true;
+                            for ch in s.chars() {
+                                if ch.is_whitespace() || !ch.is_alphanumeric() {
+                                    capitalize_next = true;
+                                    result.push(ch);
+                                } else if capitalize_next {
+                                    result.extend(ch.to_uppercase());
+                                    capitalize_next = false;
+                                } else {
+                                    result.extend(ch.to_lowercase());
+                                }
+                            }
+                            Ok(Value::Text(result))
+                        }
+                        _ => Ok(Value::Null),
+                    }
+                }
+                ScalarFunctionType::SplitPart => {
+                    let val = evaluate_value_expression_with_db(&args[0], columns, row, db)?;
+                    let delim = evaluate_value_expression_with_db(&args[1], columns, row, db)?;
+                    let part = evaluate_value_expression_with_db(&args[2], columns, row, db)?;
+                    match (val, delim, part) {
+                        (Value::Text(s), Value::Text(d), Value::Integer(n)) => {
+                            let parts: Vec<&str> = s.split(&d).collect();
+                            let idx = (n - 1) as usize;
+                            if idx < parts.len() {
+                                Ok(Value::Text(parts[idx].to_string()))
+                            } else {
+                                Ok(Value::Text(String::new()))
+                            }
+                        }
+                        _ => Ok(Value::Null),
+                    }
+                }
+                ScalarFunctionType::Translate => {
+                    let val = evaluate_value_expression_with_db(&args[0], columns, row, db)?;
+                    let from = evaluate_value_expression_with_db(&args[1], columns, row, db)?;
+                    let to = evaluate_value_expression_with_db(&args[2], columns, row, db)?;
+                    match (val, from, to) {
+                        (Value::Text(s), Value::Text(from_chars), Value::Text(to_chars)) => {
+                            let from_v: Vec<char> = from_chars.chars().collect();
+                            let to_v: Vec<char> = to_chars.chars().collect();
+                            let result: String = s
+                                .chars()
+                                .filter_map(|ch| {
+                                    if let Some(pos) = from_v.iter().position(|&fc| fc == ch) {
+                                        if pos < to_v.len() {
+                                            Some(to_v[pos])
+                                        } else {
+                                            None
+                                        }
+                                    } else {
+                                        Some(ch)
+                                    }
+                                })
+                                .collect();
+                            Ok(Value::Text(result))
+                        }
+                        _ => Ok(Value::Null),
+                    }
+                }
+                ScalarFunctionType::RegexpMatch => {
+                    let val = evaluate_value_expression_with_db(&args[0], columns, row, db)?;
+                    let pattern = evaluate_value_expression_with_db(&args[1], columns, row, db)?;
+                    match (val, pattern) {
+                        (Value::Text(s), Value::Text(p)) => match regex::Regex::new(&p) {
+                            Ok(re) => {
+                                if let Some(m) = re.find(&s) {
+                                    Ok(Value::Text(m.as_str().to_string()))
+                                } else {
+                                    Ok(Value::Null)
+                                }
+                            }
+                            Err(_) => Ok(Value::Null),
+                        },
+                        _ => Ok(Value::Null),
+                    }
+                }
+                ScalarFunctionType::RegexpReplace => {
+                    let val = evaluate_value_expression_with_db(&args[0], columns, row, db)?;
+                    let pattern = evaluate_value_expression_with_db(&args[1], columns, row, db)?;
+                    let replacement =
+                        evaluate_value_expression_with_db(&args[2], columns, row, db)?;
+                    match (val, pattern, replacement) {
+                        (Value::Text(s), Value::Text(p), Value::Text(r)) => {
+                            match regex::Regex::new(&p) {
+                                Ok(re) => {
+                                    Ok(Value::Text(re.replace_all(&s, r.as_str()).to_string()))
+                                }
+                                Err(_) => Ok(Value::Null),
+                            }
+                        }
+                        _ => Ok(Value::Null),
+                    }
+                }
             }
         }
         Expression::Cast { expr, data_type } => {

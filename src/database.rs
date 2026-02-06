@@ -28,6 +28,8 @@ pub struct Index {
     pub column: String,
     #[serde(with = "index_entries")]
     pub entries: BTreeMap<Value, Vec<usize>>,
+    #[serde(default)]
+    pub filter_expr: Option<String>,
 }
 
 mod index_entries {

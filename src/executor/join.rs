@@ -64,6 +64,7 @@ pub fn perform_multiple_joins(
                                             foreign_key: None,
                                             check: None,
                                             auto_increment: false,
+                                            generated: None,
                                         })
                                         .collect(),
                                 );
@@ -119,6 +120,7 @@ pub fn perform_multiple_joins(
                     foreign_key: None,
                     check: None,
                     auto_increment: false,
+                    generated: None,
                 })
                 .collect();
 
