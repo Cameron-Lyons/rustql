@@ -21,9 +21,12 @@ pub enum Statement {
     ReleaseSavepoint(String),
     RollbackToSavepoint(String),
     Explain(SelectStatement),
+    ExplainAnalyze(SelectStatement),
     Describe(String),
     ShowTables,
     Analyze(String),
+    Merge(MergeStatement),
+    Do { statements: Vec<Statement> },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -55,6 +58,8 @@ pub struct SelectStatement {
     pub offset: Option<usize>,
     pub fetch: Option<FetchClause>,
     pub set_op: Option<(SetOperation, Box<SelectStatement>)>,
+    pub window_definitions: Vec<WindowDefinition>,
+    pub from_values: Option<(Vec<Vec<Expression>>, String, Vec<String>)>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -259,6 +264,14 @@ pub struct ColumnDefinition {
     pub check: Option<String>,
     #[serde(default)]
     pub auto_increment: bool,
+    #[serde(default)]
+    pub generated: Option<GeneratedColumn>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GeneratedColumn {
+    pub expr_sql: String,
+    pub always: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -316,12 +329,67 @@ pub struct CreateIndexStatement {
     pub table: String,
     pub columns: Vec<String>,
     pub if_not_exists: bool,
+    pub where_clause: Option<Expression>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct DropIndexStatement {
     pub name: String,
     pub if_exists: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct WindowDefinition {
+    pub name: String,
+    pub partition_by: Vec<Expression>,
+    pub order_by: Vec<OrderByExpr>,
+    pub frame: Option<WindowFrame>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MergeStatement {
+    pub target_table: String,
+    pub source: MergeSource,
+    pub on_condition: Expression,
+    pub when_clauses: Vec<MergeWhenClause>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum MergeSource {
+    Table {
+        name: String,
+        alias: Option<String>,
+    },
+    Subquery {
+        query: Box<SelectStatement>,
+        alias: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum MergeWhenClause {
+    Matched {
+        condition: Option<Expression>,
+        action: MergeMatchedAction,
+    },
+    NotMatched {
+        condition: Option<Expression>,
+        action: MergeNotMatchedAction,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum MergeMatchedAction {
+    Update { assignments: Vec<Assignment> },
+    Delete,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum MergeNotMatchedAction {
+    Insert {
+        columns: Option<Vec<String>>,
+        values: Vec<Expression>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -441,6 +509,18 @@ pub enum ScalarFunctionType {
     Quarter,
     Week,
     DayOfWeek,
+    Pi,
+    Trunc,
+    Log10,
+    Log2,
+    Cbrt,
+    Gcd,
+    Lcm,
+    Initcap,
+    SplitPart,
+    Translate,
+    RegexpMatch,
+    RegexpReplace,
 }
 
 #[derive(Debug, Clone, PartialEq)]

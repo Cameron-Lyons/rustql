@@ -39,6 +39,7 @@ A SQL database engine written in Rust with an interactive REPL. RustQL supports 
 
 **Other**
 - `EXPLAIN` &mdash; display query execution plan
+- `EXPLAIN ANALYZE` &mdash; plan + measured execution metrics
 - `DESCRIBE` *table* &mdash; show table schema
 - `SHOW TABLES`
 - Backtick-quoted identifiers
@@ -119,3 +120,27 @@ Run tests against the B-tree backend:
 ```sh
 RUSTQL_STORAGE=btree cargo test
 ```
+
+Run SQL logic regression corpus:
+
+```sh
+cargo test sql_logic_corpus
+```
+
+Run microbenchmarks:
+
+```sh
+cargo bench --bench engine
+```
+
+## Commit checks
+
+Enable the repo-managed git hooks so every commit runs formatting and lints:
+
+```sh
+git config core.hooksPath .githooks
+```
+
+The pre-commit hook enforces:
+- `cargo fmt --all -- --check`
+- `cargo clippy --workspace --all-targets --all-features -- -D warnings`

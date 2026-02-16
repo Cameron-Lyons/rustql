@@ -71,6 +71,7 @@ fn execute_create_table_as_select(
                 foreign_key: None,
                 check: None,
                 auto_increment: false,
+                generated: None,
             }
         })
         .collect();
@@ -346,14 +347,26 @@ pub fn execute_create_index(stmt: CreateIndexStatement) -> Result<String, Rustql
                 )
             })?;
 
+        let filter_expr_str: Option<String> =
+            stmt.where_clause.as_ref().map(|expr| format!("{:?}", expr));
+
         let mut index = crate::database::Index {
             name: stmt.name.clone(),
             table: stmt.table.clone(),
             column: first_column.clone(),
             entries: BTreeMap::new(),
+            filter_expr: filter_expr_str,
         };
 
         for (row_idx, row) in table.rows.iter().enumerate() {
+            if let Some(ref where_expr) = stmt.where_clause {
+                let passes =
+                    super::expr::evaluate_expression(None, where_expr, &table.columns, row)
+                        .unwrap_or(false);
+                if !passes {
+                    continue;
+                }
+            }
             let value = row.get(col_idx).cloned().unwrap_or(Value::Null);
             index.entries.entry(value).or_default().push(row_idx);
         }
@@ -378,6 +391,7 @@ pub fn execute_create_index(stmt: CreateIndexStatement) -> Result<String, Rustql
                 table: stmt.table.clone(),
                 column: col_name.clone(),
                 entries: BTreeMap::new(),
+                filter_expr: None,
             };
 
             for (row_idx, row) in table.rows.iter().enumerate() {

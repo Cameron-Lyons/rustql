@@ -1,6 +1,7 @@
 use crate::ast::*;
 use crate::database::{Database, Index, Table};
 use crate::error::RustqlError;
+use std::cmp::Reverse;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt;
 
@@ -221,16 +222,18 @@ impl<'a> QueryPlanner<'a> {
         let mut current_plan = left_plan;
         let mut remaining_joins = stmt.joins.clone();
 
-        remaining_joins.sort_by(|a, b| {
-            let a_size = db.tables.get(&a.table).map(|t| t.rows.len()).unwrap_or(0);
-            let b_size = db.tables.get(&b.table).map(|t| t.rows.len()).unwrap_or(0);
-            a_size.cmp(&b_size)
-        });
-
         let mut joined_tables: HashSet<String> = HashSet::new();
         joined_tables.insert(stmt.from.clone());
 
-        for join in remaining_joins {
+        while !remaining_joins.is_empty() {
+            let (best_idx, _) = remaining_joins
+                .iter()
+                .enumerate()
+                .map(|(idx, join)| (idx, self.join_priority(join, &joined_tables, db)))
+                .max_by_key(|(_, priority)| *priority)
+                .unwrap();
+            let join = remaining_joins.remove(best_idx);
+
             let right_table = db
                 .tables
                 .get(&join.table)
@@ -283,6 +286,26 @@ impl<'a> QueryPlanner<'a> {
         }
 
         Ok(current_plan)
+    }
+
+    fn join_priority(
+        &self,
+        join: &Join,
+        joined_tables: &HashSet<String>,
+        db: &Database,
+    ) -> (bool, bool, bool, Reverse<usize>) {
+        let connects = join.on.as_ref().is_some_and(|on_expr| {
+            let refs = self.referenced_tables(on_expr);
+            refs.contains(&join.table) && refs.iter().any(|t| joined_tables.contains(t))
+        });
+        let has_on = join.on.is_some();
+        let eq_join = join.on.as_ref().is_some_and(|on| self.is_equality_join(on));
+        let table_size = db
+            .tables
+            .get(&join.table)
+            .map(|t| t.rows.len())
+            .unwrap_or(0);
+        (connects, eq_join, has_on, Reverse(table_size))
     }
 
     fn plan_hash_join(&self, left: PlanNode, right: PlanNode, condition: Expression) -> PlanNode {

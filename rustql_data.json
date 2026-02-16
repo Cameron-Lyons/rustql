@@ -1,6 +1,6 @@
 {
   "tables": {
-    "sales": {
+    "sane_orders": {
       "columns": [
         {
           "name": "id",
@@ -11,32 +11,11 @@
           "default_value": null,
           "foreign_key": null,
           "check": null,
-          "auto_increment": false
+          "auto_increment": false,
+          "generated": null
         },
         {
-          "name": "rep",
-          "data_type": "Text",
-          "nullable": true,
-          "primary_key": false,
-          "unique": false,
-          "default_value": null,
-          "foreign_key": null,
-          "check": null,
-          "auto_increment": false
-        },
-        {
-          "name": "region",
-          "data_type": "Text",
-          "nullable": true,
-          "primary_key": false,
-          "unique": false,
-          "default_value": null,
-          "foreign_key": null,
-          "check": null,
-          "auto_increment": false
-        },
-        {
-          "name": "amount",
+          "name": "user_id",
           "data_type": "Integer",
           "nullable": true,
           "primary_key": false,
@@ -44,7 +23,8 @@
           "default_value": null,
           "foreign_key": null,
           "check": null,
-          "auto_increment": false
+          "auto_increment": false,
+          "generated": null
         }
       ],
       "rows": [
@@ -53,13 +33,7 @@
             "Integer": 1
           },
           {
-            "Text": "Alice"
-          },
-          {
-            "Text": "East"
-          },
-          {
-            "Integer": 100
+            "Integer": 2
           }
         ],
         [
@@ -67,13 +41,7 @@
             "Integer": 2
           },
           {
-            "Text": "Bob"
-          },
-          {
-            "Text": "East"
-          },
-          {
-            "Integer": 200
+            "Integer": 3
           }
         ],
         [
@@ -81,13 +49,7 @@
             "Integer": 3
           },
           {
-            "Text": "Charlie"
-          },
-          {
-            "Text": "West"
-          },
-          {
-            "Integer": 150
+            "Integer": 4
           }
         ],
         [
@@ -95,13 +57,7 @@
             "Integer": 4
           },
           {
-            "Text": "Diana"
-          },
-          {
-            "Text": "West"
-          },
-          {
-            "Integer": 250
+            "Integer": 5
           }
         ],
         [
@@ -109,13 +65,7 @@
             "Integer": 5
           },
           {
-            "Text": "Eve"
-          },
-          {
-            "Text": "East"
-          },
-          {
-            "Integer": 200
+            "Integer": 6
           }
         ],
         [
@@ -123,13 +73,550 @@
             "Integer": 6
           },
           {
-            "Text": "Frank"
+            "Integer": 7
+          }
+        ],
+        [
+          {
+            "Integer": 7
           },
           {
-            "Text": "West"
+            "Integer": 8
+          }
+        ],
+        [
+          {
+            "Integer": 8
           },
           {
-            "Integer": 300
+            "Integer": 9
+          }
+        ],
+        [
+          {
+            "Integer": 9
+          },
+          {
+            "Integer": 10
+          }
+        ],
+        [
+          {
+            "Integer": 10
+          },
+          {
+            "Integer": 11
+          }
+        ],
+        [
+          {
+            "Integer": 11
+          },
+          {
+            "Integer": 12
+          }
+        ],
+        [
+          {
+            "Integer": 12
+          },
+          {
+            "Integer": 13
+          }
+        ],
+        [
+          {
+            "Integer": 13
+          },
+          {
+            "Integer": 14
+          }
+        ],
+        [
+          {
+            "Integer": 14
+          },
+          {
+            "Integer": 15
+          }
+        ],
+        [
+          {
+            "Integer": 15
+          },
+          {
+            "Integer": 16
+          }
+        ],
+        [
+          {
+            "Integer": 16
+          },
+          {
+            "Integer": 17
+          }
+        ],
+        [
+          {
+            "Integer": 17
+          },
+          {
+            "Integer": 18
+          }
+        ],
+        [
+          {
+            "Integer": 18
+          },
+          {
+            "Integer": 19
+          }
+        ],
+        [
+          {
+            "Integer": 19
+          },
+          {
+            "Integer": 20
+          }
+        ],
+        [
+          {
+            "Integer": 20
+          },
+          {
+            "Integer": 1
+          }
+        ],
+        [
+          {
+            "Integer": 21
+          },
+          {
+            "Integer": 2
+          }
+        ],
+        [
+          {
+            "Integer": 22
+          },
+          {
+            "Integer": 3
+          }
+        ],
+        [
+          {
+            "Integer": 23
+          },
+          {
+            "Integer": 4
+          }
+        ],
+        [
+          {
+            "Integer": 24
+          },
+          {
+            "Integer": 5
+          }
+        ],
+        [
+          {
+            "Integer": 25
+          },
+          {
+            "Integer": 6
+          }
+        ],
+        [
+          {
+            "Integer": 26
+          },
+          {
+            "Integer": 7
+          }
+        ],
+        [
+          {
+            "Integer": 27
+          },
+          {
+            "Integer": 8
+          }
+        ],
+        [
+          {
+            "Integer": 28
+          },
+          {
+            "Integer": 9
+          }
+        ],
+        [
+          {
+            "Integer": 29
+          },
+          {
+            "Integer": 10
+          }
+        ],
+        [
+          {
+            "Integer": 30
+          },
+          {
+            "Integer": 11
+          }
+        ],
+        [
+          {
+            "Integer": 31
+          },
+          {
+            "Integer": 12
+          }
+        ],
+        [
+          {
+            "Integer": 32
+          },
+          {
+            "Integer": 13
+          }
+        ],
+        [
+          {
+            "Integer": 33
+          },
+          {
+            "Integer": 14
+          }
+        ],
+        [
+          {
+            "Integer": 34
+          },
+          {
+            "Integer": 15
+          }
+        ],
+        [
+          {
+            "Integer": 35
+          },
+          {
+            "Integer": 16
+          }
+        ],
+        [
+          {
+            "Integer": 36
+          },
+          {
+            "Integer": 17
+          }
+        ],
+        [
+          {
+            "Integer": 37
+          },
+          {
+            "Integer": 18
+          }
+        ],
+        [
+          {
+            "Integer": 38
+          },
+          {
+            "Integer": 19
+          }
+        ],
+        [
+          {
+            "Integer": 39
+          },
+          {
+            "Integer": 20
+          }
+        ],
+        [
+          {
+            "Integer": 40
+          },
+          {
+            "Integer": 1
+          }
+        ],
+        [
+          {
+            "Integer": 41
+          },
+          {
+            "Integer": 2
+          }
+        ],
+        [
+          {
+            "Integer": 42
+          },
+          {
+            "Integer": 3
+          }
+        ],
+        [
+          {
+            "Integer": 43
+          },
+          {
+            "Integer": 4
+          }
+        ],
+        [
+          {
+            "Integer": 44
+          },
+          {
+            "Integer": 5
+          }
+        ],
+        [
+          {
+            "Integer": 45
+          },
+          {
+            "Integer": 6
+          }
+        ],
+        [
+          {
+            "Integer": 46
+          },
+          {
+            "Integer": 7
+          }
+        ],
+        [
+          {
+            "Integer": 47
+          },
+          {
+            "Integer": 8
+          }
+        ],
+        [
+          {
+            "Integer": 48
+          },
+          {
+            "Integer": 9
+          }
+        ],
+        [
+          {
+            "Integer": 49
+          },
+          {
+            "Integer": 10
+          }
+        ],
+        [
+          {
+            "Integer": 50
+          },
+          {
+            "Integer": 11
+          }
+        ]
+      ],
+      "constraints": []
+    },
+    "sane_users": {
+      "columns": [
+        {
+          "name": "id",
+          "data_type": "Integer",
+          "nullable": true,
+          "primary_key": false,
+          "unique": false,
+          "default_value": null,
+          "foreign_key": null,
+          "check": null,
+          "auto_increment": false,
+          "generated": null
+        },
+        {
+          "name": "age",
+          "data_type": "Integer",
+          "nullable": true,
+          "primary_key": false,
+          "unique": false,
+          "default_value": null,
+          "foreign_key": null,
+          "check": null,
+          "auto_increment": false,
+          "generated": null
+        }
+      ],
+      "rows": [
+        [
+          {
+            "Integer": 1
+          },
+          {
+            "Integer": 21
+          }
+        ],
+        [
+          {
+            "Integer": 2
+          },
+          {
+            "Integer": 22
+          }
+        ],
+        [
+          {
+            "Integer": 3
+          },
+          {
+            "Integer": 23
+          }
+        ],
+        [
+          {
+            "Integer": 4
+          },
+          {
+            "Integer": 24
+          }
+        ],
+        [
+          {
+            "Integer": 5
+          },
+          {
+            "Integer": 25
+          }
+        ],
+        [
+          {
+            "Integer": 6
+          },
+          {
+            "Integer": 26
+          }
+        ],
+        [
+          {
+            "Integer": 7
+          },
+          {
+            "Integer": 27
+          }
+        ],
+        [
+          {
+            "Integer": 8
+          },
+          {
+            "Integer": 28
+          }
+        ],
+        [
+          {
+            "Integer": 9
+          },
+          {
+            "Integer": 29
+          }
+        ],
+        [
+          {
+            "Integer": 10
+          },
+          {
+            "Integer": 20
+          }
+        ],
+        [
+          {
+            "Integer": 11
+          },
+          {
+            "Integer": 21
+          }
+        ],
+        [
+          {
+            "Integer": 12
+          },
+          {
+            "Integer": 22
+          }
+        ],
+        [
+          {
+            "Integer": 13
+          },
+          {
+            "Integer": 23
+          }
+        ],
+        [
+          {
+            "Integer": 14
+          },
+          {
+            "Integer": 24
+          }
+        ],
+        [
+          {
+            "Integer": 15
+          },
+          {
+            "Integer": 25
+          }
+        ],
+        [
+          {
+            "Integer": 16
+          },
+          {
+            "Integer": 26
+          }
+        ],
+        [
+          {
+            "Integer": 17
+          },
+          {
+            "Integer": 27
+          }
+        ],
+        [
+          {
+            "Integer": 18
+          },
+          {
+            "Integer": 28
+          }
+        ],
+        [
+          {
+            "Integer": 19
+          },
+          {
+            "Integer": 29
+          }
+        ],
+        [
+          {
+            "Integer": 20
+          },
+          {
+            "Integer": 20
           }
         ]
       ],

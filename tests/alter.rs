@@ -17,6 +17,7 @@ fn test_alter_table_add_column() {
             foreign_key: None,
             check: None,
             auto_increment: false,
+            generated: None,
         }],
         constraints: vec![],
         as_query: None,
@@ -36,6 +37,7 @@ fn test_alter_table_add_column() {
             foreign_key: None,
             check: None,
             auto_increment: false,
+            generated: None,
         }),
     });
 

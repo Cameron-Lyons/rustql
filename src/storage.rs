@@ -1519,6 +1519,7 @@ mod tests {
                 foreign_key: None,
                 check: None,
                 auto_increment: false,
+                generated: None,
             },
             ColumnDefinition {
                 name: "name".to_string(),
@@ -1530,6 +1531,7 @@ mod tests {
                 foreign_key: None,
                 check: None,
                 auto_increment: false,
+                generated: None,
             },
         ];
 
@@ -1690,6 +1692,7 @@ mod tests {
             foreign_key: None,
             check: None,
             auto_increment: false,
+            generated: None,
         }];
         let table = Table {
             columns,
@@ -1745,6 +1748,7 @@ mod tests {
             foreign_key: None,
             check: None,
             auto_increment: false,
+            generated: None,
         }];
         let table = Table {
             columns,

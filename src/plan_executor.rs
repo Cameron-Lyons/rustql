@@ -221,6 +221,7 @@ impl<'a> PlanExecutor<'a> {
                     foreign_key: None,
                     check: None,
                     auto_increment: false,
+                    generated: None,
                 })
                 .collect();
 
@@ -388,6 +389,7 @@ impl<'a> PlanExecutor<'a> {
                 foreign_key: None,
                 check: None,
                 auto_increment: false,
+                generated: None,
             })
             .collect();
 
@@ -437,6 +439,7 @@ impl<'a> PlanExecutor<'a> {
                         foreign_key: None,
                         check: None,
                         auto_increment: false,
+                        generated: None,
                     })
                     .collect();
 
@@ -453,6 +456,7 @@ impl<'a> PlanExecutor<'a> {
                         foreign_key: None,
                         check: None,
                         auto_increment: false,
+                        generated: None,
                     })
                     .collect();
 
@@ -899,6 +903,7 @@ impl<'a> PlanExecutor<'a> {
                 foreign_key: None,
                 check: None,
                 auto_increment: false,
+                generated: None,
             })
             .collect();
         combined_columns.extend(right.columns.iter().map(|name| ColumnDefinition {
@@ -911,6 +916,7 @@ impl<'a> PlanExecutor<'a> {
             foreign_key: None,
             check: None,
             auto_increment: false,
+            generated: None,
         }));
 
         let combined_row: Vec<Value> = left_row.iter().chain(right_row.iter()).cloned().collect();
@@ -996,6 +1002,7 @@ impl<'a> PlanExecutor<'a> {
                 foreign_key: None,
                 check: None,
                 auto_increment: false,
+                generated: None,
             })
             .collect();
 
@@ -1590,6 +1597,7 @@ impl<'a> PlanExecutor<'a> {
                 foreign_key: None,
                 check: None,
                 auto_increment: false,
+                generated: None,
             })
             .collect();
 

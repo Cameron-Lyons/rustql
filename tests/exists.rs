@@ -13,6 +13,7 @@ fn test_where_exists_true() {
                 foreign_key: None,
                 check: None,
                 auto_increment: false,
+                generated: None,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
@@ -24,6 +25,7 @@ fn test_where_exists_true() {
                 foreign_key: None,
                 check: None,
                 auto_increment: false,
+                generated: None,
                 name: "name".into(),
                 data_type: DataType::Text,
                 nullable: false,
@@ -58,6 +60,7 @@ fn test_where_exists_true() {
                 foreign_key: None,
                 check: None,
                 auto_increment: false,
+                generated: None,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
@@ -69,6 +72,7 @@ fn test_where_exists_true() {
                 foreign_key: None,
                 check: None,
                 auto_increment: false,
+                generated: None,
                 name: "amount".into(),
                 data_type: DataType::Float,
                 nullable: false,
@@ -115,6 +119,8 @@ fn test_where_exists_true() {
         limit: None,
         offset: None,
         fetch: None,
+        window_definitions: Vec::new(),
+        from_values: None,
     };
 
     let stmt = Statement::Select(SelectStatement {
@@ -135,6 +141,8 @@ fn test_where_exists_true() {
         limit: None,
         offset: None,
         fetch: None,
+        window_definitions: Vec::new(),
+        from_values: None,
     });
 
     let output = execute(stmt).unwrap();
@@ -154,6 +162,7 @@ fn test_where_exists_false_filters_all() {
                 foreign_key: None,
                 check: None,
                 auto_increment: false,
+                generated: None,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
@@ -165,6 +174,7 @@ fn test_where_exists_false_filters_all() {
                 foreign_key: None,
                 check: None,
                 auto_increment: false,
+                generated: None,
                 name: "name".into(),
                 data_type: DataType::Text,
                 nullable: false,
@@ -199,6 +209,7 @@ fn test_where_exists_false_filters_all() {
                 foreign_key: None,
                 check: None,
                 auto_increment: false,
+                generated: None,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
@@ -210,6 +221,7 @@ fn test_where_exists_false_filters_all() {
                 foreign_key: None,
                 check: None,
                 auto_increment: false,
+                generated: None,
                 name: "amount".into(),
                 data_type: DataType::Float,
                 nullable: false,
@@ -256,6 +268,8 @@ fn test_where_exists_false_filters_all() {
         limit: None,
         offset: None,
         fetch: None,
+        window_definitions: Vec::new(),
+        from_values: None,
     };
 
     let stmt = Statement::Select(SelectStatement {
@@ -276,6 +290,8 @@ fn test_where_exists_false_filters_all() {
         limit: None,
         offset: None,
         fetch: None,
+        window_definitions: Vec::new(),
+        from_values: None,
     });
 
     let output = execute(stmt).unwrap();
@@ -295,6 +311,7 @@ fn test_where_not_exists_true_filters_all() {
                 foreign_key: None,
                 check: None,
                 auto_increment: false,
+                generated: None,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
@@ -306,6 +323,7 @@ fn test_where_not_exists_true_filters_all() {
                 foreign_key: None,
                 check: None,
                 auto_increment: false,
+                generated: None,
                 name: "name".into(),
                 data_type: DataType::Text,
                 nullable: false,
@@ -340,6 +358,7 @@ fn test_where_not_exists_true_filters_all() {
                 foreign_key: None,
                 check: None,
                 auto_increment: false,
+                generated: None,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
@@ -351,6 +370,7 @@ fn test_where_not_exists_true_filters_all() {
                 foreign_key: None,
                 check: None,
                 auto_increment: false,
+                generated: None,
                 name: "amount".into(),
                 data_type: DataType::Float,
                 nullable: false,
@@ -397,6 +417,8 @@ fn test_where_not_exists_true_filters_all() {
         limit: None,
         offset: None,
         fetch: None,
+        window_definitions: Vec::new(),
+        from_values: None,
     };
 
     let stmt = Statement::Select(SelectStatement {
@@ -420,6 +442,8 @@ fn test_where_not_exists_true_filters_all() {
         limit: None,
         offset: None,
         fetch: None,
+        window_definitions: Vec::new(),
+        from_values: None,
     });
 
     let output = execute(stmt).unwrap();
@@ -439,6 +463,7 @@ fn test_where_exists_correlated_true() {
                 foreign_key: None,
                 check: None,
                 auto_increment: false,
+                generated: None,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
@@ -450,6 +475,7 @@ fn test_where_exists_correlated_true() {
                 foreign_key: None,
                 check: None,
                 auto_increment: false,
+                generated: None,
                 name: "name".into(),
                 data_type: DataType::Text,
                 nullable: false,
@@ -484,6 +510,7 @@ fn test_where_exists_correlated_true() {
                 foreign_key: None,
                 check: None,
                 auto_increment: false,
+                generated: None,
                 name: "user_id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
@@ -495,6 +522,7 @@ fn test_where_exists_correlated_true() {
                 foreign_key: None,
                 check: None,
                 auto_increment: false,
+                generated: None,
                 name: "amount".into(),
                 data_type: DataType::Float,
                 nullable: false,
@@ -549,6 +577,8 @@ fn test_where_exists_correlated_true() {
         limit: None,
         offset: None,
         fetch: None,
+        window_definitions: Vec::new(),
+        from_values: None,
     };
 
     let stmt = Statement::Select(SelectStatement {
@@ -569,6 +599,8 @@ fn test_where_exists_correlated_true() {
         limit: None,
         offset: None,
         fetch: None,
+        window_definitions: Vec::new(),
+        from_values: None,
     });
 
     let output = execute(stmt).unwrap();
@@ -588,6 +620,7 @@ fn test_where_not_exists_false() {
                 foreign_key: None,
                 check: None,
                 auto_increment: false,
+                generated: None,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
@@ -599,6 +632,7 @@ fn test_where_not_exists_false() {
                 foreign_key: None,
                 check: None,
                 auto_increment: false,
+                generated: None,
                 name: "name".into(),
                 data_type: DataType::Text,
                 nullable: false,
@@ -633,6 +667,7 @@ fn test_where_not_exists_false() {
                 foreign_key: None,
                 check: None,
                 auto_increment: false,
+                generated: None,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
@@ -644,6 +679,7 @@ fn test_where_not_exists_false() {
                 foreign_key: None,
                 check: None,
                 auto_increment: false,
+                generated: None,
                 name: "amount".into(),
                 data_type: DataType::Float,
                 nullable: false,
@@ -690,6 +726,8 @@ fn test_where_not_exists_false() {
         limit: None,
         offset: None,
         fetch: None,
+        window_definitions: Vec::new(),
+        from_values: None,
     };
 
     let stmt = Statement::Select(SelectStatement {
@@ -713,6 +751,8 @@ fn test_where_not_exists_false() {
         limit: None,
         offset: None,
         fetch: None,
+        window_definitions: Vec::new(),
+        from_values: None,
     });
 
     let output = execute(stmt).unwrap();
@@ -732,6 +772,7 @@ fn test_where_exists_correlated_false() {
                 foreign_key: None,
                 check: None,
                 auto_increment: false,
+                generated: None,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
@@ -743,6 +784,7 @@ fn test_where_exists_correlated_false() {
                 foreign_key: None,
                 check: None,
                 auto_increment: false,
+                generated: None,
                 name: "name".into(),
                 data_type: DataType::Text,
                 nullable: false,
@@ -777,6 +819,7 @@ fn test_where_exists_correlated_false() {
                 foreign_key: None,
                 check: None,
                 auto_increment: false,
+                generated: None,
                 name: "user_id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
@@ -788,6 +831,7 @@ fn test_where_exists_correlated_false() {
                 foreign_key: None,
                 check: None,
                 auto_increment: false,
+                generated: None,
                 name: "amount".into(),
                 data_type: DataType::Float,
                 nullable: false,
@@ -842,6 +886,8 @@ fn test_where_exists_correlated_false() {
         limit: None,
         offset: None,
         fetch: None,
+        window_definitions: Vec::new(),
+        from_values: None,
     };
 
     let stmt = Statement::Select(SelectStatement {
@@ -862,6 +908,8 @@ fn test_where_exists_correlated_false() {
         limit: None,
         offset: None,
         fetch: None,
+        window_definitions: Vec::new(),
+        from_values: None,
     });
 
     let output = execute(stmt).unwrap();
@@ -881,6 +929,7 @@ fn test_where_exists_with_join() {
                 foreign_key: None,
                 check: None,
                 auto_increment: false,
+                generated: None,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
@@ -892,6 +941,7 @@ fn test_where_exists_with_join() {
                 foreign_key: None,
                 check: None,
                 auto_increment: false,
+                generated: None,
                 name: "name".into(),
                 data_type: DataType::Text,
                 nullable: false,
@@ -926,6 +976,7 @@ fn test_where_exists_with_join() {
                 foreign_key: None,
                 check: None,
                 auto_increment: false,
+                generated: None,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
@@ -937,6 +988,7 @@ fn test_where_exists_with_join() {
                 foreign_key: None,
                 check: None,
                 auto_increment: false,
+                generated: None,
                 name: "user_id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
@@ -971,6 +1023,7 @@ fn test_where_exists_with_join() {
                 foreign_key: None,
                 check: None,
                 auto_increment: false,
+                generated: None,
                 name: "id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
@@ -982,6 +1035,7 @@ fn test_where_exists_with_join() {
                 foreign_key: None,
                 check: None,
                 auto_increment: false,
+                generated: None,
                 name: "order_id".into(),
                 data_type: DataType::Integer,
                 nullable: false,
@@ -1037,6 +1091,8 @@ fn test_where_exists_with_join() {
         limit: None,
         offset: None,
         fetch: None,
+        window_definitions: Vec::new(),
+        from_values: None,
     };
 
     let stmt = Statement::Select(SelectStatement {
@@ -1057,6 +1113,8 @@ fn test_where_exists_with_join() {
         limit: None,
         offset: None,
         fetch: None,
+        window_definitions: Vec::new(),
+        from_values: None,
     });
 
     let output = execute(stmt).unwrap();

@@ -8,9 +8,12 @@ pub mod select;
 use crate::ast::*;
 use crate::database::Database;
 use crate::error::RustqlError;
+use crate::plan_executor::PlanExecutor;
 use crate::planner;
+use crate::planner::QueryPlanner;
 use crate::wal;
 use std::sync::{OnceLock, RwLock};
+use std::time::Instant;
 
 static DATABASE: OnceLock<RwLock<Database>> = OnceLock::new();
 
@@ -57,6 +60,7 @@ pub fn execute(statement: Statement) -> Result<String, RustqlError> {
         Statement::CommitTransaction => execute_commit_transaction(),
         Statement::RollbackTransaction => execute_rollback_transaction(),
         Statement::Explain(stmt) => execute_explain(stmt),
+        Statement::ExplainAnalyze(stmt) => execute_explain_analyze(stmt),
         Statement::Describe(table_name) => ddl::execute_describe(table_name),
         Statement::ShowTables => ddl::execute_show_tables(),
         Statement::Savepoint(name) => execute_savepoint(name),
@@ -66,6 +70,14 @@ pub fn execute(statement: Statement) -> Result<String, RustqlError> {
         Statement::TruncateTable { table_name } => ddl::execute_truncate_table(table_name),
         Statement::CreateView { name, query_sql } => ddl::execute_create_view(name, query_sql),
         Statement::DropView { name, if_exists } => ddl::execute_drop_view(name, if_exists),
+        Statement::Merge(stmt) => dml::execute_merge(stmt),
+        Statement::Do { statements } => {
+            let mut results = Vec::new();
+            for s in statements {
+                results.push(execute(s)?);
+            }
+            Ok(results.join("\n"))
+        }
     }
 }
 
@@ -107,6 +119,28 @@ fn execute_explain(stmt: SelectStatement) -> Result<String, RustqlError> {
     planner::explain_query(&db, &stmt)
 }
 
+fn execute_explain_analyze(stmt: SelectStatement) -> Result<String, RustqlError> {
+    let db = get_database_read();
+    let planner = QueryPlanner::new(&db);
+
+    let planning_start = Instant::now();
+    let plan = planner.plan_select(&stmt)?;
+    let planning_ms = planning_start.elapsed().as_secs_f64() * 1000.0;
+
+    let executor = PlanExecutor::new(&db);
+    let execution_start = Instant::now();
+    let result = executor.execute(&plan, &stmt)?;
+    let execution_ms = execution_start.elapsed().as_secs_f64() * 1000.0;
+
+    Ok(format!(
+        "Query Plan:\n{}\nPlanning Time: {:.3} ms\nExecution Time: {:.3} ms\nActual Rows: {}",
+        plan,
+        planning_ms,
+        execution_ms,
+        result.rows.len()
+    ))
+}
+
 fn execute_savepoint(name: String) -> Result<String, RustqlError> {
     wal::savepoint(&name)?;
     Ok(format!("Savepoint '{}' created", name))
@@ -124,3 +158,9 @@ fn execute_rollback_to_savepoint(name: String) -> Result<String, RustqlError> {
 }
 
 pub use expr::format_value;
+
+pub fn reload_database_from_storage_for_testing() {
+    let mut db = get_database_write();
+    *db = Database::load();
+    wal::reset_wal_state();
+}

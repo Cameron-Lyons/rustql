@@ -1750,7 +1750,7 @@ fn execute_multi_grouping_sets(
             .filter_map(|(_, col_info)| col_info.clone())
             .collect();
 
-        for (_group_key, group_rows) in &groups {
+        for group_rows in groups.values() {
             if let Some(ref having_expr) = stmt.having {
                 let should_include =
                     evaluate_having(having_expr, &stmt.columns, table, group_rows)?;
