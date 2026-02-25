@@ -2,6 +2,9 @@ use crate::ast::*;
 use crate::error::RustqlError;
 use crate::lexer::Token;
 
+type ParseOverClauseResult =
+    Result<(Vec<Expression>, Vec<OrderByExpr>, Option<WindowFrame>), RustqlError>;
+
 pub struct Parser {
     tokens: Vec<Token>,
     current: usize,
@@ -367,14 +370,9 @@ impl Parser {
                 };
 
                 let (on_expr, using_cols) =
-                    if matches!(join_type, JoinType::Cross | JoinType::Natural) {
-                        if *self.current_token() == Token::On {
-                            self.advance();
-                            (Some(self.parse_expression()?), None)
-                        } else {
-                            (None, None)
-                        }
-                    } else if lateral && join_subquery.is_some() {
+                    if matches!(join_type, JoinType::Cross | JoinType::Natural)
+                        || (lateral && join_subquery.is_some())
+                    {
                         if *self.current_token() == Token::On {
                             self.advance();
                             (Some(self.parse_expression()?), None)
@@ -1033,10 +1031,7 @@ impl Parser {
         })
     }
 
-    #[allow(clippy::type_complexity)]
-    fn parse_over_clause(
-        &mut self,
-    ) -> Result<(Vec<Expression>, Vec<OrderByExpr>, Option<WindowFrame>), RustqlError> {
+    fn parse_over_clause(&mut self) -> ParseOverClauseResult {
         self.consume(Token::Over)?;
         if let Token::Identifier(ref _name) = *self.current_token() {
             let window_name = match self.advance() {

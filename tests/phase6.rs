@@ -135,7 +135,7 @@ fn test_dayofweek() {
     let lines: Vec<&str> = result.lines().collect();
     let val_line = lines.last().unwrap();
     let val: i64 = val_line.trim().trim_matches('|').trim().parse().unwrap();
-    assert!(val >= 1 && val <= 7, "got: {}", val);
+    assert!((1..=7).contains(&val), "got: {}", val);
 }
 
 #[test]
@@ -149,7 +149,7 @@ fn test_extract_quarter_week_dow() {
     let lines: Vec<&str> = result3.lines().collect();
     let val_line = lines.last().unwrap();
     let val: i64 = val_line.trim().trim_matches('|').trim().parse().unwrap();
-    assert!(val >= 1 && val <= 7, "got: {}", val);
+    assert!((1..=7).contains(&val), "got: {}", val);
 }
 
 #[test]

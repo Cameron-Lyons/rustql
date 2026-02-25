@@ -354,8 +354,7 @@ fn test_case_when_in_where() {
     let result = process_query(
         "SELECT * FROM products WHERE CASE WHEN category = 'electronics' THEN price > 150 ELSE price > 0 END",
     );
-    if result.is_ok() {
-        let output = result.unwrap();
+    if let Ok(output) = result {
         assert!(output.contains("200"));
     }
 }

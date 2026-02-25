@@ -30,10 +30,10 @@ pub fn execute_select(mut stmt: SelectStatement) -> Result<String, RustqlError> 
         return execute_select_with_ctes(stmt);
     }
 
-    if let Some(ref tf) = stmt.from_function {
-        if tf.name == "generate_series" {
-            return execute_generate_series(stmt.clone(), tf);
-        }
+    if let Some(ref tf) = stmt.from_function
+        && tf.name == "generate_series"
+    {
+        return execute_generate_series(stmt.clone(), tf);
     }
 
     if stmt.from.is_empty() {
@@ -1971,18 +1971,14 @@ fn resolve_window_definitions(stmt: &mut SelectStatement) {
                 },
             ..
         } = col
+            && partition_by.len() == 1
+            && let Expression::Column(ref name) = partition_by[0]
+            && let Some(ref_name) = name.strip_prefix("__window_ref:")
+            && let Some(def) = defs.iter().find(|d| d.name == ref_name)
         {
-            if partition_by.len() == 1 {
-                if let Expression::Column(ref name) = partition_by[0] {
-                    if let Some(ref_name) = name.strip_prefix("__window_ref:") {
-                        if let Some(def) = defs.iter().find(|d| d.name == ref_name) {
-                            *partition_by = def.partition_by.clone();
-                            *order_by = def.order_by.clone();
-                            *frame = def.frame.clone();
-                        }
-                    }
-                }
-            }
+            *partition_by = def.partition_by.clone();
+            *order_by = def.order_by.clone();
+            *frame = def.frame.clone();
         }
     }
 }

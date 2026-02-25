@@ -1305,14 +1305,13 @@ pub fn execute_merge(stmt: MergeStatement) -> Result<String, RustqlError> {
                                 for (i, col_name) in cols.iter().enumerate() {
                                     if let Some(col_idx) =
                                         target_columns.iter().position(|c| c.name == *col_name)
+                                        && i < values.len()
                                     {
-                                        if i < values.len() {
-                                            new_row[col_idx] = evaluate_value_expression(
-                                                &values[i],
-                                                &combined_columns,
-                                                &combined_row,
-                                            )?;
-                                        }
+                                        new_row[col_idx] = evaluate_value_expression(
+                                            &values[i],
+                                            &combined_columns,
+                                            &combined_row,
+                                        )?;
                                     }
                                 }
                             } else {
@@ -1376,20 +1375,19 @@ pub fn validate_check_constraints(
 
 fn evaluate_generated_columns(
     columns: &[ColumnDefinition],
-    row: &mut Vec<Value>,
+    row: &mut [Value],
     insert_columns: &Option<Vec<String>>,
 ) -> Result<(), RustqlError> {
     for (col_idx, col_def) in columns.iter().enumerate() {
         if let Some(ref generated) = col_def.generated {
-            if generated.always {
-                if let Some(specified_cols) = insert_columns {
-                    if specified_cols.iter().any(|c| c == &col_def.name) {
-                        return Err(RustqlError::Internal(format!(
-                            "Cannot insert into generated column '{}'",
-                            col_def.name
-                        )));
-                    }
-                }
+            if generated.always
+                && let Some(specified_cols) = insert_columns
+                && specified_cols.iter().any(|c| c == &col_def.name)
+            {
+                return Err(RustqlError::Internal(format!(
+                    "Cannot insert into generated column '{}'",
+                    col_def.name
+                )));
             }
 
             let wrapped = format!("SELECT {} FROM _dummy", generated.expr_sql);
@@ -1400,12 +1398,12 @@ fn evaluate_generated_columns(
                     if col_idx < row.len() {
                         row[col_idx] = evaluate_value_expression(expr, columns, row)?;
                     }
-                } else if let Some(Column::Named { name, .. }) = select_stmt.columns.first() {
-                    if let Some(src_idx) = columns.iter().position(|c| c.name == *name) {
-                        if col_idx < row.len() && src_idx < row.len() {
-                            row[col_idx] = row[src_idx].clone();
-                        }
-                    }
+                } else if let Some(Column::Named { name, .. }) = select_stmt.columns.first()
+                    && let Some(src_idx) = columns.iter().position(|c| c.name == *name)
+                    && col_idx < row.len()
+                    && src_idx < row.len()
+                {
+                    row[col_idx] = row[src_idx].clone();
                 }
             }
         }
@@ -1415,7 +1413,7 @@ fn evaluate_generated_columns(
 
 fn evaluate_generated_columns_update(
     columns: &[ColumnDefinition],
-    row: &mut Vec<Value>,
+    row: &mut [Value],
 ) -> Result<(), RustqlError> {
     for (col_idx, col_def) in columns.iter().enumerate() {
         if let Some(ref generated) = col_def.generated {
@@ -1427,12 +1425,12 @@ fn evaluate_generated_columns_update(
                     if col_idx < row.len() {
                         row[col_idx] = evaluate_value_expression(expr, columns, row)?;
                     }
-                } else if let Some(Column::Named { name, .. }) = select_stmt.columns.first() {
-                    if let Some(src_idx) = columns.iter().position(|c| c.name == *name) {
-                        if col_idx < row.len() && src_idx < row.len() {
-                            row[col_idx] = row[src_idx].clone();
-                        }
-                    }
+                } else if let Some(Column::Named { name, .. }) = select_stmt.columns.first()
+                    && let Some(src_idx) = columns.iter().position(|c| c.name == *name)
+                    && col_idx < row.len()
+                    && src_idx < row.len()
+                {
+                    row[col_idx] = row[src_idx].clone();
                 }
             }
         }

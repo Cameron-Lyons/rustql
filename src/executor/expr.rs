@@ -222,13 +222,11 @@ pub fn evaluate_value_expression_with_db(
                 }) {
                     return Ok(row[idx].clone());
                 }
-            } else {
-                if let Some(idx) = columns
-                    .iter()
-                    .position(|c| c.name.split('.').next_back().unwrap_or(&c.name) == name.as_str())
-                {
-                    return Ok(row[idx].clone());
-                }
+            } else if let Some(idx) = columns
+                .iter()
+                .position(|c| c.name.split('.').next_back().unwrap_or(&c.name) == name.as_str())
+            {
+                return Ok(row[idx].clone());
             }
             Err(RustqlError::ColumnNotFound(name.clone()))
         }
