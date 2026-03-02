@@ -2,7 +2,7 @@ use crate::ast::*;
 use crate::database::{Database, Table};
 use crate::error::RustqlError;
 use std::cmp::Ordering;
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 
 use super::aggregate::{
     compute_aggregate, evaluate_having, evaluate_window_functions, execute_select_with_aggregates,
@@ -279,7 +279,7 @@ pub fn execute_select(mut stmt: SelectStatement) -> Result<String, RustqlError> 
     }
 
     if let Some(ref distinct_on_exprs) = stmt.distinct_on {
-        let mut seen_keys: Vec<Vec<Value>> = Vec::new();
+        let mut seen_keys: BTreeSet<Vec<Value>> = BTreeSet::new();
         let mut deduped: Vec<(Vec<Value>, Vec<Value>)> = Vec::new();
         for (projected, order_vals) in outputs {
             let key: Vec<Value> = distinct_on_exprs
@@ -296,8 +296,7 @@ pub fn execute_select(mut stmt: SelectStatement) -> Result<String, RustqlError> 
                         .unwrap_or(Value::Null)
                 })
                 .collect();
-            if !seen_keys.iter().any(|k| k == &key) {
-                seen_keys.push(key);
+            if seen_keys.insert(key) {
                 deduped.push((projected, order_vals));
             }
         }
@@ -327,7 +326,6 @@ pub fn execute_select(mut stmt: SelectStatement) -> Result<String, RustqlError> 
         base_limit
     };
 
-    use std::collections::BTreeSet;
     let mut seen: BTreeSet<Vec<Value>> = BTreeSet::new();
     let mut emitted = 0usize;
     let mut skipped = 0usize;

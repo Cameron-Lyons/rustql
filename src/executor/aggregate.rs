@@ -2,19 +2,14 @@ use crate::ast::*;
 use crate::database::Table;
 use crate::error::RustqlError;
 use std::cmp::Ordering;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::expr::{
     apply_arithmetic, compare_values_for_sort, evaluate_value_expression, format_value,
 };
 
-fn remember_distinct(seen: &mut Vec<Value>, val: &Value) -> bool {
-    if seen.iter().any(|existing| existing == val) {
-        false
-    } else {
-        seen.push(val.clone());
-        true
-    }
+fn remember_distinct(seen: &mut BTreeSet<Value>, val: &Value) -> bool {
+    seen.insert(val.clone())
 }
 
 pub fn format_aggregate_header(agg: &AggregateFunction) -> String {
@@ -128,7 +123,7 @@ fn compute_aggregate_inner(
                 Ok(Value::Integer(rows.len() as i64))
             } else {
                 let mut count = 0;
-                let mut seen: Vec<Value> = Vec::new();
+                let mut seen: BTreeSet<Value> = BTreeSet::new();
                 for row in rows {
                     let val = evaluate_value_expression(expr, &table.columns, row)?;
                     if matches!(&val, Value::Null) {
@@ -145,7 +140,7 @@ fn compute_aggregate_inner(
         AggregateFunctionType::Sum => {
             let mut sum = 0.0;
             let mut has_value = false;
-            let mut seen: Vec<Value> = Vec::new();
+            let mut seen: BTreeSet<Value> = BTreeSet::new();
             for row in rows {
                 let val = evaluate_value_expression(expr, &table.columns, row)?;
                 if matches!(&val, Value::Null) {
@@ -179,7 +174,7 @@ fn compute_aggregate_inner(
         AggregateFunctionType::Avg => {
             let mut sum = 0.0;
             let mut count = 0;
-            let mut seen: Vec<Value> = Vec::new();
+            let mut seen: BTreeSet<Value> = BTreeSet::new();
             for row in rows {
                 let val = evaluate_value_expression(expr, &table.columns, row)?;
                 if matches!(&val, Value::Null) {
@@ -212,7 +207,7 @@ fn compute_aggregate_inner(
         }
         AggregateFunctionType::Min => {
             let mut min_val: Option<Value> = None;
-            let mut seen: Vec<Value> = Vec::new();
+            let mut seen: BTreeSet<Value> = BTreeSet::new();
             for row in rows {
                 let val = evaluate_value_expression(expr, &table.columns, row)?;
                 if matches!(&val, Value::Null) {
@@ -236,7 +231,7 @@ fn compute_aggregate_inner(
         }
         AggregateFunctionType::Max => {
             let mut max_val: Option<Value> = None;
-            let mut seen: Vec<Value> = Vec::new();
+            let mut seen: BTreeSet<Value> = BTreeSet::new();
             for row in rows {
                 let val = evaluate_value_expression(expr, &table.columns, row)?;
                 if matches!(&val, Value::Null) {
@@ -260,7 +255,7 @@ fn compute_aggregate_inner(
         }
         AggregateFunctionType::Variance => {
             let mut values: Vec<f64> = Vec::new();
-            let mut seen: Vec<Value> = Vec::new();
+            let mut seen: BTreeSet<Value> = BTreeSet::new();
             for row in rows {
                 let val = evaluate_value_expression(expr, &table.columns, row)?;
                 if matches!(&val, Value::Null) {
@@ -289,7 +284,7 @@ fn compute_aggregate_inner(
         }
         AggregateFunctionType::Stddev => {
             let mut values: Vec<f64> = Vec::new();
-            let mut seen: Vec<Value> = Vec::new();
+            let mut seen: BTreeSet<Value> = BTreeSet::new();
             for row in rows {
                 let val = evaluate_value_expression(expr, &table.columns, row)?;
                 if matches!(&val, Value::Null) {
@@ -319,7 +314,7 @@ fn compute_aggregate_inner(
         AggregateFunctionType::GroupConcat => {
             let sep = separator.unwrap_or(",");
             let mut parts: Vec<String> = Vec::new();
-            let mut seen_vals: Vec<Value> = Vec::new();
+            let mut seen_vals: BTreeSet<Value> = BTreeSet::new();
             for row in rows {
                 let val = evaluate_value_expression(expr, &table.columns, row)?;
                 if matches!(&val, Value::Null) {
@@ -404,7 +399,7 @@ fn compute_aggregate_inner(
         }
         AggregateFunctionType::Median => {
             let mut values: Vec<f64> = Vec::new();
-            let mut seen_vals: Vec<Value> = Vec::new();
+            let mut seen_vals: BTreeSet<Value> = BTreeSet::new();
             for row in rows {
                 let val = evaluate_value_expression(expr, &table.columns, row)?;
                 if matches!(&val, Value::Null) {
@@ -435,8 +430,9 @@ fn compute_aggregate_inner(
             }
         }
         AggregateFunctionType::Mode => {
-            let mut counts: Vec<(Value, usize)> = Vec::new();
-            let mut seen_vals: Vec<Value> = Vec::new();
+            let mut counts: BTreeMap<Value, (usize, usize)> = BTreeMap::new();
+            let mut seen_vals: BTreeSet<Value> = BTreeSet::new();
+            let mut seen_order = 0usize;
             for row in rows {
                 let val = evaluate_value_expression(expr, &table.columns, row)?;
                 if matches!(&val, Value::Null) {
@@ -445,22 +441,32 @@ fn compute_aggregate_inner(
                 if distinct && !remember_distinct(&mut seen_vals, &val) {
                     continue;
                 }
-                if let Some(entry) = counts.iter_mut().find(|(v, _)| v == &val) {
-                    entry.1 += 1;
-                } else {
-                    counts.push((val, 1));
-                }
+                let entry = counts.entry(val).or_insert((0, seen_order));
+                entry.0 += 1;
+                seen_order += 1;
             }
             if counts.is_empty() {
                 return Ok(Value::Null);
             }
-            counts.sort_by(|a, b| b.1.cmp(&a.1));
-            Ok(counts[0].0.clone())
+            let mut best: Option<(Value, usize, usize)> = None;
+            for (val, (count, first_seen)) in counts {
+                match best {
+                    None => best = Some((val, count, first_seen)),
+                    Some((_, best_count, best_first_seen))
+                        if count > best_count
+                            || (count == best_count && first_seen < best_first_seen) =>
+                    {
+                        best = Some((val, count, first_seen));
+                    }
+                    _ => {}
+                }
+            }
+            Ok(best.map(|(val, _, _)| val).unwrap_or(Value::Null))
         }
         AggregateFunctionType::PercentileCont => {
             let frac = percentile.unwrap_or(0.5);
             let mut values: Vec<f64> = Vec::new();
-            let mut seen_vals: Vec<Value> = Vec::new();
+            let mut seen_vals: BTreeSet<Value> = BTreeSet::new();
             for row in rows {
                 let val = evaluate_value_expression(expr, &table.columns, row)?;
                 if matches!(&val, Value::Null) {
@@ -502,7 +508,7 @@ fn compute_aggregate_inner(
         AggregateFunctionType::PercentileDisc => {
             let frac = percentile.unwrap_or(0.5);
             let mut values: Vec<Value> = Vec::new();
-            let mut seen_vals: Vec<Value> = Vec::new();
+            let mut seen_vals: BTreeSet<Value> = BTreeSet::new();
             for row in rows {
                 let val = evaluate_value_expression(expr, &table.columns, row)?;
                 if matches!(&val, Value::Null) {
