@@ -166,10 +166,10 @@ impl Database {
     }
 
     pub fn load() -> Self {
-        crate::storage::storage_engine().load()
+        crate::storage::load_database()
     }
 
     pub fn save(&self) -> Result<(), RustqlError> {
-        crate::storage::storage_engine().save(self)
+        crate::storage::save_database(self)
     }
 }

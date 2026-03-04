@@ -2,7 +2,6 @@ use crate::ast::{ColumnDefinition, TableConstraint, Value};
 use crate::database::{Database, Index, Table};
 use crate::error::RustqlError;
 use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
 
 #[derive(Debug, Clone)]
 pub enum WalEntry {
@@ -403,87 +402,84 @@ fn rebuild_all_indexes(db: &mut Database) {
     }
 }
 
-static TRANSACTION_WAL: OnceLock<Mutex<Option<WalLog>>> = OnceLock::new();
-
-fn get_wal_lock() -> &'static Mutex<Option<WalLog>> {
-    TRANSACTION_WAL.get_or_init(|| Mutex::new(None))
+#[derive(Debug, Default)]
+pub struct WalState {
+    current: Option<WalLog>,
 }
 
-pub fn begin_transaction() -> Result<(), RustqlError> {
-    let mut wal = get_wal_lock().lock().unwrap();
-    if wal.is_some() {
-        return Err(RustqlError::TransactionError(
-            "Transaction already in progress".to_string(),
-        ));
+impl WalState {
+    pub fn begin_transaction(&mut self) -> Result<(), RustqlError> {
+        if self.current.is_some() {
+            return Err(RustqlError::TransactionError(
+                "Transaction already in progress".to_string(),
+            ));
+        }
+        self.current = Some(WalLog::new());
+        Ok(())
     }
-    *wal = Some(WalLog::new());
-    Ok(())
-}
 
-pub fn commit_transaction() -> Result<(), RustqlError> {
-    let mut wal = get_wal_lock().lock().unwrap();
-    if wal.is_none() {
-        return Err(RustqlError::TransactionError(
-            "No transaction in progress".to_string(),
-        ));
+    pub fn commit_transaction(&mut self) -> Result<(), RustqlError> {
+        if self.current.is_none() {
+            return Err(RustqlError::TransactionError(
+                "No transaction in progress".to_string(),
+            ));
+        }
+        self.current = None;
+        Ok(())
     }
-    *wal = None;
-    Ok(())
-}
 
-pub fn rollback_transaction(db: &mut Database) -> Result<(), RustqlError> {
-    let mut wal_guard = get_wal_lock().lock().unwrap();
-    match wal_guard.take() {
-        Some(wal_log) => wal_log.rollback(db),
-        None => Err(RustqlError::TransactionError(
-            "No transaction in progress".to_string(),
-        )),
+    pub fn rollback_transaction(&mut self, db: &mut Database) -> Result<(), RustqlError> {
+        match self.current.take() {
+            Some(wal_log) => wal_log.rollback(db),
+            None => Err(RustqlError::TransactionError(
+                "No transaction in progress".to_string(),
+            )),
+        }
     }
-}
 
-pub fn is_in_transaction() -> bool {
-    get_wal_lock().lock().unwrap().is_some()
-}
-
-pub fn record_wal_entry(entry: WalEntry) {
-    let mut wal = get_wal_lock().lock().unwrap();
-    if let Some(ref mut log) = *wal {
-        log.record(entry);
+    pub fn is_in_transaction(&self) -> bool {
+        self.current.is_some()
     }
-}
 
-pub fn reset_wal_state() {
-    let mut wal = get_wal_lock().lock().unwrap();
-    *wal = None;
-}
-
-pub fn savepoint(name: &str) -> Result<(), RustqlError> {
-    let mut wal = get_wal_lock().lock().unwrap();
-    if wal.is_none() {
-        *wal = Some(WalLog::new());
+    pub fn record_wal_entry(&mut self, entry: WalEntry) {
+        if let Some(ref mut log) = self.current {
+            log.record(entry);
+        }
     }
-    if let Some(ref mut log) = *wal {
-        log.savepoint(name);
-    }
-    Ok(())
-}
 
-pub fn release_savepoint(name: &str) -> Result<(), RustqlError> {
-    let mut wal = get_wal_lock().lock().unwrap();
-    match wal.as_mut() {
-        Some(log) => log.release_savepoint(name),
-        None => Err(RustqlError::TransactionError(
-            "No transaction in progress".to_string(),
-        )),
+    pub fn reset(&mut self) {
+        self.current = None;
     }
-}
 
-pub fn rollback_to_savepoint(name: &str, db: &mut Database) -> Result<(), RustqlError> {
-    let mut wal = get_wal_lock().lock().unwrap();
-    match wal.as_mut() {
-        Some(log) => log.rollback_to_savepoint(name, db),
-        None => Err(RustqlError::TransactionError(
-            "No transaction in progress".to_string(),
-        )),
+    pub fn savepoint(&mut self, name: &str) -> Result<(), RustqlError> {
+        if self.current.is_none() {
+            self.current = Some(WalLog::new());
+        }
+        if let Some(ref mut log) = self.current {
+            log.savepoint(name);
+        }
+        Ok(())
+    }
+
+    pub fn release_savepoint(&mut self, name: &str) -> Result<(), RustqlError> {
+        match self.current.as_mut() {
+            Some(log) => log.release_savepoint(name),
+            None => Err(RustqlError::TransactionError(
+                "No transaction in progress".to_string(),
+            )),
+        }
+    }
+
+    pub fn rollback_to_savepoint(
+        &mut self,
+        name: &str,
+        db: &mut Database,
+    ) -> Result<(), RustqlError> {
+        match self.current.as_mut() {
+            Some(log) => log.rollback_to_savepoint(name, db),
+            None => Err(RustqlError::TransactionError(
+                "No transaction in progress".to_string(),
+            )),
+        }
     }
 }

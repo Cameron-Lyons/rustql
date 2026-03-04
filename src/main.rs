@@ -1,7 +1,16 @@
-use rustql::process_query;
+use rustql::{Engine, EngineOptions, format_query_results};
 use std::io::{self, IsTerminal, Write};
 
 fn main() {
+    let engine = match Engine::open(EngineOptions::default()) {
+        Ok(engine) => engine,
+        Err(e) => {
+            eprintln!("Error: {}", e);
+            return;
+        }
+    };
+    let mut session = engine.session();
+
     if std::io::stdin().is_terminal() {
         println!("RustQL - SQL Engine in Rust");
         println!("Type 'exit' to quit\n");
@@ -24,8 +33,8 @@ fn main() {
                 continue;
             }
 
-            match process_query(query) {
-                Ok(result) => println!("{}", result),
+            match session.execute(query) {
+                Ok(results) => println!("{}", format_query_results(&results)),
                 Err(e) => eprintln!("Error: {}", e),
             }
         }
@@ -35,8 +44,8 @@ fn main() {
         let query = input.trim();
 
         if !query.is_empty() {
-            match process_query(query) {
-                Ok(result) => println!("{}", result),
+            match session.execute(query) {
+                Ok(results) => println!("{}", format_query_results(&results)),
                 Err(e) => eprintln!("Error: {}", e),
             }
         }

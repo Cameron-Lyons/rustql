@@ -9,32 +9,99 @@ use crate::ast::*;
 use crate::database::Database;
 use crate::error::RustqlError;
 use crate::planner;
-use crate::wal;
-use std::sync::{OnceLock, RwLock};
+use crate::wal::{self, WalState};
+use std::cell::RefCell;
+use std::sync::{Mutex, RwLock};
 
-static DATABASE: OnceLock<RwLock<Database>> = OnceLock::new();
+thread_local! {
+    static CONTEXT_STACK: RefCell<Vec<*const ExecutionContext>> = const { RefCell::new(Vec::new()) };
+}
 
-fn get_database() -> &'static RwLock<Database> {
-    #[cfg(test)]
-    {
-        DATABASE.get_or_init(|| RwLock::new(Database::new()))
+pub struct ExecutionContext {
+    database: RwLock<Database>,
+    wal_state: Mutex<WalState>,
+}
+
+impl ExecutionContext {
+    pub fn new(database: Database) -> Self {
+        Self {
+            database: RwLock::new(database),
+            wal_state: Mutex::new(WalState::default()),
+        }
     }
-    #[cfg(not(test))]
-    {
-        DATABASE.get_or_init(|| RwLock::new(Database::load()))
+
+    pub fn database_snapshot(&self) -> Database {
+        self.database.read().unwrap().clone()
     }
+}
+
+pub struct ContextBinding;
+
+impl Drop for ContextBinding {
+    fn drop(&mut self) {
+        CONTEXT_STACK.with(|stack| {
+            let _ = stack.borrow_mut().pop();
+        });
+    }
+}
+
+pub fn bind_context(context: &ExecutionContext) -> ContextBinding {
+    CONTEXT_STACK.with(|stack| {
+        stack.borrow_mut().push(context as *const ExecutionContext);
+    });
+    ContextBinding
+}
+
+fn current_context() -> &'static ExecutionContext {
+    let ptr = CONTEXT_STACK.with(|stack| stack.borrow().last().copied());
+
+    match ptr {
+        Some(ptr) => {
+            // The context pointer is bound to the current thread for the duration of execution.
+            unsafe { &*ptr }
+        }
+        None => panic!("Executor context is not bound"),
+    }
+}
+
+fn has_bound_context() -> bool {
+    CONTEXT_STACK.with(|stack| !stack.borrow().is_empty())
 }
 
 fn get_database_read() -> std::sync::RwLockReadGuard<'static, Database> {
-    get_database().read().unwrap()
+    current_context().database.read().unwrap()
 }
 
 fn get_database_write() -> std::sync::RwLockWriteGuard<'static, Database> {
-    get_database().write().unwrap()
+    current_context().database.write().unwrap()
 }
 
 pub fn get_database_for_testing() -> Database {
-    (*get_database_read()).clone()
+    crate::engine::default_engine().snapshot_database()
+}
+
+fn with_wal_state_mut<F, R>(f: F) -> R
+where
+    F: FnOnce(&mut WalState) -> R,
+{
+    let context = current_context();
+    let mut wal_state = context.wal_state.lock().unwrap();
+    f(&mut wal_state)
+}
+
+fn with_wal_state<F, R>(f: F) -> R
+where
+    F: FnOnce(&WalState) -> R,
+{
+    let context = current_context();
+    let wal_state = context.wal_state.lock().unwrap();
+    f(&wal_state)
+}
+
+pub(crate) fn record_wal_entry(entry: wal::WalEntry) {
+    with_wal_state_mut(|state| {
+        state.record_wal_entry(entry);
+    });
 }
 
 pub(crate) struct SelectResult {
@@ -43,7 +110,13 @@ pub(crate) struct SelectResult {
 }
 
 pub fn execute(statement: Statement) -> Result<String, RustqlError> {
-    match statement {
+    let default_binding = if has_bound_context() {
+        None
+    } else {
+        Some(crate::engine::bind_default_context())
+    };
+
+    let result = match statement {
         Statement::CreateTable(stmt) => ddl::execute_create_table(stmt),
         Statement::DropTable(stmt) => ddl::execute_drop_table(stmt),
         Statement::Insert(stmt) => dml::execute_insert(stmt),
@@ -74,31 +147,45 @@ pub fn execute(statement: Statement) -> Result<String, RustqlError> {
             }
             Ok(results.join("\n"))
         }
-    }
+    };
+
+    drop(default_binding);
+    result
 }
 
 pub fn reset_database_state() {
-    let mut db = get_database_write();
-    db.tables.clear();
-    db.indexes.clear();
-    db.views.clear();
-    wal::reset_wal_state();
+    let default_binding = if has_bound_context() {
+        None
+    } else {
+        Some(crate::engine::bind_default_context())
+    };
+
+    {
+        let mut db = get_database_write();
+        db.tables.clear();
+        db.indexes.clear();
+        db.views.clear();
+    }
+
+    with_wal_state_mut(|state| state.reset());
+
+    drop(default_binding);
 }
 
 fn save_if_not_in_transaction(db: &Database) -> Result<(), RustqlError> {
-    if !wal::is_in_transaction() {
+    if !with_wal_state(|state| state.is_in_transaction()) {
         db.save()?;
     }
     Ok(())
 }
 
 fn execute_begin_transaction() -> Result<String, RustqlError> {
-    wal::begin_transaction()?;
+    with_wal_state_mut(|state| state.begin_transaction())?;
     Ok("Transaction begun".to_string())
 }
 
 fn execute_commit_transaction() -> Result<String, RustqlError> {
-    wal::commit_transaction()?;
+    with_wal_state_mut(|state| state.commit_transaction())?;
     let db = get_database_read();
     db.save()?;
     Ok("Transaction committed".to_string())
@@ -106,7 +193,7 @@ fn execute_commit_transaction() -> Result<String, RustqlError> {
 
 fn execute_rollback_transaction() -> Result<String, RustqlError> {
     let mut db = get_database_write();
-    wal::rollback_transaction(&mut db)?;
+    with_wal_state_mut(|state| state.rollback_transaction(&mut db))?;
     Ok("Transaction rolled back".to_string())
 }
 
@@ -116,18 +203,18 @@ fn execute_explain(stmt: SelectStatement) -> Result<String, RustqlError> {
 }
 
 fn execute_savepoint(name: String) -> Result<String, RustqlError> {
-    wal::savepoint(&name)?;
+    with_wal_state_mut(|state| state.savepoint(&name))?;
     Ok(format!("Savepoint '{}' created", name))
 }
 
 fn execute_release_savepoint(name: String) -> Result<String, RustqlError> {
-    wal::release_savepoint(&name)?;
+    with_wal_state_mut(|state| state.release_savepoint(&name))?;
     Ok(format!("Savepoint '{}' released", name))
 }
 
 fn execute_rollback_to_savepoint(name: String) -> Result<String, RustqlError> {
     let mut db = get_database_write();
-    wal::rollback_to_savepoint(&name, &mut db)?;
+    with_wal_state_mut(|state| state.rollback_to_savepoint(&name, &mut db))?;
     Ok(format!("Rolled back to savepoint '{}'", name))
 }
 

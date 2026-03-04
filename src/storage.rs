@@ -6,7 +6,7 @@ use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{Arc, RwLock};
 
 pub trait StorageEngine: Send + Sync {
     fn load(&self) -> Database;
@@ -51,8 +51,6 @@ impl StorageEngine for JsonStorageEngine {
     }
 }
 
-static STORAGE_ENGINE: OnceLock<Box<dyn StorageEngine>> = OnceLock::new();
-
 fn default_engine() -> Box<dyn StorageEngine> {
     match std::env::var("RUSTQL_STORAGE") {
         Ok(v) if v.eq_ignore_ascii_case("btree") => {
@@ -62,10 +60,12 @@ fn default_engine() -> Box<dyn StorageEngine> {
     }
 }
 
-pub fn storage_engine() -> &'static dyn StorageEngine {
-    let _ = STORAGE_ENGINE.get_or_init(default_engine);
+pub fn load_database() -> Database {
+    default_engine().load()
+}
 
-    &**STORAGE_ENGINE.get().unwrap()
+pub fn save_database(db: &Database) -> Result<(), RustqlError> {
+    default_engine().save(db)
 }
 
 const MAX_CACHE_SIZE: usize = 1000;

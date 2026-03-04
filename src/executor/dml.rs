@@ -1,14 +1,13 @@
 use crate::ast::*;
 use crate::database::Database;
 use crate::error::{ConstraintKind, RustqlError};
-use crate::wal::{self, WalEntry};
+use crate::wal::WalEntry;
 use std::collections::HashSet;
 
 use super::expr::{
-    evaluate_expression, evaluate_value_expression, evaluate_value_expression_with_db,
-    format_value, parse_value_from_string,
+    evaluate_expression, evaluate_value_expression, evaluate_value_expression_with_db, format_value,
 };
-use super::{get_database_write, save_if_not_in_transaction};
+use super::{get_database_read, get_database_write, save_if_not_in_transaction};
 
 fn format_returning(
     returning: &[Column],
@@ -84,20 +83,13 @@ fn format_returning(
 
 pub fn execute_insert(mut stmt: InsertStatement) -> Result<String, RustqlError> {
     if let Some(source_query) = stmt.source_query.take() {
-        let select_result = super::select::execute_select(*source_query.clone())?;
-        let lines: Vec<&str> = select_result.lines().collect();
-        if lines.len() >= 2 {
-            for line in lines.iter().skip(2) {
-                if line.trim().is_empty() {
-                    continue;
-                }
-                let values: Vec<Value> = line
-                    .split('\t')
-                    .filter(|s| !s.is_empty())
-                    .map(parse_value_from_string)
-                    .collect();
-                stmt.values.push(values);
-            }
+        let typed_rows = {
+            let db = get_database_read();
+            super::select::execute_select_internal(*source_query, &db)?
+        };
+
+        for row in typed_rows.rows {
+            stmt.values.push(row);
         }
     }
 
@@ -273,7 +265,7 @@ pub fn execute_insert(mut stmt: InsertStatement) -> Result<String, RustqlError> 
                                 .ok_or_else(|| RustqlError::TableNotFound(stmt.table.clone()))?;
                             let old_row = table.rows[row_idx].clone();
                             table.rows[row_idx] = updated_row.clone();
-                            wal::record_wal_entry(WalEntry::UpdateRow {
+                            super::record_wal_entry(WalEntry::UpdateRow {
                                 table: stmt.table.clone(),
                                 row_index: row_idx,
                                 old_row: old_row.clone(),
@@ -305,7 +297,7 @@ pub fn execute_insert(mut stmt: InsertStatement) -> Result<String, RustqlError> 
             .ok_or_else(|| RustqlError::TableNotFound(stmt.table.clone()))?;
         let row_idx = table.rows.len();
         table.rows.push(values.clone());
-        wal::record_wal_entry(WalEntry::InsertRow {
+        super::record_wal_entry(WalEntry::InsertRow {
             table: stmt.table.clone(),
             row_index: row_idx,
         });
@@ -428,7 +420,7 @@ pub fn execute_update(stmt: UpdateStatement) -> Result<String, RustqlError> {
         for (row_idx, updated_row) in rows_to_update {
             let old_row = table.rows[row_idx].clone();
             table.rows[row_idx] = updated_row.clone();
-            wal::record_wal_entry(WalEntry::UpdateRow {
+            super::record_wal_entry(WalEntry::UpdateRow {
                 table: stmt.table.clone(),
                 row_index: row_idx,
                 old_row: old_row.clone(),
@@ -649,7 +641,7 @@ pub fn execute_delete(stmt: DeleteStatement) -> Result<String, RustqlError> {
 
         for idx in &rows_to_delete_indices {
             let old_row = table.rows[*idx].clone();
-            wal::record_wal_entry(WalEntry::DeleteRow {
+            super::record_wal_entry(WalEntry::DeleteRow {
                 table: stmt.table.clone(),
                 row_index: *idx,
                 old_row,
@@ -883,7 +875,7 @@ pub fn handle_foreign_keys_for_delete(
                         rows_to_modify.reverse();
                         for row_idx in &rows_to_modify {
                             let old_row = other_table.rows[*row_idx].clone();
-                            wal::record_wal_entry(WalEntry::DeleteRow {
+                            super::record_wal_entry(WalEntry::DeleteRow {
                                 table: other_table_name.clone(),
                                 row_index: *row_idx,
                                 old_row,
@@ -894,7 +886,7 @@ pub fn handle_foreign_keys_for_delete(
                     ForeignKeyAction::SetNull => {
                         for row_idx in rows_to_modify {
                             if let Some(row) = other_table.rows.get_mut(row_idx) {
-                                wal::record_wal_entry(WalEntry::UpdateRow {
+                                super::record_wal_entry(WalEntry::UpdateRow {
                                     table: other_table_name.clone(),
                                     row_index: row_idx,
                                     old_row: row.clone(),
@@ -969,7 +961,7 @@ fn handle_foreign_keys_for_update(
                         let new_value = new_row[ref_col_idx].clone();
                         for row_idx in rows_to_modify {
                             if let Some(row) = other_table.rows.get_mut(row_idx) {
-                                wal::record_wal_entry(WalEntry::UpdateRow {
+                                super::record_wal_entry(WalEntry::UpdateRow {
                                     table: other_table_name.clone(),
                                     row_index: row_idx,
                                     old_row: row.clone(),
@@ -981,7 +973,7 @@ fn handle_foreign_keys_for_update(
                     ForeignKeyAction::SetNull => {
                         for row_idx in rows_to_modify {
                             if let Some(row) = other_table.rows.get_mut(row_idx) {
-                                wal::record_wal_entry(WalEntry::UpdateRow {
+                                super::record_wal_entry(WalEntry::UpdateRow {
                                     table: other_table_name.clone(),
                                     row_index: row_idx,
                                     old_row: row.clone(),
@@ -1257,7 +1249,7 @@ pub fn execute_merge(stmt: MergeStatement) -> Result<String, RustqlError> {
                                 let table = db.tables.get_mut(&stmt.target_table).unwrap();
                                 let old_row = table.rows[row_idx].clone();
                                 table.rows[row_idx] = updated_row.clone();
-                                wal::record_wal_entry(WalEntry::UpdateRow {
+                                super::record_wal_entry(WalEntry::UpdateRow {
                                     table: stmt.target_table.clone(),
                                     row_index: row_idx,
                                     old_row,
@@ -1267,7 +1259,7 @@ pub fn execute_merge(stmt: MergeStatement) -> Result<String, RustqlError> {
                             MergeMatchedAction::Delete => {
                                 let table = db.tables.get_mut(&stmt.target_table).unwrap();
                                 let old_row = table.rows[row_idx].clone();
-                                wal::record_wal_entry(WalEntry::DeleteRow {
+                                super::record_wal_entry(WalEntry::DeleteRow {
                                     table: stmt.target_table.clone(),
                                     row_index: row_idx,
                                     old_row,
@@ -1329,7 +1321,7 @@ pub fn execute_merge(stmt: MergeStatement) -> Result<String, RustqlError> {
                             let table = db.tables.get_mut(&stmt.target_table).unwrap();
                             let row_idx = table.rows.len();
                             table.rows.push(new_row);
-                            wal::record_wal_entry(WalEntry::InsertRow {
+                            super::record_wal_entry(WalEntry::InsertRow {
                                 table: stmt.target_table.clone(),
                                 row_index: row_idx,
                             });

@@ -1,7 +1,7 @@
 use crate::ast::*;
 use crate::database::{Database, Table};
 use crate::error::RustqlError;
-use crate::wal::{self, WalEntry};
+use crate::wal::WalEntry;
 use std::collections::{BTreeMap, HashSet};
 
 use super::{get_database_read, get_database_write, save_if_not_in_transaction};
@@ -26,7 +26,7 @@ pub fn execute_create_table(stmt: CreateTableStatement) -> Result<String, Rustql
             constraints: stmt.constraints,
         },
     );
-    wal::record_wal_entry(WalEntry::CreateTable {
+    super::record_wal_entry(WalEntry::CreateTable {
         name: stmt.name.clone(),
     });
     save_if_not_in_transaction(&db)?;
@@ -88,7 +88,7 @@ fn execute_create_table_as_select(
             constraints: Vec::new(),
         },
     );
-    wal::record_wal_entry(WalEntry::CreateTable { name: name.clone() });
+    super::record_wal_entry(WalEntry::CreateTable { name: name.clone() });
     save_if_not_in_transaction(&db)?;
     Ok(format!("Table '{}' created", name))
 }
@@ -96,7 +96,7 @@ fn execute_create_table_as_select(
 pub fn execute_drop_table(stmt: DropTableStatement) -> Result<String, RustqlError> {
     let mut db = get_database_write();
     if let Some(removed) = db.tables.remove(&stmt.name) {
-        wal::record_wal_entry(WalEntry::DropTable {
+        super::record_wal_entry(WalEntry::DropTable {
             name: stmt.name.clone(),
             columns: removed.columns,
             rows: removed.rows,
@@ -129,7 +129,7 @@ pub fn execute_alter_table(stmt: AlterTableStatement) -> Result<String, RustqlEr
                 ci.table = new_name.clone();
             }
         }
-        wal::record_wal_entry(WalEntry::AlterRenameTable {
+        super::record_wal_entry(WalEntry::AlterRenameTable {
             old_name: stmt.table.clone(),
             new_name: new_name.clone(),
         });
@@ -163,7 +163,7 @@ pub fn execute_alter_table(stmt: AlterTableStatement) -> Result<String, RustqlEr
             for row in &mut table.rows {
                 row.push(default_value.clone());
             }
-            wal::record_wal_entry(WalEntry::AlterAddColumn {
+            super::record_wal_entry(WalEntry::AlterAddColumn {
                 table: stmt.table.clone(),
                 column_name: col_def.name.clone(),
             });
@@ -186,7 +186,7 @@ pub fn execute_alter_table(stmt: AlterTableStatement) -> Result<String, RustqlEr
                     removed_values.push(row.remove(col_index));
                 }
             }
-            wal::record_wal_entry(WalEntry::AlterDropColumn {
+            super::record_wal_entry(WalEntry::AlterDropColumn {
                 table: stmt.table.clone(),
                 col_index,
                 column: removed_col,
@@ -215,7 +215,7 @@ pub fn execute_alter_table(stmt: AlterTableStatement) -> Result<String, RustqlEr
                     break;
                 }
             }
-            wal::record_wal_entry(WalEntry::AlterRenameColumn {
+            super::record_wal_entry(WalEntry::AlterRenameColumn {
                 table: stmt.table.clone(),
                 old_name: old.clone(),
                 new_name: new.clone(),
@@ -266,7 +266,7 @@ pub fn execute_alter_table(stmt: AlterTableStatement) -> Result<String, RustqlEr
                 }
             }
             table.constraints.push(constraint.clone());
-            wal::record_wal_entry(WalEntry::AlterAddConstraint {
+            super::record_wal_entry(WalEntry::AlterAddConstraint {
                 table: stmt.table.clone(),
                 constraint: constraint.clone(),
             });
@@ -295,7 +295,7 @@ pub fn execute_alter_table(stmt: AlterTableStatement) -> Result<String, RustqlEr
                 )));
             }
             if let Some(removed) = removed_constraint {
-                wal::record_wal_entry(WalEntry::AlterDropConstraint {
+                super::record_wal_entry(WalEntry::AlterDropConstraint {
                     table: stmt.table.clone(),
                     constraint: removed,
                 });
@@ -405,7 +405,7 @@ pub fn execute_create_index(stmt: CreateIndexStatement) -> Result<String, Rustql
 
     for (index_name, index) in indexes_to_insert {
         db.indexes.insert(index_name.clone(), index);
-        wal::record_wal_entry(WalEntry::CreateIndex { name: index_name });
+        super::record_wal_entry(WalEntry::CreateIndex { name: index_name });
     }
 
     if stmt.columns.len() > 1 {
@@ -460,7 +460,7 @@ pub fn execute_create_index(stmt: CreateIndexStatement) -> Result<String, Rustql
 pub fn execute_drop_index(stmt: DropIndexStatement) -> Result<String, RustqlError> {
     let mut db = get_database_write();
     if let Some(removed) = db.indexes.remove(&stmt.name) {
-        wal::record_wal_entry(WalEntry::DropIndex {
+        super::record_wal_entry(WalEntry::DropIndex {
             name: stmt.name.clone(),
             index: removed,
         });
@@ -886,7 +886,7 @@ pub fn execute_truncate_table(table_name: String) -> Result<String, RustqlError>
         .get_mut(&table_name)
         .ok_or_else(|| RustqlError::TableNotFound(table_name.clone()))?;
     let old_rows = std::mem::take(&mut table.rows);
-    wal::record_wal_entry(WalEntry::TruncateTable {
+    super::record_wal_entry(WalEntry::TruncateTable {
         name: table_name.clone(),
         old_rows,
     });
@@ -914,7 +914,7 @@ pub fn execute_create_view(name: String, query_sql: String) -> Result<String, Ru
             query_sql,
         },
     );
-    wal::record_wal_entry(WalEntry::CreateView { name: name.clone() });
+    super::record_wal_entry(WalEntry::CreateView { name: name.clone() });
     save_if_not_in_transaction(&db)?;
     Ok(format!("View '{}' created", name))
 }
@@ -922,7 +922,7 @@ pub fn execute_create_view(name: String, query_sql: String) -> Result<String, Ru
 pub fn execute_drop_view(name: String, if_exists: bool) -> Result<String, RustqlError> {
     let mut db = get_database_write();
     if let Some(removed) = db.views.remove(&name) {
-        wal::record_wal_entry(WalEntry::DropView {
+        super::record_wal_entry(WalEntry::DropView {
             name: name.clone(),
             view: removed,
         });
