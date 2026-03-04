@@ -106,6 +106,10 @@ RUSTQL_STORAGE=btree cargo run --release
 | `wal.rs` | Write-ahead log for transaction rollback |
 | `error.rs` | Error types |
 
+## Roadmap
+
+- [v1 Breaking Roadmap](docs/v1-breaking-roadmap.md)
+
 ## Testing
 
 Run the full test suite with the default JSON backend:
