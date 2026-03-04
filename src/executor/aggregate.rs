@@ -4,6 +4,7 @@ use crate::error::RustqlError;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
+use super::SelectResult;
 use super::expr::{
     apply_arithmetic, compare_values_for_sort, evaluate_value_expression, format_value,
 };
@@ -606,33 +607,33 @@ pub fn execute_select_with_aggregates(
     table: &Table,
     rows: Vec<&Vec<Value>>,
 ) -> Result<String, RustqlError> {
-    let mut result = String::new();
-    for col in &stmt.columns {
-        match col {
-            Column::Function(agg) => {
-                let name = format_aggregate_header(agg);
-                result.push_str(&format!("{}\t", name));
-            }
-            Column::Named { name, alias } => {
-                let header = alias.clone().unwrap_or_else(|| name.clone());
-                result.push_str(&format!("{}\t", header));
-            }
-            Column::Expression { alias, .. } => {
-                let header = alias.clone().unwrap_or_else(|| "<expression>".to_string());
-                result.push_str(&format!("{}\t", header));
-            }
-            _ => {}
-        }
-    }
-    result.push('\n');
-    result.push_str(&"-".repeat(40));
-    result.push('\n');
+    let result = execute_select_with_aggregates_result(stmt, table, rows)?;
+    Ok(format_result_table(&result))
+}
 
+pub(crate) fn execute_select_with_aggregates_result(
+    stmt: SelectStatement,
+    table: &Table,
+    rows: Vec<&Vec<Value>>,
+) -> Result<SelectResult, RustqlError> {
+    let headers: Vec<String> = stmt
+        .columns
+        .iter()
+        .filter_map(|col| match col {
+            Column::Function(agg) => Some(format_aggregate_header(agg)),
+            Column::Named { name, alias } => Some(alias.clone().unwrap_or_else(|| name.clone())),
+            Column::Expression { alias, .. } => {
+                Some(alias.clone().unwrap_or_else(|| "<expression>".to_string()))
+            }
+            _ => None,
+        })
+        .collect();
+
+    let mut projected = Vec::new();
     for col in &stmt.columns {
         match col {
             Column::Function(agg) => {
-                let value = compute_aggregate_filtered(agg, table, &rows)?;
-                result.push_str(&format!("{}\t", format_value(&value)));
+                projected.push(compute_aggregate_filtered(agg, table, &rows)?);
             }
             _ => {
                 return Err(RustqlError::Internal(
@@ -641,8 +642,11 @@ pub fn execute_select_with_aggregates(
             }
         }
     }
-    result.push('\n');
-    Ok(result)
+
+    Ok(SelectResult {
+        headers,
+        rows: vec![projected],
+    })
 }
 
 pub fn execute_select_with_grouping(
@@ -650,18 +654,27 @@ pub fn execute_select_with_grouping(
     table: &Table,
     rows: Vec<&Vec<Value>>,
 ) -> Result<String, RustqlError> {
+    let result = execute_select_with_grouping_result(stmt, table, rows)?;
+    Ok(format_result_table(&result))
+}
+
+pub(crate) fn execute_select_with_grouping_result(
+    stmt: SelectStatement,
+    table: &Table,
+    rows: Vec<&Vec<Value>>,
+) -> Result<SelectResult, RustqlError> {
     let raw_group_by = stmt.group_by.clone().unwrap();
 
     match &raw_group_by {
         GroupByClause::GroupingSets(sets) => {
-            return execute_multi_grouping_sets(stmt, table, rows, sets);
+            return execute_multi_grouping_sets_result(stmt, table, rows, sets);
         }
         GroupByClause::Rollup(exprs) => {
             let mut sets: Vec<Vec<Expression>> = Vec::new();
             for i in (0..=exprs.len()).rev() {
                 sets.push(exprs[..i].to_vec());
             }
-            return execute_multi_grouping_sets(stmt, table, rows, &sets);
+            return execute_multi_grouping_sets_result(stmt, table, rows, &sets);
         }
         GroupByClause::Cube(exprs) => {
             let n = exprs.len();
@@ -675,7 +688,7 @@ pub fn execute_select_with_grouping(
                 }
                 sets.push(set);
             }
-            return execute_multi_grouping_sets(stmt, table, rows, &sets);
+            return execute_multi_grouping_sets_result(stmt, table, rows, &sets);
         }
         GroupByClause::Simple(_) => {}
     }
@@ -744,13 +757,7 @@ pub fn execute_select_with_grouping(
         }
     }
 
-    let mut result = String::new();
-    for (header, _) in &column_specs {
-        result.push_str(&format!("{}\t", header));
-    }
-    result.push('\n');
-    result.push_str(&"-".repeat(40));
-    result.push('\n');
+    let headers: Vec<String> = column_specs.iter().map(|(h, _)| h.clone()).collect();
 
     let mut grouped_outputs: Vec<(Vec<Value>, Vec<Value>)> = Vec::new();
 
@@ -840,6 +847,7 @@ pub fn execute_select_with_grouping(
     let mut seen: BTreeSet<Vec<Value>> = BTreeSet::new();
     let mut skipped = 0usize;
     let mut emitted = 0usize;
+    let mut output_rows: Vec<Vec<Value>> = Vec::new();
 
     for (row_values, _) in grouped_outputs {
         if stmt.distinct && !seen.insert(row_values.clone()) {
@@ -852,14 +860,14 @@ pub fn execute_select_with_grouping(
         if emitted >= limit {
             break;
         }
-        for val in &row_values {
-            result.push_str(&format!("{}\t", format_value(val)));
-        }
-        result.push('\n');
+        output_rows.push(row_values);
         emitted += 1;
     }
 
-    Ok(result)
+    Ok(SelectResult {
+        headers,
+        rows: output_rows,
+    })
 }
 
 pub fn evaluate_group_order_expression(
@@ -1650,12 +1658,12 @@ pub fn evaluate_window_functions(
     Ok(())
 }
 
-fn execute_multi_grouping_sets(
+fn execute_multi_grouping_sets_result(
     stmt: SelectStatement,
     table: &Table,
     rows: Vec<&Vec<Value>>,
     sets: &[Vec<Expression>],
-) -> Result<String, RustqlError> {
+) -> Result<SelectResult, RustqlError> {
     let all_gb_exprs: Vec<Expression> = {
         let mut all = Vec::new();
         for set in sets {
@@ -1712,13 +1720,7 @@ fn execute_multi_grouping_sets(
         }
     }
 
-    let mut result = String::new();
-    for (header, _) in &column_specs {
-        result.push_str(&format!("{}\t", header));
-    }
-    result.push('\n');
-    result.push_str(&"-".repeat(40));
-    result.push('\n');
+    let headers: Vec<String> = column_specs.iter().map(|(h, _)| h.clone()).collect();
 
     let mut all_output_rows: Vec<Vec<Value>> = Vec::new();
 
@@ -1848,6 +1850,7 @@ fn execute_multi_grouping_sets(
 
     let mut emitted = 0usize;
     let mut skipped = 0usize;
+    let mut output_rows: Vec<Vec<Value>> = Vec::new();
     for row_values in all_output_rows {
         if skipped < offset {
             skipped += 1;
@@ -1856,12 +1859,38 @@ fn execute_multi_grouping_sets(
         if emitted >= limit {
             break;
         }
-        for val in &row_values {
-            result.push_str(&format!("{}\t", format_value(val)));
-        }
-        result.push('\n');
+        output_rows.push(row_values);
         emitted += 1;
     }
 
-    Ok(result)
+    Ok(SelectResult {
+        headers,
+        rows: output_rows,
+    })
+}
+
+fn format_result_table(result: &SelectResult) -> String {
+    let mut output = String::new();
+
+    for (idx, header) in result.headers.iter().enumerate() {
+        if idx > 0 {
+            output.push('\t');
+        }
+        output.push_str(header);
+    }
+    output.push('\n');
+    output.push_str(&"-".repeat(40));
+    output.push('\n');
+
+    for row in &result.rows {
+        for (idx, val) in row.iter().enumerate() {
+            if idx > 0 {
+                output.push('\t');
+            }
+            output.push_str(&format_value(val));
+        }
+        output.push('\n');
+    }
+
+    output
 }
