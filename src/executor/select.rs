@@ -1,34 +1,42 @@
 use crate::ast::*;
-use crate::database::{Database, Table};
+use crate::database::{Database, RowId, Table};
+use crate::engine::QueryResult;
 use crate::error::RustqlError;
+use crate::plan_executor::PlanExecutor;
+use crate::planner;
 use std::cmp::Ordering;
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use super::aggregate::{
-    compute_aggregate, evaluate_having, evaluate_window_functions, execute_select_with_aggregates,
-    execute_select_with_aggregates_result, execute_select_with_grouping,
-    execute_select_with_grouping_result,
+    compute_aggregate, evaluate_having, evaluate_window_functions,
+    execute_select_with_aggregates_result, execute_select_with_grouping_result,
 };
 use super::expr::{
     compare_values_for_sort, evaluate_expression, evaluate_select_order_expression,
-    evaluate_value_expression, format_value,
+    evaluate_value_expression,
 };
 use super::join::perform_multiple_joins;
-use super::{SelectResult, get_database_read, get_database_write};
+use super::{ExecutionContext, SelectResult, get_database_read, get_database_write, rows_result};
 
-pub fn execute_select(mut stmt: SelectStatement) -> Result<String, RustqlError> {
+pub fn execute_select(
+    context: &ExecutionContext,
+    mut stmt: SelectStatement,
+) -> Result<QueryResult, RustqlError> {
     resolve_window_definitions(&mut stmt);
 
-    if let Some((ref values_rows, ref alias, ref col_aliases)) = stmt.from_values {
-        return execute_select_from_values(stmt.clone(), values_rows, alias, col_aliases);
-    }
-
-    if let Some((ref subquery, ref alias)) = stmt.from_subquery {
-        return execute_select_from_subquery(stmt.clone(), subquery, alias);
-    }
-
-    if !stmt.ctes.is_empty() {
-        return execute_select_with_ctes(stmt);
+    {
+        let db = get_database_read(context);
+        if select_requires_source_materialization(&db, &stmt) {
+            drop(db);
+            return execute_select_with_materialized_sources(context, stmt);
+        }
+        if let Some(plan) = plan_select_for_execution(&db, &stmt)? {
+            let execution = PlanExecutor::new(&db).execute(&plan, &stmt)?;
+            return Ok(rows_result(SelectResult {
+                headers: execution.columns,
+                rows: execution.rows,
+            }));
+        }
     }
 
     if let Some(ref tf) = stmt.from_function
@@ -39,22 +47,10 @@ pub fn execute_select(mut stmt: SelectStatement) -> Result<String, RustqlError> 
 
     if stmt.from.is_empty() {
         let result = execute_select_without_from(stmt)?;
-        return Ok(format_select_result(&result));
+        return Ok(rows_result(result));
     }
 
-    {
-        let db = get_database_read();
-        if !db.tables.contains_key(&stmt.from)
-            && let Some(view) = db.views.get(&stmt.from)
-        {
-            let view_sql = view.query_sql.clone();
-            let view_name = stmt.from.clone();
-            drop(db);
-            return execute_select_from_view(stmt, &view_name, &view_sql);
-        }
-    }
-
-    let db = get_database_read();
+    let db = get_database_read(context);
 
     if let Some((ref set_op_type, ref other_stmt)) = stmt.set_op {
         let left_stmt = SelectStatement {
@@ -78,11 +74,17 @@ pub fn execute_select(mut stmt: SelectStatement) -> Result<String, RustqlError> 
             window_definitions: Vec::new(),
             from_values: None,
         };
-        return execute_set_operation(left_stmt, other_stmt.as_ref().clone(), set_op_type, &db);
+        return execute_set_operation(
+            Some(context),
+            left_stmt,
+            other_stmt.as_ref().clone(),
+            set_op_type,
+            &db,
+        );
     }
 
     if !stmt.joins.is_empty() {
-        return execute_select_with_joins(stmt, &db);
+        return execute_select_with_joins(context, stmt, &db);
     }
 
     let db_ref: &Database = &db;
@@ -93,7 +95,8 @@ pub fn execute_select(mut stmt: SelectStatement) -> Result<String, RustqlError> 
 
     let mut filtered_rows: Vec<&Vec<Value>> = Vec::new();
 
-    let candidate_indices: Option<HashSet<usize>> = if let Some(ref where_expr) = stmt.where_clause
+    let candidate_indices: Option<HashSet<crate::database::RowId>> = if let Some(ref where_expr) =
+        stmt.where_clause
     {
         if let Some(index_usage) = super::ddl::find_index_usage(db_ref, &stmt.from, where_expr) {
             super::ddl::get_indexed_rows(db_ref, table, &index_usage).ok()
@@ -104,19 +107,23 @@ pub fn execute_select(mut stmt: SelectStatement) -> Result<String, RustqlError> 
         None
     };
 
-    let rows_to_check: Vec<(usize, &Vec<Value>)> =
+    let rows_to_check: Vec<(usize, crate::database::RowId, &Vec<Value>)> =
         if let Some(ref candidate_set) = candidate_indices {
             table
-                .rows
-                .iter()
+                .iter_rows_with_ids()
                 .enumerate()
-                .filter(|(idx, _)| candidate_set.contains(idx))
+                .filter(|(_, (row_id, _))| candidate_set.contains(row_id))
+                .map(|(idx, (row_id, row))| (idx, row_id, row))
                 .collect()
         } else {
-            table.rows.iter().enumerate().collect()
+            table
+                .iter_rows_with_ids()
+                .enumerate()
+                .map(|(idx, (row_id, row))| (idx, row_id, row))
+                .collect()
         };
 
-    for (_, row) in rows_to_check {
+    for (_, _, row) in rows_to_check {
         let include_row = if let Some(ref where_expr) = stmt.where_clause {
             evaluate_expression(Some(db_ref), where_expr, &table.columns, row)?
         } else {
@@ -129,7 +136,7 @@ pub fn execute_select(mut stmt: SelectStatement) -> Result<String, RustqlError> 
 
     if stmt.group_by.is_some() {
         let grouped = execute_select_with_grouping_result(stmt, table, filtered_rows)?;
-        return Ok(format_select_result(&grouped));
+        return Ok(rows_result(grouped));
     }
 
     let has_aggregate = stmt
@@ -139,7 +146,7 @@ pub fn execute_select(mut stmt: SelectStatement) -> Result<String, RustqlError> 
 
     if has_aggregate {
         let aggregated = execute_select_with_aggregates_result(stmt, table, filtered_rows)?;
-        return Ok(format_select_result(&aggregated));
+        return Ok(rows_result(aggregated));
     }
 
     let column_specs: Vec<(String, Column)> = if matches!(stmt.columns[0], Column::All) {
@@ -174,13 +181,7 @@ pub fn execute_select(mut stmt: SelectStatement) -> Result<String, RustqlError> 
             .collect()
     };
 
-    let mut result = String::new();
-    for (name, _) in &column_specs {
-        result.push_str(&format!("{}\t", name));
-    }
-    result.push('\n');
-    result.push_str(&"-".repeat(40));
-    result.push('\n');
+    let headers: Vec<String> = column_specs.iter().map(|(name, _)| name.clone()).collect();
 
     let has_window_fn_main = column_specs.iter().any(|(_, col)| {
         matches!(
@@ -332,6 +333,7 @@ pub fn execute_select(mut stmt: SelectStatement) -> Result<String, RustqlError> 
     let mut seen: BTreeSet<Vec<Value>> = BTreeSet::new();
     let mut emitted = 0usize;
     let mut skipped = 0usize;
+    let mut rows = Vec::new();
     for (projected, _) in outputs {
         if stmt.distinct && !seen.insert(projected.clone()) {
             continue;
@@ -343,27 +345,26 @@ pub fn execute_select(mut stmt: SelectStatement) -> Result<String, RustqlError> 
         if emitted >= limit {
             break;
         }
-        for val in &projected {
-            result.push_str(&format!("{}\t", format_value(val)));
-        }
-        result.push('\n');
+        rows.push(projected);
         emitted += 1;
     }
 
-    Ok(result)
+    Ok(rows_result(SelectResult { headers, rows }))
 }
 
 fn execute_set_operation(
+    context: Option<&ExecutionContext>,
     left_stmt: SelectStatement,
     right_stmt: SelectStatement,
     set_op_type: &SetOperation,
     db: &Database,
-) -> Result<String, RustqlError> {
-    let result = execute_set_operation_result(left_stmt, right_stmt, set_op_type, db)?;
-    Ok(format_select_result(&result))
+) -> Result<QueryResult, RustqlError> {
+    let result = execute_set_operation_result(context, left_stmt, right_stmt, set_op_type, db)?;
+    Ok(rows_result(result))
 }
 
 fn execute_set_operation_result(
+    context: Option<&ExecutionContext>,
     left_stmt: SelectStatement,
     right_stmt: SelectStatement,
     set_op_type: &SetOperation,
@@ -374,8 +375,8 @@ fn execute_set_operation_result(
     let mut right_stmt_internal = right_stmt;
     right_stmt_internal.set_op = None;
 
-    let left_result = execute_select_internal(left_stmt_internal, db)?;
-    let right_result = execute_select_internal(right_stmt_internal, db)?;
+    let left_result = execute_select_internal(context, left_stmt_internal, db)?;
+    let right_result = execute_select_internal(context, right_stmt_internal, db)?;
 
     let mut combined: Vec<Vec<Value>> = Vec::new();
 
@@ -468,28 +469,253 @@ fn execute_set_operation_result(
     })
 }
 
-fn format_select_result(result: &SelectResult) -> String {
-    let mut output = String::new();
-    for (idx, header) in result.headers.iter().enumerate() {
-        if idx > 0 {
-            output.push('\t');
-        }
-        output.push_str(header);
+pub(crate) fn plan_select_for_execution(
+    db: &Database,
+    stmt: &SelectStatement,
+) -> Result<Option<planner::PlanNode>, RustqlError> {
+    if !can_execute_via_plan(db, stmt) {
+        return Ok(None);
     }
-    output.push('\n');
-    output.push_str(&"-".repeat(40));
-    output.push('\n');
 
-    for row in &result.rows {
-        for (idx, val) in row.iter().enumerate() {
-            if idx > 0 {
-                output.push('\t');
-            }
-            output.push_str(&format_value(val));
-        }
-        output.push('\n');
+    Ok(Some(planner::plan_query(db, stmt)?))
+}
+
+fn can_execute_via_plan(db: &Database, stmt: &SelectStatement) -> bool {
+    let has_aggregate_columns = stmt
+        .columns
+        .iter()
+        .any(|column| matches!(column, Column::Function(_)));
+
+    if stmt.from.is_empty() && stmt.from_function.is_none()
+        || !stmt.ctes.is_empty()
+        || stmt.from_subquery.is_some()
+        || stmt.from_values.is_some()
+        || stmt.set_op.is_some()
+    {
+        return false;
     }
-    output
+
+    if stmt
+        .from_function
+        .as_ref()
+        .is_some_and(|function| !table_function_supported_by_plan(function, stmt))
+    {
+        return false;
+    }
+
+    if stmt
+        .distinct_on
+        .as_ref()
+        .is_some_and(|exprs| !distinct_on_supported_by_plan(exprs))
+    {
+        return false;
+    }
+
+    if stmt
+        .joins
+        .iter()
+        .any(|join| !join_supported_by_plan(db, join))
+    {
+        return false;
+    }
+
+    if has_aggregate_columns
+        && stmt.group_by.is_none()
+        && stmt
+            .columns
+            .iter()
+            .any(|column| !matches!(column, Column::Function(_)))
+    {
+        return false;
+    }
+
+    stmt.columns.iter().all(column_supported_by_plan)
+        && stmt
+            .where_clause
+            .as_ref()
+            .is_none_or(predicate_expression_supported_by_plan)
+        && stmt
+            .group_by
+            .as_ref()
+            .is_none_or(group_by_supported_by_plan)
+        && stmt
+            .having
+            .as_ref()
+            .is_none_or(expression_supported_by_plan)
+        && stmt.order_by.as_ref().is_none_or(|items| {
+            items
+                .iter()
+                .all(|item| matches!(&item.expr, Expression::Column(_)))
+        })
+}
+
+fn group_by_supported_by_plan(group_by: &GroupByClause) -> bool {
+    match group_by {
+        GroupByClause::Simple(exprs)
+        | GroupByClause::Rollup(exprs)
+        | GroupByClause::Cube(exprs) => group_by_exprs_supported_by_plan(exprs),
+        GroupByClause::GroupingSets(sets) => {
+            sets.iter().all(|set| group_by_exprs_supported_by_plan(set))
+        }
+    }
+}
+
+fn column_supported_by_plan(column: &Column) -> bool {
+    match column {
+        Column::All => true,
+        Column::Named { .. } => true,
+        Column::Function(agg) => {
+            expression_supported_by_plan(&agg.expr)
+                && agg
+                    .filter
+                    .as_deref()
+                    .is_none_or(predicate_expression_supported_by_plan)
+        }
+        Column::Expression { expr, .. } => window_expression_supported_by_plan(expr),
+        Column::Subquery(_) => false,
+    }
+}
+
+fn join_supported_by_plan(db: &Database, join: &Join) -> bool {
+    if join.lateral {
+        return join.using_columns.is_none()
+            && !matches!(join.join_type, JoinType::Natural)
+            && join.subquery.as_ref().is_some_and(|(subquery, _)| {
+                planner::infer_select_output_columns(db, subquery).is_ok()
+            });
+    }
+
+    match join.join_type {
+        JoinType::Inner => true,
+        JoinType::Cross => join.using_columns.is_none(),
+        JoinType::Left | JoinType::Right | JoinType::Full => true,
+        JoinType::Natural => join.on.is_none() && join.using_columns.is_none(),
+    }
+}
+
+fn join_requires_source_materialization(join: &Join) -> bool {
+    !join.lateral && join.subquery.is_some()
+}
+
+fn table_function_supported_by_plan(function: &TableFunction, stmt: &SelectStatement) -> bool {
+    function.name == "generate_series" && stmt.joins.is_empty()
+}
+
+fn distinct_on_supported_by_plan(exprs: &[Expression]) -> bool {
+    exprs
+        .iter()
+        .all(|expr| matches!(expr, Expression::Column(_)))
+}
+
+fn group_by_exprs_supported_by_plan(exprs: &[Expression]) -> bool {
+    exprs
+        .iter()
+        .all(|expr| matches!(expr, Expression::Column(_)))
+}
+
+fn window_expression_supported_by_plan(expr: &Expression) -> bool {
+    matches!(expr, Expression::WindowFunction { .. })
+}
+
+fn projection_expression_supported_by_plan(expr: &Expression) -> bool {
+    match expr {
+        Expression::Column(_) | Expression::Value(_) => true,
+        Expression::BinaryOp { left, op, right } => {
+            matches!(
+                op,
+                BinaryOperator::Plus
+                    | BinaryOperator::Minus
+                    | BinaryOperator::Multiply
+                    | BinaryOperator::Divide
+            ) && projection_expression_supported_by_plan(left)
+                && projection_expression_supported_by_plan(right)
+        }
+        Expression::UnaryOp {
+            op: UnaryOperator::Minus,
+            expr,
+        } => projection_expression_supported_by_plan(expr),
+        _ => false,
+    }
+}
+
+fn expression_supported_by_plan(expr: &Expression) -> bool {
+    match expr {
+        Expression::Column(_) | Expression::Value(_) => true,
+        Expression::BinaryOp { left, right, .. } => {
+            expression_supported_by_plan(left) && expression_supported_by_plan(right)
+        }
+        Expression::UnaryOp { expr, .. } => expression_supported_by_plan(expr),
+        Expression::In { left, .. } => expression_supported_by_plan(left),
+        Expression::IsNull { expr, .. } => expression_supported_by_plan(expr),
+        Expression::Function(agg) => {
+            expression_supported_by_plan(&agg.expr)
+                && agg
+                    .filter
+                    .as_deref()
+                    .is_none_or(predicate_expression_supported_by_plan)
+        }
+        Expression::IsDistinctFrom { left, right, .. } => {
+            expression_supported_by_plan(left) && expression_supported_by_plan(right)
+        }
+        Expression::Subquery(_)
+        | Expression::Exists(_)
+        | Expression::Any { .. }
+        | Expression::All { .. }
+        | Expression::Case { .. }
+        | Expression::ScalarFunction { .. }
+        | Expression::WindowFunction { .. }
+        | Expression::Cast { .. } => false,
+    }
+}
+
+fn predicate_expression_supported_by_plan(expr: &Expression) -> bool {
+    match expr {
+        Expression::BinaryOp { left, op, right } => match op {
+            BinaryOperator::And | BinaryOperator::Or => {
+                predicate_expression_supported_by_plan(left)
+                    && predicate_expression_supported_by_plan(right)
+            }
+            BinaryOperator::Like
+            | BinaryOperator::ILike
+            | BinaryOperator::Equal
+            | BinaryOperator::NotEqual
+            | BinaryOperator::LessThan
+            | BinaryOperator::LessThanOrEqual
+            | BinaryOperator::GreaterThan
+            | BinaryOperator::GreaterThanOrEqual => {
+                simple_value_expression_supported_by_plan(left)
+                    && simple_value_expression_supported_by_plan(right)
+            }
+            BinaryOperator::Between => {
+                simple_value_expression_supported_by_plan(left)
+                    && predicate_expression_supported_by_plan(right)
+            }
+            BinaryOperator::In => {
+                simple_value_expression_supported_by_plan(left)
+                    && projection_expression_supported_by_plan(right)
+            }
+            BinaryOperator::Plus
+            | BinaryOperator::Minus
+            | BinaryOperator::Multiply
+            | BinaryOperator::Divide
+            | BinaryOperator::Concat => false,
+        },
+        Expression::In { left, .. } => simple_value_expression_supported_by_plan(left),
+        Expression::IsNull { expr, .. } => simple_value_expression_supported_by_plan(expr),
+        Expression::UnaryOp {
+            op: UnaryOperator::Not,
+            expr,
+        } => predicate_expression_supported_by_plan(expr),
+        Expression::IsDistinctFrom { left, right, .. } => {
+            simple_value_expression_supported_by_plan(left)
+                && simple_value_expression_supported_by_plan(right)
+        }
+        _ => false,
+    }
+}
+
+fn simple_value_expression_supported_by_plan(expr: &Expression) -> bool {
+    matches!(expr, Expression::Column(_) | Expression::Value(_))
 }
 
 fn execute_select_without_from(stmt: SelectStatement) -> Result<SelectResult, RustqlError> {
@@ -536,9 +762,9 @@ fn execute_select_without_from(stmt: SelectStatement) -> Result<SelectResult, Ru
 fn execute_generate_series(
     stmt: SelectStatement,
     tf: &TableFunction,
-) -> Result<String, RustqlError> {
+) -> Result<QueryResult, RustqlError> {
     let result = execute_generate_series_result(stmt, tf)?;
-    Ok(format_select_result(&result))
+    Ok(rows_result(result))
 }
 
 fn execute_generate_series_result(
@@ -673,10 +899,401 @@ fn execute_generate_series_result(
     Ok(SelectResult { headers, rows })
 }
 
+#[derive(Default)]
+struct TempTableScope {
+    originals: HashMap<String, Option<Table>>,
+}
+
+impl TempTableScope {
+    fn insert_or_replace(&mut self, db: &mut Database, name: String, table: Table) {
+        let previous = db.tables.insert(name.clone(), table);
+        self.originals.entry(name).or_insert(previous);
+    }
+
+    fn cleanup(self, db: &mut Database) {
+        for (name, original) in self.originals {
+            match original {
+                Some(table) => {
+                    db.tables.insert(name, table);
+                }
+                None => {
+                    db.tables.remove(&name);
+                }
+            }
+        }
+    }
+}
+
+fn select_requires_source_materialization(db: &Database, stmt: &SelectStatement) -> bool {
+    stmt.from_values.is_some()
+        || stmt.from_subquery.is_some()
+        || stmt.joins.iter().any(join_requires_source_materialization)
+        || !stmt.ctes.is_empty()
+        || (!stmt.from.is_empty()
+            && !db.tables.contains_key(&stmt.from)
+            && db.views.contains_key(&stmt.from))
+}
+
+pub(crate) fn explain_select(
+    context: &ExecutionContext,
+    mut stmt: SelectStatement,
+) -> Result<planner::PlanNode, RustqlError> {
+    resolve_window_definitions(&mut stmt);
+
+    let db = get_database_read(context);
+    if !select_requires_source_materialization(&db, &stmt) {
+        return if let Some(plan) = plan_select_for_execution(&db, &stmt)? {
+            Ok(plan)
+        } else {
+            planner::plan_query(&db, &stmt)
+        };
+    }
+    drop(db);
+
+    let mut db = get_database_write(context);
+    plan_select_in_db(Some(context), stmt, &mut db)
+}
+
+fn execute_select_with_materialized_sources(
+    context: &ExecutionContext,
+    stmt: SelectStatement,
+) -> Result<QueryResult, RustqlError> {
+    let mut db = get_database_write(context);
+    let result = execute_select_in_db(Some(context), stmt, &mut db)?;
+    Ok(rows_result(result))
+}
+
+fn execute_select_in_db(
+    context: Option<&ExecutionContext>,
+    mut stmt: SelectStatement,
+    db: &mut Database,
+) -> Result<SelectResult, RustqlError> {
+    resolve_window_definitions(&mut stmt);
+
+    if !select_requires_source_materialization(db, &stmt)
+        && let Some(plan) = plan_select_for_execution(db, &stmt)?
+    {
+        let execution = PlanExecutor::new(db).execute(&plan, &stmt)?;
+        return Ok(SelectResult {
+            headers: execution.columns,
+            rows: execution.rows,
+        });
+    }
+
+    if let Some(ref tf) = stmt.from_function
+        && tf.name == "generate_series"
+    {
+        return execute_generate_series_result(stmt.clone(), tf);
+    }
+
+    let mut temp_scope = TempTableScope::default();
+    let result = (|| {
+        let rewritten = rewrite_select_sources_for_scope(context, stmt, db, &mut temp_scope)?;
+        if let Some(plan) = plan_select_for_execution(db, &rewritten)? {
+            let execution = PlanExecutor::new(db).execute(&plan, &rewritten)?;
+            return Ok(SelectResult {
+                headers: execution.columns,
+                rows: execution.rows,
+            });
+        }
+        execute_select_internal(context, rewritten, db)
+    })();
+    temp_scope.cleanup(db);
+    result
+}
+
+fn plan_select_in_db(
+    context: Option<&ExecutionContext>,
+    mut stmt: SelectStatement,
+    db: &mut Database,
+) -> Result<planner::PlanNode, RustqlError> {
+    resolve_window_definitions(&mut stmt);
+
+    let mut temp_scope = TempTableScope::default();
+    let result = (|| {
+        let rewritten = rewrite_select_sources_for_scope(context, stmt, db, &mut temp_scope)?;
+        if let Some(plan) = plan_select_for_execution(db, &rewritten)? {
+            Ok(plan)
+        } else {
+            planner::plan_query(db, &rewritten)
+        }
+    })();
+    temp_scope.cleanup(db);
+    result
+}
+
+fn rewrite_select_sources_for_scope(
+    context: Option<&ExecutionContext>,
+    mut stmt: SelectStatement,
+    db: &mut Database,
+    temp_scope: &mut TempTableScope,
+) -> Result<SelectStatement, RustqlError> {
+    if !stmt.ctes.is_empty() {
+        materialize_ctes_for_scope(context, &mut stmt, db, temp_scope)?;
+    }
+
+    if let Some((subquery, alias)) = stmt.from_subquery.clone() {
+        let subquery_result = execute_select_in_db(context, *subquery, db)?;
+        temp_scope.insert_or_replace(
+            db,
+            alias.clone(),
+            table_from_select_result(&subquery_result),
+        );
+        stmt.from = alias;
+        stmt.from_subquery = None;
+    }
+
+    if let Some((values_rows, alias, col_aliases)) = stmt.from_values.clone() {
+        let table = table_from_values_rows(&values_rows, &col_aliases)?;
+        temp_scope.insert_or_replace(db, alias.clone(), table);
+        stmt.from = alias;
+        stmt.from_values = None;
+    }
+
+    for join in &mut stmt.joins {
+        if join_requires_source_materialization(join)
+            && let Some((subquery, alias)) = join.subquery.clone()
+        {
+            let subquery_result = execute_select_in_db(context, *subquery, db)?;
+            temp_scope.insert_or_replace(
+                db,
+                alias.clone(),
+                table_from_select_result(&subquery_result),
+            );
+            join.table = alias;
+            join.subquery = None;
+        }
+    }
+
+    if !stmt.from.is_empty()
+        && !db.tables.contains_key(&stmt.from)
+        && let Some(view) = db.views.get(&stmt.from).cloned()
+    {
+        let view_result = execute_view_select_in_db(context, &view.query_sql, db)?;
+        temp_scope.insert_or_replace(
+            db,
+            view.name.clone(),
+            table_from_select_result(&view_result),
+        );
+    }
+
+    Ok(stmt)
+}
+
+fn execute_view_select_in_db(
+    context: Option<&ExecutionContext>,
+    view_sql: &str,
+    db: &mut Database,
+) -> Result<SelectResult, RustqlError> {
+    let tokens = crate::lexer::tokenize(view_sql)?;
+    let view_stmt = crate::parser::parse(tokens)?;
+    let view_select = match view_stmt {
+        crate::ast::Statement::Select(s) => s,
+        _ => {
+            return Err(RustqlError::Internal(
+                "View definition is not a SELECT statement".to_string(),
+            ));
+        }
+    };
+    execute_select_in_db(context, view_select, db)
+}
+
+fn materialize_ctes_for_scope(
+    context: Option<&ExecutionContext>,
+    stmt: &mut SelectStatement,
+    db: &mut Database,
+    temp_scope: &mut TempTableScope,
+) -> Result<(), RustqlError> {
+    let ctes = std::mem::take(&mut stmt.ctes);
+
+    for cte in ctes {
+        if cte.recursive {
+            materialize_recursive_cte_for_scope(context, &cte, db, temp_scope)?;
+        } else {
+            let cte_result = execute_select_in_db(context, cte.query.clone(), db)?;
+            temp_scope.insert_or_replace(
+                db,
+                cte.name.clone(),
+                table_from_select_result(&cte_result),
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn materialize_recursive_cte_for_scope(
+    context: Option<&ExecutionContext>,
+    cte: &Cte,
+    db: &mut Database,
+    temp_scope: &mut TempTableScope,
+) -> Result<(), RustqlError> {
+    let cte_query = &cte.query;
+    if let Some((ref set_op_type, ref recursive_part)) = cte_query.set_op {
+        if !matches!(set_op_type, SetOperation::UnionAll | SetOperation::Union) {
+            return Err(RustqlError::Internal(
+                "Recursive CTE requires UNION or UNION ALL".to_string(),
+            ));
+        }
+        let is_union_all = matches!(set_op_type, SetOperation::UnionAll);
+
+        let mut base_stmt = cte_query.clone();
+        base_stmt.set_op = None;
+        let base_result = execute_select_in_db(context, base_stmt, db)?;
+        let columns = column_definitions_from_result(&base_result.headers, &base_result.rows);
+
+        let mut all_rows: Vec<Vec<Value>> = base_result.rows.clone();
+        let mut working_rows: Vec<Vec<Value>> = base_result.rows;
+        let mut seen: Option<std::collections::BTreeSet<Vec<Value>>> = if is_union_all {
+            None
+        } else {
+            let mut set = std::collections::BTreeSet::new();
+            for row in &all_rows {
+                set.insert(row.clone());
+            }
+            Some(set)
+        };
+
+        const MAX_ITERATIONS: usize = 1000;
+        for _ in 0..MAX_ITERATIONS {
+            if working_rows.is_empty() {
+                break;
+            }
+
+            temp_scope.insert_or_replace(
+                db,
+                cte.name.clone(),
+                Table::new(columns.clone(), working_rows, vec![]),
+            );
+
+            let recursive_result = execute_select_in_db(context, *recursive_part.clone(), db)?;
+
+            let mut new_rows: Vec<Vec<Value>> = Vec::new();
+            for row in recursive_result.rows {
+                if let Some(ref mut seen_set) = seen {
+                    if seen_set.insert(row.clone()) {
+                        new_rows.push(row);
+                    }
+                } else {
+                    new_rows.push(row);
+                }
+            }
+
+            if new_rows.is_empty() {
+                break;
+            }
+
+            all_rows.extend(new_rows.clone());
+            working_rows = new_rows;
+        }
+
+        temp_scope.insert_or_replace(db, cte.name.clone(), Table::new(columns, all_rows, vec![]));
+    } else {
+        let cte_result = execute_select_in_db(context, cte.query.clone(), db)?;
+        temp_scope.insert_or_replace(db, cte.name.clone(), table_from_select_result(&cte_result));
+    }
+
+    Ok(())
+}
+
+fn column_definitions_from_result(
+    headers: &[String],
+    rows: &[Vec<Value>],
+) -> Vec<ColumnDefinition> {
+    headers
+        .iter()
+        .enumerate()
+        .map(|(idx, name)| ColumnDefinition {
+            name: name.clone(),
+            data_type: rows
+                .first()
+                .and_then(|row| row.get(idx))
+                .map(value_data_type)
+                .unwrap_or(DataType::Text),
+            nullable: true,
+            primary_key: false,
+            unique: false,
+            default_value: None,
+            foreign_key: None,
+            check: None,
+            auto_increment: false,
+            generated: None,
+        })
+        .collect()
+}
+
+fn table_from_select_result(result: &SelectResult) -> Table {
+    Table::new(
+        column_definitions_from_result(&result.headers, &result.rows),
+        result.rows.clone(),
+        vec![],
+    )
+}
+
+fn table_from_values_rows(
+    values_rows: &[Vec<Expression>],
+    col_aliases: &[String],
+) -> Result<Table, RustqlError> {
+    let empty_columns: Vec<ColumnDefinition> = Vec::new();
+    let empty_row: Vec<Value> = Vec::new();
+
+    let mut evaluated_rows: Vec<Vec<Value>> = Vec::new();
+    for expr_row in values_rows {
+        let mut row: Vec<Value> = Vec::new();
+        for expr in expr_row {
+            row.push(evaluate_value_expression(expr, &empty_columns, &empty_row)?);
+        }
+        evaluated_rows.push(row);
+    }
+
+    let num_cols = evaluated_rows.first().map(|row| row.len()).unwrap_or(0);
+    let headers: Vec<String> = (0..num_cols)
+        .map(|idx| {
+            col_aliases
+                .get(idx)
+                .cloned()
+                .unwrap_or_else(|| format!("column{}", idx + 1))
+        })
+        .collect();
+
+    Ok(Table::new(
+        column_definitions_from_result(&headers, &evaluated_rows),
+        evaluated_rows,
+        vec![],
+    ))
+}
+
+fn value_data_type(value: &Value) -> DataType {
+    match value {
+        Value::Integer(_) => DataType::Integer,
+        Value::Float(_) => DataType::Float,
+        Value::Boolean(_) => DataType::Boolean,
+        Value::Date(_) => DataType::Date,
+        Value::Time(_) => DataType::Time,
+        Value::DateTime(_) => DataType::DateTime,
+        Value::Null | Value::Text(_) => DataType::Text,
+    }
+}
+
 pub(crate) fn execute_select_internal(
+    context: Option<&ExecutionContext>,
     stmt: SelectStatement,
     db: &Database,
 ) -> Result<SelectResult, RustqlError> {
+    if let Some(plan) = plan_select_for_execution(db, &stmt)? {
+        let execution = PlanExecutor::new(db).execute(&plan, &stmt)?;
+        return Ok(SelectResult {
+            headers: execution.columns,
+            rows: execution.rows,
+        });
+    }
+
+    if let Some(ref tf) = stmt.from_function
+        && tf.name == "generate_series"
+    {
+        return execute_generate_series_result(stmt.clone(), tf);
+    }
+
     if stmt.from.is_empty() {
         return execute_select_without_from(stmt);
     }
@@ -687,7 +1304,7 @@ pub(crate) fn execute_select_internal(
             .get(&stmt.from)
             .ok_or_else(|| RustqlError::TableNotFound(stmt.from.clone()))?;
         let (joined_rows, all_cols) =
-            perform_multiple_joins(db, main_table, &stmt.from, &stmt.joins)?;
+            perform_multiple_joins(context, db, main_table, &stmt.from, &stmt.joins)?;
         (joined_rows, all_cols)
     } else {
         let table = db
@@ -705,7 +1322,7 @@ pub(crate) fn execute_select_internal(
             .get(&stmt.from)
             .ok_or_else(|| RustqlError::TableNotFound(stmt.from.clone()))?;
 
-        let candidate_indices: Option<HashSet<usize>> = if let Some(ref where_expr) =
+        let candidate_indices: Option<HashSet<RowId>> = if let Some(ref where_expr) =
             stmt.where_clause
         {
             if let Some(index_usage) = super::ddl::find_index_usage(db, &stmt.from, where_expr) {
@@ -717,19 +1334,23 @@ pub(crate) fn execute_select_internal(
             None
         };
 
-        let rows_to_check: Vec<(usize, &Vec<Value>)> =
+        let rows_to_check: Vec<(usize, RowId, &Vec<Value>)> =
             if let Some(ref candidate_set) = candidate_indices {
                 table
-                    .rows
-                    .iter()
+                    .iter_rows_with_ids()
                     .enumerate()
-                    .filter(|(idx, _)| candidate_set.contains(idx))
+                    .filter(|(_, (row_id, _))| candidate_set.contains(row_id))
+                    .map(|(idx, (row_id, row))| (idx, row_id, row))
                     .collect()
             } else {
-                table.rows.iter().enumerate().collect()
+                table
+                    .iter_rows_with_ids()
+                    .enumerate()
+                    .map(|(idx, (row_id, row))| (idx, row_id, row))
+                    .collect()
             };
 
-        for (_, row) in rows_to_check {
+        for (_, _, row) in rows_to_check {
             let include_row = if let Some(ref where_expr) = stmt.where_clause {
                 evaluate_expression(Some(db), where_expr, &all_columns, row)?
             } else {
@@ -753,11 +1374,7 @@ pub(crate) fn execute_select_internal(
     }
 
     if stmt.group_by.is_some() {
-        let temp_table = Table {
-            columns: all_columns.clone(),
-            rows: Vec::new(),
-            constraints: vec![],
-        };
+        let temp_table = Table::new(all_columns.clone(), Vec::new(), vec![]);
         let row_refs: Vec<&Vec<Value>> = filtered_rows.to_vec();
         return execute_select_with_grouping_result(stmt.clone(), &temp_table, row_refs);
     }
@@ -767,11 +1384,7 @@ pub(crate) fn execute_select_internal(
         .iter()
         .any(|col| matches!(col, Column::Function(_)));
     if has_aggregate {
-        let temp_table = Table {
-            columns: all_columns.clone(),
-            rows: Vec::new(),
-            constraints: vec![],
-        };
+        let temp_table = Table::new(all_columns.clone(), Vec::new(), vec![]);
         let row_refs: Vec<&Vec<Value>> = filtered_rows.to_vec();
         return execute_select_with_aggregates_result(stmt.clone(), &temp_table, row_refs);
     }
@@ -996,7 +1609,7 @@ pub fn eval_subquery_values(
     let mut filtered_rows: Vec<&Vec<Value>> = Vec::new();
 
     if subquery.joins.is_empty() {
-        let candidate_indices: Option<HashSet<usize>> = if let Some(ref where_expr) =
+        let candidate_indices: Option<HashSet<RowId>> = if let Some(ref where_expr) =
             subquery.where_clause
         {
             if let Some(index_usage) = super::ddl::find_index_usage(db, &subquery.from, where_expr)
@@ -1009,19 +1622,23 @@ pub fn eval_subquery_values(
             None
         };
 
-        let rows_to_check: Vec<(usize, &Vec<Value>)> =
+        let rows_to_check: Vec<(usize, RowId, &Vec<Value>)> =
             if let Some(ref candidate_set) = candidate_indices {
                 table
-                    .rows
-                    .iter()
+                    .iter_rows_with_ids()
                     .enumerate()
-                    .filter(|(idx, _)| candidate_set.contains(idx))
+                    .filter(|(_, (row_id, _))| candidate_set.contains(row_id))
+                    .map(|(idx, (row_id, row))| (idx, row_id, row))
                     .collect()
             } else {
-                table.rows.iter().enumerate().collect()
+                table
+                    .iter_rows_with_ids()
+                    .enumerate()
+                    .map(|(idx, (row_id, row))| (idx, row_id, row))
+                    .collect()
             };
 
-        for (_, row) in rows_to_check {
+        for (_, _, row) in rows_to_check {
             let include_row = if let Some(ref where_expr) = subquery.where_clause {
                 evaluate_expression(Some(db), where_expr, &table.columns, row)?
             } else {
@@ -1196,7 +1813,7 @@ fn eval_subquery_exists_with_joins(
         .ok_or_else(|| RustqlError::TableNotFound(subquery.from.clone()))?;
 
     let (joined_rows, all_subquery_columns) =
-        perform_multiple_joins(db, main_table, &subquery.from, &subquery.joins)?;
+        perform_multiple_joins(None, db, main_table, &subquery.from, &subquery.joins)?;
 
     let mut combined_columns: Vec<ColumnDefinition> = outer_columns.to_vec();
     combined_columns.extend(all_subquery_columns.clone());
@@ -1236,7 +1853,7 @@ pub fn eval_scalar_subquery_with_outer(
             .ok_or_else(|| RustqlError::TableNotFound(subquery.from.clone()))?;
 
         let (joined_rows, all_subquery_columns) =
-            perform_multiple_joins(db, main_table, &subquery.from, &subquery.joins)?;
+            perform_multiple_joins(None, db, main_table, &subquery.from, &subquery.joins)?;
 
         let mut combined_columns: Vec<ColumnDefinition> = outer_columns.to_vec();
         combined_columns.extend(all_subquery_columns.clone());
@@ -1347,11 +1964,8 @@ pub fn eval_scalar_subquery_with_outer(
 
                 let filtered_rows: Vec<&Vec<Value>> = subquery_rows.iter().collect();
 
-                let temp_table = Table {
-                    columns: all_subquery_columns.clone(),
-                    rows: subquery_rows.clone(),
-                    constraints: vec![],
-                };
+                let temp_table =
+                    Table::new(all_subquery_columns.clone(), subquery_rows.clone(), vec![]);
 
                 compute_aggregate(
                     &agg.function,
@@ -1533,14 +2147,18 @@ pub fn eval_scalar_subquery_with_outer(
     }
 }
 
-fn execute_select_with_joins(stmt: SelectStatement, db: &Database) -> Result<String, RustqlError> {
+fn execute_select_with_joins(
+    context: &ExecutionContext,
+    stmt: SelectStatement,
+    db: &Database,
+) -> Result<QueryResult, RustqlError> {
     let main_table = db
         .tables
         .get(&stmt.from)
         .ok_or_else(|| RustqlError::TableNotFound(stmt.from.clone()))?;
 
     let (joined_rows, all_columns) =
-        perform_multiple_joins(db, main_table, &stmt.from, &stmt.joins)?;
+        perform_multiple_joins(Some(context), db, main_table, &stmt.from, &stmt.joins)?;
 
     let mut filtered_rows: Vec<Vec<Value>> = Vec::new();
     let db_ref: &Database = db;
@@ -1561,23 +2179,23 @@ fn execute_select_with_joins(stmt: SelectStatement, db: &Database) -> Result<Str
         .any(|col| matches!(col, Column::Function(_)));
 
     if stmt.group_by.is_some() {
-        let temp_table = Table {
-            columns: all_columns.clone(),
-            rows: Vec::new(),
-            constraints: vec![],
-        };
+        let temp_table = Table::new(all_columns.clone(), Vec::new(), vec![]);
         let row_refs: Vec<&Vec<Value>> = filtered_rows.iter().collect();
-        return execute_select_with_grouping(stmt, &temp_table, row_refs);
+        return Ok(rows_result(execute_select_with_grouping_result(
+            stmt,
+            &temp_table,
+            row_refs,
+        )?));
     }
 
     if has_aggregate {
-        let temp_table = Table {
-            columns: all_columns.clone(),
-            rows: Vec::new(),
-            constraints: vec![],
-        };
+        let temp_table = Table::new(all_columns.clone(), Vec::new(), vec![]);
         let row_refs: Vec<&Vec<Value>> = filtered_rows.iter().collect();
-        return execute_select_with_aggregates(stmt, &temp_table, row_refs);
+        return Ok(rows_result(execute_select_with_aggregates_result(
+            stmt,
+            &temp_table,
+            row_refs,
+        )?));
     }
 
     if let Some(ref order_by) = stmt.order_by {
@@ -1627,13 +2245,10 @@ fn execute_select_with_joins(stmt: SelectStatement, db: &Database) -> Result<Str
         _ => return Err(RustqlError::TypeMismatch("Invalid column type".to_string())),
     };
 
-    let mut result = String::new();
-    for (header, _) in &column_specs {
-        result.push_str(&format!("{}\t", header));
-    }
-    result.push('\n');
-    result.push_str(&"-".repeat(40));
-    result.push('\n');
+    let headers: Vec<String> = column_specs
+        .iter()
+        .map(|(header, _)| header.clone())
+        .collect();
 
     let offset = stmt.offset.unwrap_or(0);
     let limit = stmt.limit.unwrap_or(filtered_rows.len());
@@ -1642,6 +2257,7 @@ fn execute_select_with_joins(stmt: SelectStatement, db: &Database) -> Result<Str
     let mut seen: BTreeSet<Vec<Value>> = BTreeSet::new();
     let mut skipped = 0usize;
     let mut emitted = 0usize;
+    let mut rows = Vec::new();
     for row in &filtered_rows {
         let projected: Vec<Value> = column_specs
             .iter()
@@ -1657,327 +2273,11 @@ fn execute_select_with_joins(stmt: SelectStatement, db: &Database) -> Result<Str
         if emitted >= limit {
             break;
         }
-        for val in &projected {
-            result.push_str(&format!("{}\t", format_value(val)));
-        }
-        result.push('\n');
+        rows.push(projected);
         emitted += 1;
     }
 
-    Ok(result)
-}
-
-fn execute_select_from_subquery(
-    stmt: SelectStatement,
-    subquery: &SelectStatement,
-    alias: &str,
-) -> Result<String, RustqlError> {
-    let result = execute_select_from_subquery_result(stmt, subquery, alias)?;
-    Ok(format_select_result(&result))
-}
-
-fn execute_select_from_subquery_result(
-    stmt: SelectStatement,
-    subquery: &SelectStatement,
-    alias: &str,
-) -> Result<SelectResult, RustqlError> {
-    let subquery_result = {
-        let db = get_database_read();
-        execute_select_internal(subquery.clone(), &db)?
-    };
-
-    let columns: Vec<ColumnDefinition> = subquery_result
-        .headers
-        .iter()
-        .enumerate()
-        .map(|(idx, name)| {
-            let data_type = subquery_result
-                .rows
-                .first()
-                .and_then(|row| row.get(idx))
-                .map(|val| match val {
-                    Value::Integer(_) => DataType::Integer,
-                    Value::Float(_) => DataType::Float,
-                    Value::Boolean(_) => DataType::Boolean,
-                    Value::Date(_) => DataType::Date,
-                    Value::Time(_) => DataType::Time,
-                    Value::DateTime(_) => DataType::DateTime,
-                    _ => DataType::Text,
-                })
-                .unwrap_or(DataType::Text);
-            ColumnDefinition {
-                name: name.clone(),
-                data_type,
-                nullable: true,
-                primary_key: false,
-                unique: false,
-                default_value: None,
-                foreign_key: None,
-                check: None,
-                auto_increment: false,
-                generated: None,
-            }
-        })
-        .collect();
-
-    let mut new_stmt = stmt;
-    new_stmt.from = alias.to_string();
-    new_stmt.from_subquery = None;
-
-    let mut db = get_database_write();
-    db.tables.insert(
-        alias.to_string(),
-        Table {
-            columns,
-            rows: subquery_result.rows,
-            constraints: vec![],
-        },
-    );
-    let result = execute_select_internal(new_stmt, &db);
-    db.tables.remove(alias);
-    result
-}
-
-fn execute_select_from_view(
-    stmt: SelectStatement,
-    view_name: &str,
-    view_sql: &str,
-) -> Result<String, RustqlError> {
-    let result = execute_select_from_view_result(stmt, view_name, view_sql)?;
-    Ok(format_select_result(&result))
-}
-
-fn execute_select_from_view_result(
-    stmt: SelectStatement,
-    view_name: &str,
-    view_sql: &str,
-) -> Result<SelectResult, RustqlError> {
-    let tokens = crate::lexer::tokenize(view_sql)?;
-    let view_stmt = crate::parser::parse(tokens)?;
-    let view_select = match view_stmt {
-        crate::ast::Statement::Select(s) => s,
-        _ => {
-            return Err(RustqlError::Internal(
-                "View definition is not a SELECT statement".to_string(),
-            ));
-        }
-    };
-
-    let view_result = {
-        let db = get_database_read();
-        execute_select_internal(view_select, &db)?
-    };
-
-    let columns: Vec<ColumnDefinition> = view_result
-        .headers
-        .iter()
-        .enumerate()
-        .map(|(idx, name)| {
-            let data_type = view_result
-                .rows
-                .first()
-                .and_then(|row| row.get(idx))
-                .map(|val| match val {
-                    Value::Integer(_) => DataType::Integer,
-                    Value::Float(_) => DataType::Float,
-                    Value::Boolean(_) => DataType::Boolean,
-                    Value::Date(_) => DataType::Date,
-                    Value::Time(_) => DataType::Time,
-                    Value::DateTime(_) => DataType::DateTime,
-                    _ => DataType::Text,
-                })
-                .unwrap_or(DataType::Text);
-            ColumnDefinition {
-                name: name.clone(),
-                data_type,
-                nullable: true,
-                primary_key: false,
-                unique: false,
-                default_value: None,
-                foreign_key: None,
-                check: None,
-                auto_increment: false,
-                generated: None,
-            }
-        })
-        .collect();
-
-    let mut db = get_database_write();
-    db.tables.insert(
-        view_name.to_string(),
-        Table {
-            columns,
-            rows: view_result.rows,
-            constraints: vec![],
-        },
-    );
-    let result = execute_select_internal(stmt, &db);
-    db.tables.remove(view_name);
-    result
-}
-
-fn execute_select_with_ctes(stmt: SelectStatement) -> Result<String, RustqlError> {
-    let result = execute_select_with_ctes_result(stmt)?;
-    Ok(format_select_result(&result))
-}
-
-fn execute_select_with_ctes_result(mut stmt: SelectStatement) -> Result<SelectResult, RustqlError> {
-    let ctes = std::mem::take(&mut stmt.ctes);
-    let mut db = get_database_write();
-
-    let mut temp_table_names: Vec<String> = Vec::new();
-    for cte in &ctes {
-        if cte.recursive {
-            let cte_query = &cte.query;
-            if let Some((ref set_op_type, ref recursive_part)) = cte_query.set_op {
-                if !matches!(set_op_type, SetOperation::UnionAll | SetOperation::Union) {
-                    return Err(RustqlError::Internal(
-                        "Recursive CTE requires UNION or UNION ALL".to_string(),
-                    ));
-                }
-                let is_union_all = matches!(set_op_type, SetOperation::UnionAll);
-
-                let mut base_stmt = cte_query.clone();
-                base_stmt.set_op = None;
-                let base_result = execute_select_internal(base_stmt, &db)?;
-
-                let columns: Vec<ColumnDefinition> = base_result
-                    .headers
-                    .iter()
-                    .map(|name| ColumnDefinition {
-                        name: name.clone(),
-                        data_type: DataType::Text,
-                        nullable: true,
-                        primary_key: false,
-                        unique: false,
-                        default_value: None,
-                        foreign_key: None,
-                        check: None,
-                        auto_increment: false,
-                        generated: None,
-                    })
-                    .collect();
-
-                let mut all_rows: Vec<Vec<Value>> = base_result.rows.clone();
-                let mut working_rows: Vec<Vec<Value>> = base_result.rows;
-                let mut seen: Option<std::collections::BTreeSet<Vec<Value>>> = if is_union_all {
-                    None
-                } else {
-                    let mut s = std::collections::BTreeSet::new();
-                    for row in &all_rows {
-                        s.insert(row.clone());
-                    }
-                    Some(s)
-                };
-
-                const MAX_ITERATIONS: usize = 1000;
-                for _ in 0..MAX_ITERATIONS {
-                    if working_rows.is_empty() {
-                        break;
-                    }
-
-                    db.tables.insert(
-                        cte.name.clone(),
-                        Table {
-                            columns: columns.clone(),
-                            rows: working_rows,
-                            constraints: vec![],
-                        },
-                    );
-
-                    let recursive_result = execute_select_internal(*recursive_part.clone(), &db)?;
-
-                    let mut new_rows: Vec<Vec<Value>> = Vec::new();
-                    for row in recursive_result.rows {
-                        if let Some(ref mut seen_set) = seen {
-                            if seen_set.insert(row.clone()) {
-                                new_rows.push(row);
-                            }
-                        } else {
-                            new_rows.push(row);
-                        }
-                    }
-
-                    if new_rows.is_empty() {
-                        break;
-                    }
-
-                    all_rows.extend(new_rows.clone());
-                    working_rows = new_rows;
-                }
-
-                db.tables.insert(
-                    cte.name.clone(),
-                    Table {
-                        columns,
-                        rows: all_rows,
-                        constraints: vec![],
-                    },
-                );
-            } else {
-                let cte_result = execute_select_internal(cte.query.clone(), &db)?;
-                let columns: Vec<ColumnDefinition> = cte_result
-                    .headers
-                    .iter()
-                    .map(|name| ColumnDefinition {
-                        name: name.clone(),
-                        data_type: DataType::Text,
-                        nullable: true,
-                        primary_key: false,
-                        unique: false,
-                        default_value: None,
-                        foreign_key: None,
-                        check: None,
-                        auto_increment: false,
-                        generated: None,
-                    })
-                    .collect();
-                db.tables.insert(
-                    cte.name.clone(),
-                    Table {
-                        columns,
-                        rows: cte_result.rows,
-                        constraints: vec![],
-                    },
-                );
-            }
-        } else {
-            let cte_result = execute_select_internal(cte.query.clone(), &db)?;
-            let columns: Vec<ColumnDefinition> = cte_result
-                .headers
-                .iter()
-                .map(|name| ColumnDefinition {
-                    name: name.clone(),
-                    data_type: DataType::Text,
-                    nullable: true,
-                    primary_key: false,
-                    unique: false,
-                    default_value: None,
-                    foreign_key: None,
-                    check: None,
-                    auto_increment: false,
-                    generated: None,
-                })
-                .collect();
-            db.tables.insert(
-                cte.name.clone(),
-                Table {
-                    columns,
-                    rows: cte_result.rows,
-                    constraints: vec![],
-                },
-            );
-        }
-        temp_table_names.push(cte.name.clone());
-    }
-
-    let result = execute_select_internal(stmt, &db);
-
-    for name in temp_table_names {
-        db.tables.remove(&name);
-    }
-
-    result
+    Ok(rows_result(SelectResult { headers, rows }))
 }
 
 fn resolve_window_definitions(stmt: &mut SelectStatement) {
@@ -2006,87 +2306,4 @@ fn resolve_window_definitions(stmt: &mut SelectStatement) {
             *frame = def.frame.clone();
         }
     }
-}
-
-fn execute_select_from_values(
-    stmt: SelectStatement,
-    values_rows: &[Vec<Expression>],
-    alias: &str,
-    col_aliases: &[String],
-) -> Result<String, RustqlError> {
-    let result = execute_select_from_values_result(stmt, values_rows, alias, col_aliases)?;
-    Ok(format_select_result(&result))
-}
-
-fn execute_select_from_values_result(
-    stmt: SelectStatement,
-    values_rows: &[Vec<Expression>],
-    alias: &str,
-    col_aliases: &[String],
-) -> Result<SelectResult, RustqlError> {
-    let empty_columns: Vec<ColumnDefinition> = Vec::new();
-    let empty_row: Vec<Value> = Vec::new();
-
-    let mut evaluated_rows: Vec<Vec<Value>> = Vec::new();
-    for expr_row in values_rows {
-        let mut row: Vec<Value> = Vec::new();
-        for expr in expr_row {
-            let val = evaluate_value_expression(expr, &empty_columns, &empty_row)?;
-            row.push(val);
-        }
-        evaluated_rows.push(row);
-    }
-
-    let num_cols = evaluated_rows.first().map(|r| r.len()).unwrap_or(0);
-    let columns: Vec<ColumnDefinition> = (0..num_cols)
-        .map(|i| {
-            let name = if i < col_aliases.len() {
-                col_aliases[i].clone()
-            } else {
-                format!("column{}", i + 1)
-            };
-            let data_type = evaluated_rows
-                .first()
-                .and_then(|row| row.get(i))
-                .map(|val| match val {
-                    Value::Integer(_) => DataType::Integer,
-                    Value::Float(_) => DataType::Float,
-                    Value::Boolean(_) => DataType::Boolean,
-                    Value::Date(_) => DataType::Date,
-                    Value::Time(_) => DataType::Time,
-                    Value::DateTime(_) => DataType::DateTime,
-                    _ => DataType::Text,
-                })
-                .unwrap_or(DataType::Text);
-            ColumnDefinition {
-                name,
-                data_type,
-                nullable: true,
-                primary_key: false,
-                unique: false,
-                default_value: None,
-                foreign_key: None,
-                check: None,
-                auto_increment: false,
-                generated: None,
-            }
-        })
-        .collect();
-
-    let mut new_stmt = stmt;
-    new_stmt.from = alias.to_string();
-    new_stmt.from_values = None;
-
-    let mut db = get_database_write();
-    db.tables.insert(
-        alias.to_string(),
-        Table {
-            columns,
-            rows: evaluated_rows,
-            constraints: vec![],
-        },
-    );
-    let result = execute_select_internal(new_stmt, &db);
-    db.tables.remove(alias);
-    result
 }

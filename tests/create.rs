@@ -1,9 +1,9 @@
 use rustql::ast::*;
-use rustql::executor::{execute, reset_database_state};
+use rustql::testing::{execute, reset_database};
 
 #[test]
 fn test_create_and_drop_table() {
-    reset_database_state();
+    reset_database();
 
     let create = Statement::CreateTable(CreateTableStatement {
         name: "users".to_string(),

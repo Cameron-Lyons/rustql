@@ -1,4 +1,7 @@
-use rustql::{CommandTag, Engine, EngineOptions, QueryResult, reset_database};
+use rustql::{
+    CommandTag, Engine, EngineOptions, QueryResult, StorageMode, ast, lexer, parser, planner,
+};
+use std::collections::BTreeSet;
 use std::sync::{Mutex, OnceLock};
 
 fn test_guard() -> std::sync::MutexGuard<'static, ()> {
@@ -9,25 +12,24 @@ fn test_guard() -> std::sync::MutexGuard<'static, ()> {
 #[test]
 fn execute_select_returns_typed_rows() {
     let _guard = test_guard();
-    reset_database();
-
-    let engine = Engine::open(EngineOptions::default()).unwrap();
+    let engine = Engine::open(EngineOptions {
+        storage: StorageMode::Memory,
+    })
+    .unwrap();
     let mut session = engine.session();
 
     session
-        .execute("CREATE TABLE users (id INTEGER, name TEXT)")
+        .execute_one("CREATE TABLE users (id INTEGER, name TEXT)")
         .unwrap();
     session
-        .execute("INSERT INTO users VALUES (1, 'Alice'), (2, 'Bob')")
+        .execute_one("INSERT INTO users VALUES (1, 'Alice'), (2, 'Bob')")
         .unwrap();
 
-    let results = session
-        .execute("SELECT id, name FROM users ORDER BY id")
+    let result = session
+        .execute_one("SELECT id, name FROM users ORDER BY id")
         .unwrap();
 
-    assert_eq!(results.len(), 1);
-
-    match &results[0] {
+    match &result {
         QueryResult::Rows(rows) => {
             assert_eq!(rows.columns.len(), 2);
             assert_eq!(rows.columns[0].name, "id");
@@ -39,31 +41,1369 @@ fn execute_select_returns_typed_rows() {
 }
 
 #[test]
-fn execute_update_returns_command_tag_and_affected_rows() {
+fn execute_joined_select_returns_typed_rows() {
     let _guard = test_guard();
-    reset_database();
-
-    let engine = Engine::open(EngineOptions::default()).unwrap();
+    let engine = Engine::open(EngineOptions {
+        storage: StorageMode::Memory,
+    })
+    .unwrap();
     let mut session = engine.session();
 
     session
-        .execute("CREATE TABLE users (id INTEGER, name TEXT)")
+        .execute_script(
+            "
+            CREATE TABLE users (id INTEGER, name TEXT);
+            CREATE TABLE orders (id INTEGER, user_id INTEGER, amount INTEGER);
+            INSERT INTO users VALUES (1, 'Alice'), (2, 'Bob');
+            INSERT INTO orders VALUES (10, 1, 75), (11, 1, 25), (12, 2, 50);
+            ",
+        )
+        .unwrap();
+
+    let result = session
+        .execute_one(
+            "SELECT users.name, orders.amount FROM users JOIN orders ON users.id = orders.user_id ORDER BY orders.amount",
+        )
+        .unwrap();
+
+    match result {
+        QueryResult::Rows(rows) => {
+            assert_eq!(rows.rows.len(), 3);
+            assert_eq!(
+                rows.rows[0],
+                vec![
+                    ast::Value::Text("Alice".to_string()),
+                    ast::Value::Integer(25)
+                ]
+            );
+            assert_eq!(
+                rows.rows[2],
+                vec![
+                    ast::Value::Text("Alice".to_string()),
+                    ast::Value::Integer(75)
+                ]
+            );
+        }
+        other => panic!("expected rows result, got: {other:?}"),
+    }
+}
+
+#[test]
+fn execute_multi_join_returns_typed_rows() {
+    let _guard = test_guard();
+    let engine = Engine::open(EngineOptions {
+        storage: StorageMode::Memory,
+    })
+    .unwrap();
+    let mut session = engine.session();
+
+    session
+        .execute_script(
+            "
+            CREATE TABLE customers (id INTEGER, name TEXT);
+            CREATE TABLE orders (id INTEGER, customer_id INTEGER, product_id INTEGER);
+            CREATE TABLE products (id INTEGER, pname TEXT);
+            INSERT INTO customers VALUES (1, 'Alice'), (2, 'Bob');
+            INSERT INTO orders VALUES (10, 1, 100), (11, 2, 101);
+            INSERT INTO products VALUES (100, 'Widget'), (101, 'Gadget');
+            ",
+        )
+        .unwrap();
+
+    let result = session
+        .execute_one(
+            "SELECT customers.name, products.pname
+             FROM customers
+             JOIN orders ON customers.id = orders.customer_id
+             JOIN products ON orders.product_id = products.id
+             ORDER BY customers.name",
+        )
+        .unwrap();
+
+    match result {
+        QueryResult::Rows(rows) => {
+            assert_eq!(
+                rows.rows,
+                vec![
+                    vec![
+                        ast::Value::Text("Alice".to_string()),
+                        ast::Value::Text("Widget".to_string())
+                    ],
+                    vec![
+                        ast::Value::Text("Bob".to_string()),
+                        ast::Value::Text("Gadget".to_string())
+                    ],
+                ]
+            );
+        }
+        other => panic!("expected rows result, got: {other:?}"),
+    }
+}
+
+#[test]
+fn execute_join_subquery_returns_typed_rows() {
+    let _guard = test_guard();
+    let engine = Engine::open(EngineOptions {
+        storage: StorageMode::Memory,
+    })
+    .unwrap();
+    let mut session = engine.session();
+
+    session
+        .execute_script(
+            "
+            CREATE TABLE users (id INTEGER, name TEXT);
+            CREATE TABLE orders (id INTEGER, user_id INTEGER, amount INTEGER);
+            INSERT INTO users VALUES (1, 'Alice'), (2, 'Bob'), (3, 'Carol');
+            INSERT INTO orders VALUES (10, 1, 75), (11, 1, 25), (12, 2, 60), (13, 4, 90);
+            ",
+        )
+        .unwrap();
+
+    let result = session
+        .execute_one(
+            "SELECT users.name, recent.amount
+             FROM users
+             JOIN (
+                 SELECT user_id, amount
+                 FROM orders
+                 WHERE amount >= 60
+             ) AS recent ON users.id = recent.user_id
+             ORDER BY recent.amount",
+        )
+        .unwrap();
+
+    match result {
+        QueryResult::Rows(rows) => {
+            assert_eq!(
+                rows.rows,
+                vec![
+                    vec![ast::Value::Text("Bob".to_string()), ast::Value::Integer(60)],
+                    vec![
+                        ast::Value::Text("Alice".to_string()),
+                        ast::Value::Integer(75)
+                    ],
+                ]
+            );
+        }
+        other => panic!("expected rows result, got: {other:?}"),
+    }
+}
+
+#[test]
+fn execute_lateral_join_returns_typed_rows() {
+    let _guard = test_guard();
+    let engine = Engine::open(EngineOptions {
+        storage: StorageMode::Memory,
+    })
+    .unwrap();
+    let mut session = engine.session();
+
+    session
+        .execute_script(
+            "
+            CREATE TABLE users (id INTEGER, name TEXT);
+            CREATE TABLE orders (id INTEGER, user_id INTEGER, amount INTEGER);
+            INSERT INTO users VALUES (1, 'Alice'), (2, 'Bob'), (3, 'Carol');
+            INSERT INTO orders VALUES (10, 1, 75), (11, 1, 25), (12, 2, 60);
+            ",
+        )
+        .unwrap();
+
+    let result = session
+        .execute_one(
+            "SELECT users.name, recent.amount
+             FROM users
+             LEFT JOIN LATERAL (
+                 SELECT amount
+                 FROM orders
+                 WHERE orders.user_id = users.id
+                 ORDER BY amount DESC
+                 FETCH FIRST 1 ROW ONLY
+             ) AS recent
+             ORDER BY users.name",
+        )
+        .unwrap();
+
+    match result {
+        QueryResult::Rows(rows) => {
+            assert_eq!(
+                rows.rows,
+                vec![
+                    vec![
+                        ast::Value::Text("Alice".to_string()),
+                        ast::Value::Integer(75),
+                    ],
+                    vec![ast::Value::Text("Bob".to_string()), ast::Value::Integer(60),],
+                    vec![ast::Value::Text("Carol".to_string()), ast::Value::Null],
+                ]
+            );
+        }
+        other => panic!("expected rows result, got: {other:?}"),
+    }
+}
+
+#[test]
+fn execute_left_join_using_returns_typed_rows() {
+    let _guard = test_guard();
+    let engine = Engine::open(EngineOptions {
+        storage: StorageMode::Memory,
+    })
+    .unwrap();
+    let mut session = engine.session();
+
+    session
+        .execute_script(
+            "
+            CREATE TABLE users (id INTEGER, name TEXT);
+            CREATE TABLE scores (id INTEGER, score INTEGER);
+            INSERT INTO users VALUES (1, 'Alice'), (2, 'Bob'), (3, 'Carol');
+            INSERT INTO scores VALUES (1, 90), (2, 85);
+            ",
+        )
+        .unwrap();
+
+    let result = session
+        .execute_one(
+            "SELECT users.name, scores.score
+             FROM users LEFT JOIN scores USING (id)
+             ORDER BY users.name",
+        )
+        .unwrap();
+
+    match result {
+        QueryResult::Rows(rows) => {
+            assert_eq!(
+                rows.rows,
+                vec![
+                    vec![
+                        ast::Value::Text("Alice".to_string()),
+                        ast::Value::Integer(90)
+                    ],
+                    vec![ast::Value::Text("Bob".to_string()), ast::Value::Integer(85)],
+                    vec![ast::Value::Text("Carol".to_string()), ast::Value::Null],
+                ]
+            );
+        }
+        other => panic!("expected rows result, got: {other:?}"),
+    }
+}
+
+#[test]
+fn execute_join_using_multi_column_returns_typed_rows() {
+    let _guard = test_guard();
+    let engine = Engine::open(EngineOptions {
+        storage: StorageMode::Memory,
+    })
+    .unwrap();
+    let mut session = engine.session();
+
+    session
+        .execute_script(
+            "
+            CREATE TABLE lhs (x INTEGER, y INTEGER, val TEXT);
+            CREATE TABLE rhs (x INTEGER, y INTEGER, info TEXT);
+            INSERT INTO lhs VALUES (1, 10, 'a'), (2, 20, 'b'), (3, 30, 'c');
+            INSERT INTO rhs VALUES (1, 10, 'foo'), (2, 20, 'bar');
+            ",
+        )
+        .unwrap();
+
+    let result = session
+        .execute_one(
+            "SELECT lhs.val, rhs.info
+             FROM lhs JOIN rhs USING (x, y)
+             ORDER BY lhs.val",
+        )
+        .unwrap();
+
+    match result {
+        QueryResult::Rows(rows) => {
+            assert_eq!(
+                rows.rows,
+                vec![
+                    vec![
+                        ast::Value::Text("a".to_string()),
+                        ast::Value::Text("foo".to_string())
+                    ],
+                    vec![
+                        ast::Value::Text("b".to_string()),
+                        ast::Value::Text("bar".to_string())
+                    ],
+                ]
+            );
+        }
+        other => panic!("expected rows result, got: {other:?}"),
+    }
+}
+
+#[test]
+fn execute_right_join_returns_typed_rows() {
+    let _guard = test_guard();
+    let engine = Engine::open(EngineOptions {
+        storage: StorageMode::Memory,
+    })
+    .unwrap();
+    let mut session = engine.session();
+
+    session
+        .execute_script(
+            "
+            CREATE TABLE customers (id INTEGER, name TEXT);
+            CREATE TABLE orders (id INTEGER, customer_id INTEGER, product TEXT);
+            INSERT INTO customers VALUES (1, 'Alice'), (2, 'Bob');
+            INSERT INTO orders VALUES (101, 1, 'Laptop'), (102, 2, 'Keyboard'), (103, 999, 'Mouse');
+            ",
+        )
+        .unwrap();
+
+    let result = session
+        .execute_one(
+            "SELECT customers.name, orders.product
+             FROM customers RIGHT JOIN orders ON customers.id = orders.customer_id
+             ORDER BY orders.product",
+        )
+        .unwrap();
+
+    match result {
+        QueryResult::Rows(rows) => {
+            assert_eq!(
+                rows.rows,
+                vec![
+                    vec![
+                        ast::Value::Text("Bob".to_string()),
+                        ast::Value::Text("Keyboard".to_string())
+                    ],
+                    vec![
+                        ast::Value::Text("Alice".to_string()),
+                        ast::Value::Text("Laptop".to_string())
+                    ],
+                    vec![ast::Value::Null, ast::Value::Text("Mouse".to_string())],
+                ]
+            );
+        }
+        other => panic!("expected rows result, got: {other:?}"),
+    }
+}
+
+#[test]
+fn execute_full_join_returns_typed_rows() {
+    let _guard = test_guard();
+    let engine = Engine::open(EngineOptions {
+        storage: StorageMode::Memory,
+    })
+    .unwrap();
+    let mut session = engine.session();
+
+    session
+        .execute_script(
+            "
+            CREATE TABLE left_table (id INTEGER, name TEXT);
+            CREATE TABLE right_table (id INTEGER, value TEXT);
+            INSERT INTO left_table VALUES (1, 'A'), (2, 'B');
+            INSERT INTO right_table VALUES (2, 'Y'), (3, 'Z');
+            ",
+        )
+        .unwrap();
+
+    let result = session
+        .execute_one(
+            "SELECT left_table.id, left_table.name, right_table.value
+             FROM left_table FULL JOIN right_table ON left_table.id = right_table.id
+             ORDER BY left_table.id, right_table.value",
+        )
+        .unwrap();
+
+    match result {
+        QueryResult::Rows(rows) => {
+            assert_eq!(
+                rows.rows,
+                vec![
+                    vec![
+                        ast::Value::Integer(1),
+                        ast::Value::Text("A".to_string()),
+                        ast::Value::Null
+                    ],
+                    vec![
+                        ast::Value::Integer(2),
+                        ast::Value::Text("B".to_string()),
+                        ast::Value::Text("Y".to_string())
+                    ],
+                    vec![
+                        ast::Value::Null,
+                        ast::Value::Null,
+                        ast::Value::Text("Z".to_string())
+                    ],
+                ]
+            );
+        }
+        other => panic!("expected rows result, got: {other:?}"),
+    }
+}
+
+#[test]
+fn execute_aggregate_on_empty_table_returns_single_row() {
+    let _guard = test_guard();
+    let engine = Engine::open(EngineOptions {
+        storage: StorageMode::Memory,
+    })
+    .unwrap();
+    let mut session = engine.session();
+
+    session
+        .execute_one("CREATE TABLE users (id INTEGER, age INTEGER)")
+        .unwrap();
+
+    let result = session
+        .execute_one("SELECT COUNT(*) AS total_users FROM users")
+        .unwrap();
+
+    match result {
+        QueryResult::Rows(rows) => {
+            assert_eq!(rows.columns[0].name, "total_users");
+            assert_eq!(rows.rows, vec![vec![ast::Value::Integer(0)]]);
+        }
+        other => panic!("expected rows result, got: {other:?}"),
+    }
+}
+
+#[test]
+fn execute_filtered_grouped_aggregate_returns_typed_rows() {
+    let _guard = test_guard();
+    let engine = Engine::open(EngineOptions {
+        storage: StorageMode::Memory,
+    })
+    .unwrap();
+    let mut session = engine.session();
+
+    session
+        .execute_script(
+            "
+            CREATE TABLE employees (id INTEGER, dept TEXT, status TEXT);
+            INSERT INTO employees VALUES
+                (1, 'eng', 'active'),
+                (2, 'eng', 'inactive'),
+                (3, 'eng', 'active'),
+                (4, 'sales', 'active'),
+                (5, 'sales', 'inactive');
+            ",
+        )
+        .unwrap();
+
+    let result = session
+        .execute_one(
+            "SELECT dept, COUNT(*) FILTER (WHERE status = 'active') AS active_count
+             FROM employees
+             GROUP BY dept
+             ORDER BY dept",
+        )
+        .unwrap();
+
+    match result {
+        QueryResult::Rows(rows) => {
+            assert_eq!(rows.columns[0].name, "dept");
+            assert_eq!(rows.columns[1].name, "active_count");
+            assert_eq!(
+                rows.rows,
+                vec![
+                    vec![ast::Value::Text("eng".to_string()), ast::Value::Integer(2)],
+                    vec![
+                        ast::Value::Text("sales".to_string()),
+                        ast::Value::Integer(1)
+                    ],
+                ]
+            );
+        }
+        other => panic!("expected rows result, got: {other:?}"),
+    }
+}
+
+#[test]
+fn execute_rollup_returns_typed_rows() {
+    let _guard = test_guard();
+    let engine = Engine::open(EngineOptions {
+        storage: StorageMode::Memory,
+    })
+    .unwrap();
+    let mut session = engine.session();
+
+    session
+        .execute_script(
+            "
+            CREATE TABLE sales (region TEXT, product TEXT, amount INTEGER);
+            INSERT INTO sales VALUES
+                ('East', 'Widget', 100),
+                ('East', 'Gadget', 150),
+                ('West', 'Widget', 200),
+                ('West', 'Gadget', 250);
+            ",
+        )
+        .unwrap();
+
+    let result = session
+        .execute_one(
+            "SELECT region, product, COUNT(*) AS total
+             FROM sales
+             GROUP BY ROLLUP(region, product)",
+        )
+        .unwrap();
+
+    match result {
+        QueryResult::Rows(rows) => {
+            let actual: BTreeSet<Vec<ast::Value>> = rows.rows.into_iter().collect();
+            let expected: BTreeSet<Vec<ast::Value>> = [
+                vec![
+                    ast::Value::Text("East".to_string()),
+                    ast::Value::Text("Widget".to_string()),
+                    ast::Value::Integer(1),
+                ],
+                vec![
+                    ast::Value::Text("East".to_string()),
+                    ast::Value::Text("Gadget".to_string()),
+                    ast::Value::Integer(1),
+                ],
+                vec![
+                    ast::Value::Text("East".to_string()),
+                    ast::Value::Null,
+                    ast::Value::Integer(2),
+                ],
+                vec![
+                    ast::Value::Text("West".to_string()),
+                    ast::Value::Text("Widget".to_string()),
+                    ast::Value::Integer(1),
+                ],
+                vec![
+                    ast::Value::Text("West".to_string()),
+                    ast::Value::Text("Gadget".to_string()),
+                    ast::Value::Integer(1),
+                ],
+                vec![
+                    ast::Value::Text("West".to_string()),
+                    ast::Value::Null,
+                    ast::Value::Integer(2),
+                ],
+                vec![ast::Value::Null, ast::Value::Null, ast::Value::Integer(4)],
+            ]
+            .into_iter()
+            .collect();
+
+            assert_eq!(actual, expected);
+        }
+        other => panic!("expected rows result, got: {other:?}"),
+    }
+}
+
+#[test]
+fn execute_window_row_number_returns_typed_rows() {
+    let _guard = test_guard();
+    let engine = Engine::open(EngineOptions {
+        storage: StorageMode::Memory,
+    })
+    .unwrap();
+    let mut session = engine.session();
+
+    session
+        .execute_script(
+            "
+            CREATE TABLE scores (id INTEGER, name TEXT, score INTEGER);
+            INSERT INTO scores VALUES
+                (1, 'Alice', 90),
+                (2, 'Bob', 85),
+                (3, 'Charlie', 95);
+            ",
+        )
+        .unwrap();
+
+    let result = session
+        .execute_one(
+            "SELECT name, score, ROW_NUMBER() OVER (ORDER BY score DESC) AS rnum
+             FROM scores
+             ORDER BY score DESC",
+        )
+        .unwrap();
+
+    match result {
+        QueryResult::Rows(rows) => {
+            assert_eq!(
+                rows.rows,
+                vec![
+                    vec![
+                        ast::Value::Text("Charlie".to_string()),
+                        ast::Value::Integer(95),
+                        ast::Value::Integer(1),
+                    ],
+                    vec![
+                        ast::Value::Text("Alice".to_string()),
+                        ast::Value::Integer(90),
+                        ast::Value::Integer(2),
+                    ],
+                    vec![
+                        ast::Value::Text("Bob".to_string()),
+                        ast::Value::Integer(85),
+                        ast::Value::Integer(3),
+                    ],
+                ]
+            );
+        }
+        other => panic!("expected rows result, got: {other:?}"),
+    }
+}
+
+#[test]
+fn execute_fetch_first_returns_typed_rows() {
+    let _guard = test_guard();
+    let engine = Engine::open(EngineOptions {
+        storage: StorageMode::Memory,
+    })
+    .unwrap();
+    let mut session = engine.session();
+
+    session
+        .execute_script(
+            "
+            CREATE TABLE users (id INTEGER, name TEXT);
+            INSERT INTO users VALUES (1, 'Alice'), (2, 'Bob'), (3, 'Carol');
+            ",
+        )
+        .unwrap();
+
+    let result = session
+        .execute_one("SELECT id, name FROM users ORDER BY id FETCH FIRST 2 ROWS ONLY")
+        .unwrap();
+
+    match result {
+        QueryResult::Rows(rows) => {
+            assert_eq!(rows.rows.len(), 2);
+            assert_eq!(
+                rows.rows,
+                vec![
+                    vec![
+                        ast::Value::Integer(1),
+                        ast::Value::Text("Alice".to_string())
+                    ],
+                    vec![ast::Value::Integer(2), ast::Value::Text("Bob".to_string())],
+                ]
+            );
+        }
+        other => panic!("expected rows result, got: {other:?}"),
+    }
+}
+
+#[test]
+fn execute_fetch_with_ties_returns_typed_rows() {
+    let _guard = test_guard();
+    let engine = Engine::open(EngineOptions {
+        storage: StorageMode::Memory,
+    })
+    .unwrap();
+    let mut session = engine.session();
+
+    session
+        .execute_script(
+            "
+            CREATE TABLE scores (id INTEGER, score INTEGER);
+            INSERT INTO scores VALUES (1, 100), (2, 90), (3, 90), (4, 80);
+            ",
+        )
+        .unwrap();
+
+    let result = session
+        .execute_one(
+            "SELECT id, score FROM scores ORDER BY score DESC FETCH FIRST 2 ROWS WITH TIES",
+        )
+        .unwrap();
+
+    match result {
+        QueryResult::Rows(rows) => {
+            assert_eq!(
+                rows.rows,
+                vec![
+                    vec![ast::Value::Integer(1), ast::Value::Integer(100)],
+                    vec![ast::Value::Integer(2), ast::Value::Integer(90)],
+                    vec![ast::Value::Integer(3), ast::Value::Integer(90)],
+                ]
+            );
+        }
+        other => panic!("expected rows result, got: {other:?}"),
+    }
+}
+
+#[test]
+fn execute_distinct_on_returns_typed_rows() {
+    let _guard = test_guard();
+    let engine = Engine::open(EngineOptions {
+        storage: StorageMode::Memory,
+    })
+    .unwrap();
+    let mut session = engine.session();
+
+    session
+        .execute_script(
+            "
+            CREATE TABLE items (category TEXT, item TEXT, price INTEGER);
+            INSERT INTO items VALUES
+                ('fruit', 'apple', 1),
+                ('fruit', 'banana', 2),
+                ('veggie', 'carrot', 3),
+                ('veggie', 'broccoli', 4);
+            ",
+        )
+        .unwrap();
+
+    let result = session
+        .execute_one(
+            "SELECT DISTINCT ON (category) category, item, price
+             FROM items
+             ORDER BY category, price",
+        )
+        .unwrap();
+
+    match result {
+        QueryResult::Rows(rows) => {
+            assert_eq!(
+                rows.rows,
+                vec![
+                    vec![
+                        ast::Value::Text("fruit".to_string()),
+                        ast::Value::Text("apple".to_string()),
+                        ast::Value::Integer(1),
+                    ],
+                    vec![
+                        ast::Value::Text("veggie".to_string()),
+                        ast::Value::Text("carrot".to_string()),
+                        ast::Value::Integer(3),
+                    ],
+                ]
+            );
+        }
+        other => panic!("expected rows result, got: {other:?}"),
+    }
+}
+
+#[test]
+fn execute_from_values_returns_typed_rows() {
+    let _guard = test_guard();
+    let engine = Engine::open(EngineOptions {
+        storage: StorageMode::Memory,
+    })
+    .unwrap();
+    let mut session = engine.session();
+
+    let result = session
+        .execute_one(
+            "SELECT id, name
+             FROM (VALUES (3, 'Carol'), (1, 'Alice'), (2, 'Bob')) AS t(id, name)
+             WHERE id > 1
+             ORDER BY id",
+        )
+        .unwrap();
+
+    match result {
+        QueryResult::Rows(rows) => {
+            assert_eq!(
+                rows.rows,
+                vec![
+                    vec![ast::Value::Integer(2), ast::Value::Text("Bob".to_string())],
+                    vec![
+                        ast::Value::Integer(3),
+                        ast::Value::Text("Carol".to_string())
+                    ],
+                ]
+            );
+        }
+        other => panic!("expected rows result, got: {other:?}"),
+    }
+}
+
+#[test]
+fn explain_from_values_returns_plan() {
+    let _guard = test_guard();
+    let engine = Engine::open(EngineOptions {
+        storage: StorageMode::Memory,
+    })
+    .unwrap();
+    let mut session = engine.session();
+
+    let result = session
+        .execute_one(
+            "EXPLAIN SELECT id
+             FROM (VALUES (3), (1), (2)) AS t(id)
+             ORDER BY id
+             FETCH FIRST 2 ROWS ONLY",
+        )
+        .unwrap();
+
+    match result {
+        QueryResult::Explain(plan) => {
+            assert!(matches!(plan, planner::PlanNode::Limit { .. }));
+        }
+        other => panic!("expected explain result, got: {other:?}"),
+    }
+}
+
+#[test]
+fn explain_from_subquery_returns_plan() {
+    let _guard = test_guard();
+    let engine = Engine::open(EngineOptions {
+        storage: StorageMode::Memory,
+    })
+    .unwrap();
+    let mut session = engine.session();
+
+    session
+        .execute_script(
+            "
+            CREATE TABLE users (id INTEGER, name TEXT);
+            INSERT INTO users VALUES (1, 'Alice'), (2, 'Bob'), (3, 'Carol');
+            ",
+        )
+        .unwrap();
+
+    let result = session
+        .execute_one(
+            "EXPLAIN SELECT name
+             FROM (SELECT id, name FROM users WHERE id > 1) AS filtered
+             ORDER BY name",
+        )
+        .unwrap();
+
+    match result {
+        QueryResult::Explain(plan) => {
+            assert!(matches!(plan, planner::PlanNode::Sort { .. }));
+        }
+        other => panic!("expected explain result, got: {other:?}"),
+    }
+}
+
+#[test]
+fn explain_join_subquery_returns_plan() {
+    let _guard = test_guard();
+    let engine = Engine::open(EngineOptions {
+        storage: StorageMode::Memory,
+    })
+    .unwrap();
+    let mut session = engine.session();
+
+    session
+        .execute_script(
+            "
+            CREATE TABLE users (id INTEGER, name TEXT);
+            CREATE TABLE orders (id INTEGER, user_id INTEGER, amount INTEGER);
+            INSERT INTO users VALUES (1, 'Alice'), (2, 'Bob');
+            INSERT INTO orders VALUES (10, 1, 75), (11, 2, 60);
+            ",
+        )
+        .unwrap();
+
+    let result = session
+        .execute_one(
+            "EXPLAIN SELECT users.name, recent.amount
+             FROM users
+             JOIN (
+                 SELECT user_id, amount
+                 FROM orders
+                 WHERE amount >= 60
+             ) AS recent ON users.id = recent.user_id",
+        )
+        .unwrap();
+
+    match result {
+        QueryResult::Explain(plan) => {
+            assert!(matches!(
+                plan,
+                planner::PlanNode::HashJoin { .. } | planner::PlanNode::NestedLoopJoin { .. }
+            ));
+        }
+        other => panic!("expected explain result, got: {other:?}"),
+    }
+}
+
+#[test]
+fn explain_lateral_join_returns_plan() {
+    let _guard = test_guard();
+    let engine = Engine::open(EngineOptions {
+        storage: StorageMode::Memory,
+    })
+    .unwrap();
+    let mut session = engine.session();
+
+    session
+        .execute_script(
+            "
+            CREATE TABLE users (id INTEGER, name TEXT);
+            CREATE TABLE orders (id INTEGER, user_id INTEGER, amount INTEGER);
+            INSERT INTO users VALUES (1, 'Alice'), (2, 'Bob');
+            INSERT INTO orders VALUES (10, 1, 75), (11, 2, 60);
+            ",
+        )
+        .unwrap();
+
+    let result = session
+        .execute_one(
+            "EXPLAIN SELECT users.name, recent.amount
+             FROM users
+             LEFT JOIN LATERAL (
+                 SELECT amount
+                 FROM orders
+                 WHERE orders.user_id = users.id
+                 ORDER BY amount DESC
+                 FETCH FIRST 1 ROW ONLY
+             ) AS recent",
+        )
+        .unwrap();
+
+    match result {
+        QueryResult::Explain(plan) => {
+            assert!(matches!(plan, planner::PlanNode::LateralJoin { .. }));
+        }
+        other => panic!("expected explain result, got: {other:?}"),
+    }
+}
+
+#[test]
+fn explain_cte_returns_plan() {
+    let _guard = test_guard();
+    let engine = Engine::open(EngineOptions {
+        storage: StorageMode::Memory,
+    })
+    .unwrap();
+    let mut session = engine.session();
+
+    session
+        .execute_one("CREATE TABLE users (id INTEGER, age INTEGER)")
         .unwrap();
     session
-        .execute("INSERT INTO users VALUES (1, 'Alice'), (2, 'Bob')")
+        .execute_one("INSERT INTO users VALUES (1, 25), (2, 40), (3, 50)")
         .unwrap();
 
-    let results = session
-        .execute("UPDATE users SET name = 'Updated' WHERE id = 1")
+    let result = session
+        .execute_one(
+            "EXPLAIN WITH adults AS (
+                 SELECT id, age FROM users WHERE age >= 40
+             )
+             SELECT id FROM adults ORDER BY id",
+        )
         .unwrap();
 
-    assert_eq!(results.len(), 1);
+    match result {
+        QueryResult::Explain(plan) => {
+            assert!(matches!(plan, planner::PlanNode::Sort { .. }));
+        }
+        other => panic!("expected explain result, got: {other:?}"),
+    }
+}
 
-    match &results[0] {
+#[test]
+fn explain_rollup_returns_plan() {
+    let _guard = test_guard();
+    let engine = Engine::open(EngineOptions {
+        storage: StorageMode::Memory,
+    })
+    .unwrap();
+    let mut session = engine.session();
+
+    session
+        .execute_script(
+            "
+            CREATE TABLE sales (region TEXT, product TEXT, amount INTEGER);
+            INSERT INTO sales VALUES ('East', 'Widget', 100), ('West', 'Gadget', 200);
+            ",
+        )
+        .unwrap();
+
+    let result = session
+        .execute_one(
+            "EXPLAIN SELECT region, product, COUNT(*) AS total
+             FROM sales
+             GROUP BY ROLLUP(region, product)",
+        )
+        .unwrap();
+
+    match result {
+        QueryResult::Explain(plan) => {
+            assert!(matches!(plan, planner::PlanNode::Aggregate { .. }));
+        }
+        other => panic!("expected explain result, got: {other:?}"),
+    }
+}
+
+#[test]
+fn execute_generate_series_returns_typed_rows() {
+    let _guard = test_guard();
+    let engine = Engine::open(EngineOptions {
+        storage: StorageMode::Memory,
+    })
+    .unwrap();
+    let mut session = engine.session();
+
+    let result = session
+        .execute_one(
+            "SELECT generate_series
+             FROM GENERATE_SERIES(1, 10)
+             WHERE generate_series > 7
+             ORDER BY generate_series DESC
+             FETCH FIRST 2 ROWS ONLY",
+        )
+        .unwrap();
+
+    match result {
+        QueryResult::Rows(rows) => {
+            assert_eq!(
+                rows.rows,
+                vec![vec![ast::Value::Integer(10)], vec![ast::Value::Integer(9)],]
+            );
+        }
+        other => panic!("expected rows result, got: {other:?}"),
+    }
+}
+
+#[test]
+fn explain_generate_series_returns_function_scan_plan() {
+    let _guard = test_guard();
+    let engine = Engine::open(EngineOptions {
+        storage: StorageMode::Memory,
+    })
+    .unwrap();
+    let mut session = engine.session();
+
+    let result = session
+        .execute_one("EXPLAIN SELECT * FROM GENERATE_SERIES(1, 5)")
+        .unwrap();
+
+    match result {
+        QueryResult::Explain(plan) => {
+            assert!(matches!(plan, planner::PlanNode::FunctionScan { .. }));
+        }
+        other => panic!("expected explain result, got: {other:?}"),
+    }
+}
+
+#[test]
+fn explain_distinct_on_returns_plan() {
+    let _guard = test_guard();
+    let engine = Engine::open(EngineOptions {
+        storage: StorageMode::Memory,
+    })
+    .unwrap();
+    let mut session = engine.session();
+
+    session
+        .execute_script(
+            "
+            CREATE TABLE items (category TEXT, item TEXT, price INTEGER);
+            INSERT INTO items VALUES
+                ('fruit', 'apple', 1),
+                ('fruit', 'banana', 2),
+                ('veggie', 'carrot', 3);
+            ",
+        )
+        .unwrap();
+
+    let result = session
+        .execute_one(
+            "EXPLAIN SELECT DISTINCT ON (category) category, item, price
+             FROM items
+             ORDER BY category, price",
+        )
+        .unwrap();
+
+    match result {
+        QueryResult::Explain(plan) => {
+            assert!(matches!(plan, planner::PlanNode::DistinctOn { .. }));
+        }
+        other => panic!("expected explain result, got: {other:?}"),
+    }
+}
+
+#[test]
+fn explain_natural_join_returns_plan() {
+    let _guard = test_guard();
+    let engine = Engine::open(EngineOptions {
+        storage: StorageMode::Memory,
+    })
+    .unwrap();
+    let mut session = engine.session();
+
+    session
+        .execute_script(
+            "
+            CREATE TABLE departments (id INTEGER, dept_name TEXT);
+            CREATE TABLE staff (id INTEGER, staff_name TEXT);
+            INSERT INTO departments VALUES (1, 'Engineering'), (2, 'Sales');
+            INSERT INTO staff VALUES (1, 'Alice'), (2, 'Bob');
+            ",
+        )
+        .unwrap();
+
+    let result = session
+        .execute_one(
+            "EXPLAIN SELECT dept_name, staff_name
+             FROM departments NATURAL JOIN staff",
+        )
+        .unwrap();
+
+    match result {
+        QueryResult::Explain(plan) => {
+            assert!(matches!(
+                plan,
+                planner::PlanNode::NestedLoopJoin {
+                    join_type: ast::JoinType::Natural,
+                    ..
+                }
+            ));
+        }
+        other => panic!("expected explain result, got: {other:?}"),
+    }
+}
+
+#[test]
+fn explain_full_join_returns_plan() {
+    let _guard = test_guard();
+    let engine = Engine::open(EngineOptions {
+        storage: StorageMode::Memory,
+    })
+    .unwrap();
+    let mut session = engine.session();
+
+    session
+        .execute_script(
+            "
+            CREATE TABLE left_table (id INTEGER, name TEXT);
+            CREATE TABLE right_table (id INTEGER, value TEXT);
+            INSERT INTO left_table VALUES (1, 'A'), (2, 'B');
+            INSERT INTO right_table VALUES (2, 'Y'), (3, 'Z');
+            ",
+        )
+        .unwrap();
+
+    let result = session
+        .execute_one(
+            "EXPLAIN SELECT *
+             FROM left_table FULL JOIN right_table ON left_table.id = right_table.id",
+        )
+        .unwrap();
+
+    match result {
+        QueryResult::Explain(plan) => {
+            assert!(matches!(
+                plan,
+                planner::PlanNode::NestedLoopJoin {
+                    join_type: ast::JoinType::Full,
+                    ..
+                }
+            ));
+        }
+        other => panic!("expected explain result, got: {other:?}"),
+    }
+}
+
+#[test]
+fn explain_multi_join_returns_plan() {
+    let _guard = test_guard();
+    let engine = Engine::open(EngineOptions {
+        storage: StorageMode::Memory,
+    })
+    .unwrap();
+    let mut session = engine.session();
+
+    session
+        .execute_script(
+            "
+            CREATE TABLE customers (id INTEGER, name TEXT);
+            CREATE TABLE orders (id INTEGER, customer_id INTEGER, product_id INTEGER);
+            CREATE TABLE products (id INTEGER, pname TEXT);
+            INSERT INTO customers VALUES (1, 'Alice'), (2, 'Bob');
+            INSERT INTO orders VALUES (10, 1, 100), (11, 2, 101);
+            INSERT INTO products VALUES (100, 'Widget'), (101, 'Gadget');
+            ",
+        )
+        .unwrap();
+
+    let result = session
+        .execute_one(
+            "EXPLAIN SELECT customers.name, products.pname
+             FROM customers
+             JOIN orders ON customers.id = orders.customer_id
+             JOIN products ON orders.product_id = products.id",
+        )
+        .unwrap();
+
+    match result {
+        QueryResult::Explain(plan) => {
+            assert!(matches!(plan, planner::PlanNode::NestedLoopJoin { .. }));
+        }
+        other => panic!("expected explain result, got: {other:?}"),
+    }
+}
+
+#[test]
+fn execute_update_returns_command_tag_and_affected_rows() {
+    let _guard = test_guard();
+    let engine = Engine::open(EngineOptions {
+        storage: StorageMode::Memory,
+    })
+    .unwrap();
+    let mut session = engine.session();
+
+    session
+        .execute_one("CREATE TABLE users (id INTEGER, name TEXT)")
+        .unwrap();
+    session
+        .execute_one("INSERT INTO users VALUES (1, 'Alice'), (2, 'Bob')")
+        .unwrap();
+
+    let result = session
+        .execute_one("UPDATE users SET name = 'Updated' WHERE id = 1")
+        .unwrap();
+
+    match &result {
         QueryResult::Command(command) => {
             assert_eq!(command.tag, CommandTag::Update);
             assert_eq!(command.affected, 1);
         }
         other => panic!("expected command result, got: {other:?}"),
     }
+}
+
+#[test]
+fn execute_script_returns_typed_results() {
+    let _guard = test_guard();
+    let engine = Engine::open(EngineOptions {
+        storage: StorageMode::Memory,
+    })
+    .unwrap();
+    let mut session = engine.session();
+
+    let results = session
+        .execute_script(
+            "
+            CREATE TABLE users (id INTEGER, name TEXT);
+            INSERT INTO users VALUES (1, 'Alice');
+            SELECT id, name FROM users;
+            ",
+        )
+        .unwrap();
+
+    assert_eq!(results.len(), 3);
+
+    match &results[0] {
+        QueryResult::Command(command) => {
+            assert_eq!(command.tag, CommandTag::CreateTable);
+            assert_eq!(command.affected, 0);
+        }
+        other => panic!("expected create-table command result, got: {other:?}"),
+    }
+
+    match &results[1] {
+        QueryResult::Command(command) => {
+            assert_eq!(command.tag, CommandTag::Insert);
+            assert_eq!(command.affected, 1);
+        }
+        other => panic!("expected insert command result, got: {other:?}"),
+    }
+
+    match &results[2] {
+        QueryResult::Rows(rows) => {
+            assert_eq!(rows.columns.len(), 2);
+            assert_eq!(rows.rows.len(), 1);
+            assert_eq!(rows.rows[0][0], ast::Value::Integer(1));
+            assert_eq!(rows.rows[0][1], ast::Value::Text("Alice".to_string()));
+        }
+        other => panic!("expected row result, got: {other:?}"),
+    }
+}
+
+#[test]
+fn explain_returns_same_plan_as_planner() {
+    let _guard = test_guard();
+    let engine = Engine::open(EngineOptions {
+        storage: StorageMode::Memory,
+    })
+    .unwrap();
+    let mut session = engine.session();
+
+    session
+        .execute_script(
+            "
+            CREATE TABLE users (id INTEGER, age INTEGER);
+            INSERT INTO users VALUES (1, 25), (2, 40);
+            CREATE INDEX idx_age ON users (age);
+            ",
+        )
+        .unwrap();
+
+    let select_sql = "SELECT * FROM users WHERE age > 30";
+    let statement = parser::parse(lexer::tokenize(select_sql).unwrap()).unwrap();
+    let expected_plan = match statement {
+        ast::Statement::Select(stmt) => {
+            planner::plan_query(&engine.snapshot_database(), &stmt).unwrap()
+        }
+        other => panic!("expected select statement, got: {other:?}"),
+    };
+
+    let result = session
+        .execute_one("EXPLAIN SELECT * FROM users WHERE age > 30")
+        .unwrap();
+
+    match result {
+        QueryResult::Explain(plan) => assert_eq!(plan, expected_plan),
+        other => panic!("expected explain result, got: {other:?}"),
+    }
+}
+
+#[test]
+fn separate_engines_do_not_share_state() {
+    let engine_a = Engine::open(EngineOptions {
+        storage: StorageMode::Memory,
+    })
+    .unwrap();
+    let engine_b = Engine::open(EngineOptions {
+        storage: StorageMode::Memory,
+    })
+    .unwrap();
+
+    std::thread::scope(|scope| {
+        let thread_a = scope.spawn(|| {
+            let mut session = engine_a.session();
+            session
+                .execute_script(
+                    "
+                    CREATE TABLE items (id INTEGER, name TEXT);
+                    INSERT INTO items VALUES (1, 'left');
+                    ",
+                )
+                .unwrap();
+            session.execute_one("SELECT name FROM items").unwrap()
+        });
+
+        let thread_b = scope.spawn(|| {
+            let mut session = engine_b.session();
+            session
+                .execute_script(
+                    "
+                    CREATE TABLE items (id INTEGER, name TEXT);
+                    INSERT INTO items VALUES (1, 'right');
+                    ",
+                )
+                .unwrap();
+            session.execute_one("SELECT name FROM items").unwrap()
+        });
+
+        let result_a = thread_a.join().unwrap();
+        let result_b = thread_b.join().unwrap();
+
+        match result_a {
+            QueryResult::Rows(rows) => {
+                assert_eq!(rows.rows, vec![vec![ast::Value::Text("left".to_string())]]);
+            }
+            other => panic!("expected rows for engine A, got: {other:?}"),
+        }
+
+        match result_b {
+            QueryResult::Rows(rows) => {
+                assert_eq!(rows.rows, vec![vec![ast::Value::Text("right".to_string())]]);
+            }
+            other => panic!("expected rows for engine B, got: {other:?}"),
+        }
+    });
 }

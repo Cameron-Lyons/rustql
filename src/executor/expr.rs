@@ -118,6 +118,7 @@ pub fn evaluate_expression(
             };
             Ok(if *not { !is_distinct } else { is_distinct })
         }
+        Expression::Value(Value::Boolean(value)) => Ok(*value),
         Expression::UnaryOp { op, expr } => match op {
             UnaryOperator::Not => Ok(!evaluate_expression(db, expr, columns, row)?),
             _ => Err(RustqlError::Internal(
@@ -1472,11 +1473,13 @@ pub fn evaluate_value_expression_with_db(
             "Window functions must be evaluated in a separate pass".to_string(),
         )),
         Expression::Subquery(subquery) => {
-            let db_ref = match db {
-                Some(d) => std::borrow::Cow::Borrowed(d),
-                None => std::borrow::Cow::Owned(super::get_database_read().clone()),
-            };
-            let result = super::select::execute_select_internal((**subquery).clone(), &db_ref)?;
+            let db_ref = db.ok_or_else(|| {
+                RustqlError::Internal(
+                    "Scalar subquery evaluation requires an explicit database context".to_string(),
+                )
+            })?;
+            let result =
+                super::select::execute_select_internal(None, (**subquery).clone(), db_ref)?;
             if result.rows.is_empty() {
                 Ok(Value::Null)
             } else if result.rows.len() > 1 {

@@ -3,10 +3,12 @@ use crate::database::{Database, Table};
 use crate::error::RustqlError;
 use std::collections::HashSet;
 
+use super::ExecutionContext;
 use super::expr::evaluate_expression;
 use super::select::execute_select_internal;
 
 pub fn perform_multiple_joins(
+    context: Option<&ExecutionContext>,
     db: &Database,
     from_table: &Table,
     from_table_name: &str,
@@ -23,30 +25,23 @@ pub fn perform_multiple_joins(
         {
             let mut joined_rows: Vec<Vec<Value>> = Vec::new();
             let mut sub_columns: Option<Vec<ColumnDefinition>> = None;
+            let outer_scope_columns =
+                lateral_outer_scope_columns(&table_names, &table_column_counts, &all_columns);
 
             for current_row in &current_rows {
                 let temp_table_name = format!("__lateral_outer_{}", alias);
-                {
-                    let mut db_write = super::get_database_write();
-                    db_write.tables.insert(
-                        temp_table_name.clone(),
-                        Table {
-                            columns: all_columns.clone(),
-                            rows: vec![current_row.clone()],
-                            constraints: vec![],
-                        },
-                    );
-                }
-
-                let sub_result = {
-                    let db_read = super::get_database_read();
-                    execute_select_internal(*subquery.clone(), &db_read)
-                };
-
-                {
-                    let mut db_write = super::get_database_write();
-                    db_write.tables.remove(&temp_table_name);
-                }
+                let rewritten_subquery =
+                    lateral_subquery_with_outer_scope(subquery, &temp_table_name);
+                let mut scoped_db = db.clone();
+                scoped_db.tables.insert(
+                    temp_table_name.clone(),
+                    Table::new(
+                        outer_scope_columns.clone(),
+                        vec![current_row.clone()],
+                        vec![],
+                    ),
+                );
+                let sub_result = execute_select_internal(None, rewritten_subquery, &scoped_db);
 
                 match sub_result {
                     Ok(result) => {
@@ -70,19 +65,38 @@ pub fn perform_multiple_joins(
                                     .collect(),
                             );
                         }
+                        let lateral_eval_columns =
+                            qualified_subquery_columns(alias, sub_columns.as_ref().unwrap());
+                        let mut join_eval_columns = outer_scope_columns.clone();
+                        join_eval_columns.extend(lateral_eval_columns);
+
+                        let mut has_match = false;
                         if result.rows.is_empty() {
-                            if matches!(join.join_type, JoinType::Left | JoinType::Full) {
-                                let null_count = sub_columns.as_ref().map_or(0, |c| c.len());
-                                let mut combined = current_row.clone();
-                                combined.extend(vec![Value::Null; null_count]);
-                                joined_rows.push(combined);
-                            }
                         } else {
                             for sub_row in &result.rows {
                                 let mut combined = current_row.clone();
                                 combined.extend(sub_row.clone());
-                                joined_rows.push(combined);
+                                let include = if let Some(ref on_expr) = join.on {
+                                    evaluate_expression(
+                                        Some(db),
+                                        on_expr,
+                                        &join_eval_columns,
+                                        &combined,
+                                    )?
+                                } else {
+                                    true
+                                };
+                                if include {
+                                    joined_rows.push(combined);
+                                    has_match = true;
+                                }
                             }
+                        }
+                        if matches!(join.join_type, JoinType::Left | JoinType::Full) && !has_match {
+                            let null_count = sub_columns.as_ref().map_or(0, |c| c.len());
+                            let mut combined = current_row.clone();
+                            combined.extend(vec![Value::Null; null_count]);
+                            joined_rows.push(combined);
                         }
                     }
                     Err(_) => {
@@ -106,7 +120,7 @@ pub fn perform_multiple_joins(
         }
 
         if let Some((ref subquery, ref alias)) = join.subquery {
-            let sub_result = execute_select_internal(*subquery.clone(), db)?;
+            let sub_result = execute_select_internal(context, *subquery.clone(), db)?;
             let sub_columns: Vec<ColumnDefinition> = sub_result
                 .headers
                 .iter()
@@ -124,11 +138,7 @@ pub fn perform_multiple_joins(
                 })
                 .collect();
 
-            let sub_table = Table {
-                columns: sub_columns.clone(),
-                rows: sub_result.rows,
-                constraints: vec![],
-            };
+            let sub_table = Table::new(sub_columns.clone(), sub_result.rows, vec![]);
 
             let mut joined_rows: Vec<Vec<Value>> = Vec::new();
             let mut temp_all_cols = all_columns.clone();
@@ -385,4 +395,64 @@ pub fn perform_multiple_joins(
     }
 
     Ok((current_rows, all_columns))
+}
+
+fn lateral_outer_scope_columns(
+    table_names: &[String],
+    table_column_counts: &[usize],
+    all_columns: &[ColumnDefinition],
+) -> Vec<ColumnDefinition> {
+    let mut qualified = Vec::with_capacity(all_columns.len());
+    let mut offset = 0usize;
+
+    for (table_name, column_count) in table_names.iter().zip(table_column_counts.iter()) {
+        for column in all_columns.iter().skip(offset).take(*column_count) {
+            let mut scoped = column.clone();
+            if !scoped.name.contains('.') {
+                scoped.name = format!("{}.{}", table_name, scoped.name);
+            }
+            qualified.push(scoped);
+        }
+        offset += column_count;
+    }
+
+    qualified
+}
+
+fn lateral_subquery_with_outer_scope(
+    subquery: &SelectStatement,
+    outer_table_name: &str,
+) -> SelectStatement {
+    let mut rewritten = subquery.clone();
+    if rewritten.from.is_empty()
+        && rewritten.from_subquery.is_none()
+        && rewritten.from_function.is_none()
+        && rewritten.from_values.is_none()
+    {
+        rewritten.from = outer_table_name.to_string();
+    } else {
+        rewritten.joins.push(Join {
+            join_type: JoinType::Cross,
+            table: outer_table_name.to_string(),
+            table_alias: None,
+            on: None,
+            using_columns: None,
+            lateral: true,
+            subquery: None,
+        });
+    }
+    rewritten
+}
+
+fn qualified_subquery_columns(alias: &str, columns: &[ColumnDefinition]) -> Vec<ColumnDefinition> {
+    columns
+        .iter()
+        .map(|column| {
+            let mut qualified = column.clone();
+            if !qualified.name.contains('.') {
+                qualified.name = format!("{}.{}", alias, qualified.name);
+            }
+            qualified
+        })
+        .collect()
 }

@@ -1,12 +1,12 @@
 use rustql::ast::*;
-use rustql::executor::{execute, reset_database_state};
+use rustql::testing::{execute, reset_database};
 use std::sync::Mutex;
 
 static TEST_MUTEX: Mutex<()> = Mutex::new(());
 
 fn setup_test() -> std::sync::MutexGuard<'static, ()> {
     let guard = TEST_MUTEX.lock().unwrap();
-    reset_database_state();
+    reset_database();
     guard
 }
 

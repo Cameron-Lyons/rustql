@@ -289,7 +289,7 @@ pub enum ForeignKeyAction {
     NoAction,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DataType {
     Integer,
     Float,

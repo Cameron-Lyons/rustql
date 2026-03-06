@@ -1,9 +1,9 @@
 use rustql::ast::*;
-use rustql::executor::{execute, reset_database_state};
+use rustql::testing::{execute, reset_database};
 
 #[test]
 fn test_update_and_delete() {
-    reset_database_state();
+    reset_database();
 
     execute(Statement::CreateTable(CreateTableStatement {
         name: "users".into(),

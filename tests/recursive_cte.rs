@@ -1,12 +1,12 @@
-use rustql::executor::reset_database_state;
-use rustql::process_query;
+use rustql::testing::process_query;
+use rustql::testing::reset_database;
 use std::sync::Once;
 
 static INIT: Once = Once::new();
 
 fn setup() {
     INIT.call_once(|| {
-        reset_database_state();
+        reset_database();
     });
 }
 

@@ -1,4 +1,4 @@
-use rustql::{process_query, reset_database};
+use rustql::testing::{process_query, reset_database};
 use std::sync::Mutex;
 
 static GLOBAL_TEST_LOCK: Mutex<()> = Mutex::new(());

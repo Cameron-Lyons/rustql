@@ -1,5 +1,5 @@
 use crate::ast::{ColumnDefinition, TableConstraint, Value};
-use crate::database::{Database, Index, Table};
+use crate::database::{Database, Index, RowId, Table};
 use crate::error::RustqlError;
 use std::collections::HashMap;
 
@@ -7,16 +7,17 @@ use std::collections::HashMap;
 pub enum WalEntry {
     InsertRow {
         table: String,
-        row_index: usize,
+        row_id: RowId,
     },
     UpdateRow {
         table: String,
-        row_index: usize,
+        row_id: RowId,
         old_row: Vec<Value>,
     },
     DeleteRow {
         table: String,
-        row_index: usize,
+        row_id: RowId,
+        position: usize,
         old_row: Vec<Value>,
     },
     CreateTable {
@@ -26,6 +27,9 @@ pub enum WalEntry {
         name: String,
         columns: Vec<ColumnDefinition>,
         rows: Vec<Vec<Value>>,
+        row_ids: Vec<RowId>,
+        next_row_id: u64,
+        constraints: Vec<TableConstraint>,
     },
     CreateIndex {
         name: String,
@@ -52,6 +56,8 @@ pub enum WalEntry {
     TruncateTable {
         name: String,
         old_rows: Vec<Vec<Value>>,
+        old_row_ids: Vec<RowId>,
+        old_next_row_id: u64,
     },
     CreateView {
         name: String,
@@ -119,33 +125,28 @@ impl WalLog {
     pub fn rollback(self, db: &mut Database) -> Result<(), RustqlError> {
         for entry in self.entries.into_iter().rev() {
             match entry {
-                WalEntry::InsertRow { table, row_index } => {
-                    if let Some(t) = db.tables.get_mut(&table)
-                        && row_index < t.rows.len()
-                    {
-                        t.rows.remove(row_index);
+                WalEntry::InsertRow { table, row_id } => {
+                    if let Some(t) = db.tables.get_mut(&table) {
+                        let _ = t.remove_row_by_id(row_id);
                     }
                 }
                 WalEntry::UpdateRow {
                     table,
-                    row_index,
+                    row_id,
                     old_row,
                 } => {
-                    if let Some(t) = db.tables.get_mut(&table)
-                        && row_index < t.rows.len()
-                    {
-                        t.rows[row_index] = old_row;
+                    if let Some(t) = db.tables.get_mut(&table) {
+                        let _ = t.set_row_by_id(row_id, old_row);
                     }
                 }
                 WalEntry::DeleteRow {
                     table,
-                    row_index,
+                    row_id,
+                    position,
                     old_row,
                 } => {
-                    if let Some(t) = db.tables.get_mut(&table)
-                        && row_index <= t.rows.len()
-                    {
-                        t.rows.insert(row_index, old_row);
+                    if let Some(t) = db.tables.get_mut(&table) {
+                        t.insert_row_at(position, row_id, old_row);
                     }
                 }
                 WalEntry::CreateTable { name } => {
@@ -155,13 +156,18 @@ impl WalLog {
                     name,
                     columns,
                     rows,
+                    row_ids,
+                    next_row_id,
+                    constraints,
                 } => {
                     db.tables.insert(
                         name,
                         Table {
                             columns,
                             rows,
-                            constraints: vec![],
+                            row_ids,
+                            next_row_id,
+                            constraints,
                         },
                     );
                 }
@@ -209,9 +215,16 @@ impl WalLog {
                         }
                     }
                 }
-                WalEntry::TruncateTable { name, old_rows } => {
+                WalEntry::TruncateTable {
+                    name,
+                    old_rows,
+                    old_row_ids,
+                    old_next_row_id,
+                } => {
                     if let Some(t) = db.tables.get_mut(&name) {
                         t.rows = old_rows;
+                        t.row_ids = old_row_ids;
+                        t.next_row_id = old_next_row_id;
                     }
                 }
                 WalEntry::CreateView { name } => {
@@ -257,33 +270,28 @@ impl WalLog {
 
 fn rollback_single_entry(entry: WalEntry, db: &mut Database) {
     match entry {
-        WalEntry::InsertRow { table, row_index } => {
-            if let Some(t) = db.tables.get_mut(&table)
-                && row_index < t.rows.len()
-            {
-                t.rows.remove(row_index);
+        WalEntry::InsertRow { table, row_id } => {
+            if let Some(t) = db.tables.get_mut(&table) {
+                let _ = t.remove_row_by_id(row_id);
             }
         }
         WalEntry::UpdateRow {
             table,
-            row_index,
+            row_id,
             old_row,
         } => {
-            if let Some(t) = db.tables.get_mut(&table)
-                && row_index < t.rows.len()
-            {
-                t.rows[row_index] = old_row;
+            if let Some(t) = db.tables.get_mut(&table) {
+                let _ = t.set_row_by_id(row_id, old_row);
             }
         }
         WalEntry::DeleteRow {
             table,
-            row_index,
+            row_id,
+            position,
             old_row,
         } => {
-            if let Some(t) = db.tables.get_mut(&table)
-                && row_index <= t.rows.len()
-            {
-                t.rows.insert(row_index, old_row);
+            if let Some(t) = db.tables.get_mut(&table) {
+                t.insert_row_at(position, row_id, old_row);
             }
         }
         WalEntry::CreateTable { name } => {
@@ -293,13 +301,18 @@ fn rollback_single_entry(entry: WalEntry, db: &mut Database) {
             name,
             columns,
             rows,
+            row_ids,
+            next_row_id,
+            constraints,
         } => {
             db.tables.insert(
                 name,
                 Table {
                     columns,
                     rows,
-                    constraints: vec![],
+                    row_ids,
+                    next_row_id,
+                    constraints,
                 },
             );
         }
@@ -347,9 +360,16 @@ fn rollback_single_entry(entry: WalEntry, db: &mut Database) {
                 }
             }
         }
-        WalEntry::TruncateTable { name, old_rows } => {
+        WalEntry::TruncateTable {
+            name,
+            old_rows,
+            old_row_ids,
+            old_next_row_id,
+        } => {
             if let Some(t) = db.tables.get_mut(&name) {
                 t.rows = old_rows;
+                t.row_ids = old_row_ids;
+                t.next_row_id = old_next_row_id;
             }
         }
         WalEntry::CreateView { name } => {
@@ -394,9 +414,9 @@ fn rebuild_all_indexes(db: &mut Database) {
         if let Some(table) = db.tables.get(&index.table)
             && let Some(col_idx) = table.columns.iter().position(|c| c.name == index.column)
         {
-            for (row_idx, row) in table.rows.iter().enumerate() {
+            for (row_id, row) in table.iter_rows_with_ids() {
                 let value = row.get(col_idx).cloned().unwrap_or(Value::Null);
-                index.entries.entry(value).or_default().push(row_idx);
+                index.entries.entry(value).or_default().push(row_id);
             }
         }
     }
@@ -452,13 +472,15 @@ impl WalState {
     }
 
     pub fn savepoint(&mut self, name: &str) -> Result<(), RustqlError> {
-        if self.current.is_none() {
-            self.current = Some(WalLog::new());
+        match self.current.as_mut() {
+            Some(log) => {
+                log.savepoint(name);
+                Ok(())
+            }
+            None => Err(RustqlError::TransactionError(
+                "No transaction in progress".to_string(),
+            )),
         }
-        if let Some(ref mut log) = self.current {
-            log.savepoint(name);
-        }
-        Ok(())
     }
 
     pub fn release_savepoint(&mut self, name: &str) -> Result<(), RustqlError> {

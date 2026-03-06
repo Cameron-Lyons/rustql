@@ -1,5 +1,5 @@
 use rustql::ast::*;
-use rustql::executor::execute;
+use rustql::testing::execute;
 
 #[test]
 fn test_where_exists_true() {

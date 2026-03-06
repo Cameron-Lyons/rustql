@@ -1,5 +1,6 @@
-use rustql::{Engine, EngineOptions, format_query_results};
-use std::io::{self, IsTerminal, Write};
+use rustql::ast::Value;
+use rustql::{CommandTag, Engine, EngineOptions, QueryResult, RowBatch};
+use std::io::{self, IsTerminal, Read, Write};
 
 fn main() {
     let engine = match Engine::open(EngineOptions::default()) {
@@ -12,7 +13,7 @@ fn main() {
     let mut session = engine.session();
 
     if std::io::stdin().is_terminal() {
-        println!("RustQL - SQL Engine in Rust");
+        println!("RustQL v1");
         println!("Type 'exit' to quit\n");
 
         loop {
@@ -24,7 +25,7 @@ fn main() {
 
             let query = input.trim();
 
-            if query.to_lowercase() == "exit" {
+            if query.eq_ignore_ascii_case("exit") {
                 println!("Goodbye!");
                 break;
             }
@@ -33,21 +34,100 @@ fn main() {
                 continue;
             }
 
-            match session.execute(query) {
-                Ok(results) => println!("{}", format_query_results(&results)),
+            match session.execute_one(query) {
+                Ok(result) => println!("{}", render_result(&result)),
                 Err(e) => eprintln!("Error: {}", e),
             }
         }
     } else {
         let mut input = String::new();
-        io::stdin().read_line(&mut input).unwrap();
-        let query = input.trim();
+        io::stdin().read_to_string(&mut input).unwrap();
 
-        if !query.is_empty() {
-            match session.execute(query) {
-                Ok(results) => println!("{}", format_query_results(&results)),
+        if !input.trim().is_empty() {
+            match session.execute_script(&input) {
+                Ok(results) => println!("{}", render_results(&results)),
                 Err(e) => eprintln!("Error: {}", e),
             }
         }
+    }
+}
+
+fn render_results(results: &[QueryResult]) -> String {
+    results
+        .iter()
+        .map(render_result)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn render_result(result: &QueryResult) -> String {
+    match result {
+        QueryResult::Rows(rows) => render_rows(rows),
+        QueryResult::Command(command) => render_command(command.tag, command.affected),
+        QueryResult::Explain(plan) => format!("Query Plan:\n{}", plan),
+    }
+}
+
+fn render_command(tag: CommandTag, affected: u64) -> String {
+    match tag {
+        CommandTag::CreateTable => "CREATE TABLE".to_string(),
+        CommandTag::DropTable => "DROP TABLE".to_string(),
+        CommandTag::AlterTable => "ALTER TABLE".to_string(),
+        CommandTag::CreateIndex => "CREATE INDEX".to_string(),
+        CommandTag::DropIndex => "DROP INDEX".to_string(),
+        CommandTag::Insert => format!("INSERT {}", affected),
+        CommandTag::Update => format!("UPDATE {}", affected),
+        CommandTag::Delete => format!("DELETE {}", affected),
+        CommandTag::BeginTransaction => "BEGIN".to_string(),
+        CommandTag::CommitTransaction => "COMMIT".to_string(),
+        CommandTag::RollbackTransaction => "ROLLBACK".to_string(),
+        CommandTag::Savepoint => "SAVEPOINT".to_string(),
+        CommandTag::ReleaseSavepoint => "RELEASE SAVEPOINT".to_string(),
+        CommandTag::RollbackToSavepoint => "ROLLBACK TO SAVEPOINT".to_string(),
+        CommandTag::Analyze => format!("ANALYZE {}", affected),
+        CommandTag::TruncateTable => "TRUNCATE TABLE".to_string(),
+        CommandTag::CreateView => "CREATE VIEW".to_string(),
+        CommandTag::DropView => "DROP VIEW".to_string(),
+        CommandTag::Merge => format!("MERGE {}", affected),
+        CommandTag::Do => format!("DO {}", affected),
+    }
+}
+
+fn render_rows(rows: &RowBatch) -> String {
+    let mut output = String::new();
+
+    for (idx, column) in rows.columns.iter().enumerate() {
+        if idx > 0 {
+            output.push('\t');
+        }
+        output.push_str(&column.name);
+    }
+    output.push('\n');
+    output.push_str(&"-".repeat(40));
+    output.push('\n');
+
+    for row in &rows.rows {
+        for (idx, value) in row.iter().enumerate() {
+            if idx > 0 {
+                output.push('\t');
+            }
+            output.push_str(&render_value(value));
+        }
+        output.push('\n');
+    }
+
+    output
+}
+
+fn render_value(value: &Value) -> String {
+    match value {
+        Value::Null => "NULL".to_string(),
+        Value::Integer(value) => value.to_string(),
+        Value::Float(value) => value.to_string(),
+        Value::Text(value) => value.clone(),
+        Value::Boolean(value) => value.to_string(),
+        Value::Date(value) => value.clone(),
+        Value::Time(value) => value.clone(),
+        Value::DateTime(value) => value.clone(),
     }
 }

@@ -15,6 +15,9 @@ pub struct Database {
     pub composite_indexes: HashMap<String, CompositeIndex>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct RowId(pub u64);
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct View {
     pub name: String,
@@ -27,7 +30,7 @@ pub struct Index {
     pub table: String,
     pub column: String,
     #[serde(with = "index_entries")]
-    pub entries: BTreeMap<Value, Vec<usize>>,
+    pub entries: BTreeMap<Value, Vec<RowId>>,
     #[serde(default)]
     pub filter_expr: Option<String>,
 }
@@ -37,7 +40,7 @@ mod index_entries {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
     pub fn serialize<S>(
-        entries: &BTreeMap<Value, Vec<usize>>,
+        entries: &BTreeMap<Value, Vec<RowId>>,
         serializer: S,
     ) -> Result<S::Ok, S::Error>
     where
@@ -51,7 +54,7 @@ mod index_entries {
         map.serialize(serializer)
     }
 
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<BTreeMap<Value, Vec<usize>>, D::Error>
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<BTreeMap<Value, Vec<RowId>>, D::Error>
     where
         D: Deserializer<'de>,
     {
@@ -60,7 +63,7 @@ mod index_entries {
         let mut entries = BTreeMap::new();
         for (key_str, value) in map {
             let key = string_to_value(&key_str);
-            let indices: Vec<usize> = serde_json::from_value(value).unwrap();
+            let indices: Vec<RowId> = serde_json::from_value(value).unwrap();
             entries.insert(key, indices);
         }
         Ok(entries)
@@ -119,7 +122,109 @@ pub struct Table {
     pub columns: Vec<ColumnDefinition>,
     pub rows: Vec<Vec<Value>>,
     #[serde(default)]
+    pub row_ids: Vec<RowId>,
+    #[serde(default = "default_next_row_id")]
+    pub next_row_id: u64,
+    #[serde(default)]
     pub constraints: Vec<TableConstraint>,
+}
+
+fn default_next_row_id() -> u64 {
+    1
+}
+
+impl Table {
+    pub fn new(
+        columns: Vec<ColumnDefinition>,
+        rows: Vec<Vec<Value>>,
+        constraints: Vec<TableConstraint>,
+    ) -> Self {
+        let mut table = Self {
+            columns,
+            rows,
+            row_ids: Vec::new(),
+            next_row_id: default_next_row_id(),
+            constraints,
+        };
+        table.ensure_row_ids();
+        table
+    }
+
+    pub fn ensure_row_ids(&mut self) {
+        if self.row_ids.len() != self.rows.len() {
+            self.row_ids = (1..=self.rows.len() as u64).map(RowId).collect();
+        }
+
+        let max_existing = self
+            .row_ids
+            .iter()
+            .map(|row_id| row_id.0)
+            .max()
+            .unwrap_or(0);
+        if self.next_row_id <= max_existing {
+            self.next_row_id = max_existing + 1;
+        }
+        if self.next_row_id == 0 {
+            self.next_row_id = default_next_row_id();
+        }
+    }
+
+    pub fn iter_rows_with_ids(&self) -> impl Iterator<Item = (RowId, &Vec<Value>)> {
+        self.row_ids.iter().copied().zip(self.rows.iter())
+    }
+
+    pub fn row_id_at(&self, position: usize) -> Option<RowId> {
+        self.row_ids.get(position).copied()
+    }
+
+    pub fn position_of_row_id(&self, row_id: RowId) -> Option<usize> {
+        self.row_ids
+            .iter()
+            .position(|candidate| *candidate == row_id)
+    }
+
+    pub fn row_by_id(&self, row_id: RowId) -> Option<&Vec<Value>> {
+        self.position_of_row_id(row_id)
+            .and_then(|position| self.rows.get(position))
+    }
+
+    pub fn row_mut_by_id(&mut self, row_id: RowId) -> Option<&mut Vec<Value>> {
+        let position = self.position_of_row_id(row_id)?;
+        self.rows.get_mut(position)
+    }
+
+    pub fn insert_row(&mut self, row: Vec<Value>) -> RowId {
+        self.ensure_row_ids();
+        let row_id = RowId(self.next_row_id);
+        self.next_row_id += 1;
+        self.rows.push(row);
+        self.row_ids.push(row_id);
+        row_id
+    }
+
+    pub fn insert_row_at(&mut self, position: usize, row_id: RowId, row: Vec<Value>) {
+        self.ensure_row_ids();
+        let position = position.min(self.rows.len());
+        self.rows.insert(position, row);
+        self.row_ids.insert(position, row_id);
+        if self.next_row_id <= row_id.0 {
+            self.next_row_id = row_id.0 + 1;
+        }
+    }
+
+    pub fn remove_row_by_id(&mut self, row_id: RowId) -> Option<(usize, Vec<Value>)> {
+        self.ensure_row_ids();
+        let position = self.position_of_row_id(row_id)?;
+        self.row_ids.remove(position);
+        let row = self.rows.remove(position);
+        Some((position, row))
+    }
+
+    pub fn set_row_by_id(&mut self, row_id: RowId, row: Vec<Value>) -> Option<()> {
+        let position = self.position_of_row_id(row_id)?;
+        self.rows[position] = row;
+        Some(())
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -128,7 +233,7 @@ pub struct CompositeIndex {
     pub table: String,
     pub columns: Vec<String>,
     #[serde(with = "composite_index_entries")]
-    pub entries: BTreeMap<Vec<Value>, Vec<usize>>,
+    pub entries: BTreeMap<Vec<Value>, Vec<RowId>>,
 }
 
 mod composite_index_entries {
@@ -136,13 +241,13 @@ mod composite_index_entries {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
     pub fn serialize<S>(
-        entries: &BTreeMap<Vec<Value>, Vec<usize>>,
+        entries: &BTreeMap<Vec<Value>, Vec<RowId>>,
         serializer: S,
     ) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
-        let converted: Vec<(Vec<Value>, Vec<usize>)> = entries
+        let converted: Vec<(Vec<Value>, Vec<RowId>)> = entries
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
@@ -151,11 +256,11 @@ mod composite_index_entries {
 
     pub fn deserialize<'de, D>(
         deserializer: D,
-    ) -> Result<BTreeMap<Vec<Value>, Vec<usize>>, D::Error>
+    ) -> Result<BTreeMap<Vec<Value>, Vec<RowId>>, D::Error>
     where
         D: Deserializer<'de>,
     {
-        let converted: Vec<(Vec<Value>, Vec<usize>)> = Vec::deserialize(deserializer)?;
+        let converted: Vec<(Vec<Value>, Vec<RowId>)> = Vec::deserialize(deserializer)?;
         Ok(converted.into_iter().collect())
     }
 }
@@ -163,6 +268,12 @@ mod composite_index_entries {
 impl Database {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn normalize_row_ids(&mut self) {
+        for table in self.tables.values_mut() {
+            table.ensure_row_ids();
+        }
     }
 
     pub fn load() -> Self {
