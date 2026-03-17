@@ -998,29 +998,44 @@ pub(crate) fn execute_select_internal(
         return execute_select_without_from(stmt);
     }
 
-    let (all_rows, all_columns) = if !stmt.joins.is_empty() {
+    let mut joined_rows_storage: Option<Vec<Vec<Value>>> = None;
+    let all_columns = if stmt.joins.is_empty() {
+        let table = db
+            .tables
+            .get(&stmt.from)
+            .ok_or_else(|| RustqlError::TableNotFound(stmt.from.clone()))?;
+        table.columns.clone()
+    } else {
         let main_table = db
             .tables
             .get(&stmt.from)
             .ok_or_else(|| RustqlError::TableNotFound(stmt.from.clone()))?;
         let (joined_rows, all_cols) =
             perform_multiple_joins(context, db, main_table, &stmt.from, &stmt.joins)?;
-        (joined_rows, all_cols)
+        joined_rows_storage = Some(joined_rows);
+        all_cols
+    };
+
+    let mut filtered_rows: Vec<&Vec<Value>> = Vec::new();
+
+    if let Some(joined_rows) = joined_rows_storage.as_ref() {
+        filtered_rows.reserve(joined_rows.len());
+        for row in joined_rows {
+            let include_row = if let Some(ref where_expr) = stmt.where_clause {
+                evaluate_expression(Some(db), where_expr, &all_columns, row)?
+            } else {
+                true
+            };
+            if include_row {
+                filtered_rows.push(row);
+            }
+        }
     } else {
         let table = db
             .tables
             .get(&stmt.from)
             .ok_or_else(|| RustqlError::TableNotFound(stmt.from.clone()))?;
-        (table.rows.clone(), table.columns.clone())
-    };
-
-    let mut filtered_rows: Vec<&Vec<Value>> = Vec::new();
-
-    if stmt.joins.is_empty() {
-        let table = db
-            .tables
-            .get(&stmt.from)
-            .ok_or_else(|| RustqlError::TableNotFound(stmt.from.clone()))?;
+        filtered_rows.reserve(table.rows.len());
 
         let candidate_indices: Option<HashSet<RowId>> = if let Some(ref where_expr) =
             stmt.where_clause
@@ -1034,34 +1049,13 @@ pub(crate) fn execute_select_internal(
             None
         };
 
-        let rows_to_check: Vec<(usize, RowId, &Vec<Value>)> =
-            if let Some(ref candidate_set) = candidate_indices {
-                table
-                    .iter_rows_with_ids()
-                    .enumerate()
-                    .filter(|(_, (row_id, _))| candidate_set.contains(row_id))
-                    .map(|(idx, (row_id, row))| (idx, row_id, row))
-                    .collect()
-            } else {
-                table
-                    .iter_rows_with_ids()
-                    .enumerate()
-                    .map(|(idx, (row_id, row))| (idx, row_id, row))
-                    .collect()
-            };
-
-        for (_, _, row) in rows_to_check {
-            let include_row = if let Some(ref where_expr) = stmt.where_clause {
-                evaluate_expression(Some(db), where_expr, &all_columns, row)?
-            } else {
-                true
-            };
-            if include_row {
-                filtered_rows.push(row);
+        for (row_id, row) in table.iter_rows_with_ids() {
+            if candidate_indices
+                .as_ref()
+                .is_some_and(|candidate_set| !candidate_set.contains(&row_id))
+            {
+                continue;
             }
-        }
-    } else {
-        for row in &all_rows {
             let include_row = if let Some(ref where_expr) = stmt.where_clause {
                 evaluate_expression(Some(db), where_expr, &all_columns, row)?
             } else {

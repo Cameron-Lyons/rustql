@@ -377,25 +377,9 @@ impl<'a> PlanExecutor<'a> {
         condition: &Expression,
     ) -> Result<ExecutionResult, RustqlError> {
         let mut filtered_rows = Vec::new();
+        let columns = column_definitions_from_names(&input.columns);
 
         for row in &input.rows {
-            let columns: Vec<ColumnDefinition> = input
-                .columns
-                .iter()
-                .map(|name| ColumnDefinition {
-                    name: name.clone(),
-                    data_type: DataType::Text,
-                    nullable: true,
-                    primary_key: false,
-                    unique: false,
-                    default_value: None,
-                    foreign_key: None,
-                    check: None,
-                    auto_increment: false,
-                    generated: None,
-                })
-                .collect();
-
             let include = self.evaluate_expression(condition, &columns, row)?;
             if include {
                 filtered_rows.push(row.clone());
@@ -450,18 +434,14 @@ impl<'a> PlanExecutor<'a> {
                 JoinType::Left | JoinType::Full | JoinType::Natural
             ) && !has_match
             {
-                let mut combined_row = left_row.clone();
-                combined_row.extend(vec![Value::Null; right.columns.len()]);
-                joined_rows.push(combined_row);
+                joined_rows.push(combine_row_with_right_nulls(left_row, right.columns.len()));
             }
         }
 
         if matches!(join_type, JoinType::Right | JoinType::Full) {
             for (right_idx, right_row) in right.rows.iter().enumerate() {
                 if !matched_right[right_idx] {
-                    let mut combined_row = vec![Value::Null; left.columns.len()];
-                    combined_row.extend(right_row.clone());
-                    joined_rows.push(combined_row);
+                    joined_rows.push(combine_row_with_left_nulls(left.columns.len(), right_row));
                 }
             }
         }
@@ -485,24 +465,25 @@ impl<'a> PlanExecutor<'a> {
         let mut joined_rows = Vec::new();
         let mut joined_columns = left.columns.clone();
         joined_columns.extend(right_columns.iter().cloned());
+        let temp_table_name = format!("__lateral_outer_{}", alias);
+        let rewritten_subquery = lateral_subquery_with_outer_scope(subquery, &temp_table_name);
+        let mut scoped_db = self.db.clone();
 
         for left_row in &left.rows {
-            let temp_table_name = format!("__lateral_outer_{}", alias);
-            let rewritten_subquery = lateral_subquery_with_outer_scope(subquery, &temp_table_name);
-            let mut scoped_db = self.db.clone();
-            scoped_db.tables.insert(
-                temp_table_name,
-                Table::new(outer_scope_columns.clone(), vec![left_row.clone()], vec![]),
+            update_scoped_outer_row(
+                &mut scoped_db,
+                &temp_table_name,
+                &outer_scope_columns,
+                left_row,
             );
 
             let subquery_result =
-                match execute_select_internal(None, rewritten_subquery, &scoped_db) {
+                match execute_select_internal(None, rewritten_subquery.clone(), &scoped_db) {
                     Ok(result) => result,
                     Err(err) => {
                         if matches!(join_type, JoinType::Left | JoinType::Full) {
-                            let mut combined_row = left_row.clone();
-                            combined_row.extend(vec![Value::Null; right_columns.len()]);
-                            joined_rows.push(combined_row);
+                            joined_rows
+                                .push(combine_row_with_right_nulls(left_row, right_columns.len()));
                             continue;
                         }
                         return Err(err);
@@ -526,17 +507,13 @@ impl<'a> PlanExecutor<'a> {
                 )?;
 
                 if include {
-                    let mut combined_row = left_row.clone();
-                    combined_row.extend(right_row.clone());
-                    joined_rows.push(combined_row);
+                    joined_rows.push(combine_rows(left_row, right_row));
                     has_match = true;
                 }
             }
 
             if matches!(join_type, JoinType::Left | JoinType::Full) && !has_match {
-                let mut combined_row = left_row.clone();
-                combined_row.extend(vec![Value::Null; right_columns.len()]);
-                joined_rows.push(combined_row);
+                joined_rows.push(combine_row_with_right_nulls(left_row, right_columns.len()));
             }
         }
 
@@ -1369,7 +1346,8 @@ impl<'a> PlanExecutor<'a> {
                 }
             }
             AggregateFunctionType::Mode => {
-                let mut counts: Vec<(Value, usize)> = Vec::new();
+                let mut counts: BTreeMap<Value, (usize, usize)> = BTreeMap::new();
+                let mut next_position = 0usize;
                 for row in &filtered_rows {
                     let val = eval_expr_for_row(row)?;
                     if matches!(val, Value::Null) {
@@ -1378,17 +1356,22 @@ impl<'a> PlanExecutor<'a> {
                     if agg.distinct && !seen.insert(val.clone()) {
                         continue;
                     }
-                    if let Some(entry) = counts.iter_mut().find(|(v, _)| *v == val) {
-                        entry.1 += 1;
-                    } else {
-                        counts.push((val, 1));
-                    }
+                    let entry = counts.entry(val).or_insert_with(|| {
+                        let position = next_position;
+                        next_position += 1;
+                        (0, position)
+                    });
+                    entry.0 += 1;
                 }
                 if counts.is_empty() {
                     return Ok(Value::Null);
                 }
-                counts.sort_by(|a, b| b.1.cmp(&a.1));
-                Ok(counts[0].0.clone())
+                let mode = counts
+                    .into_iter()
+                    .max_by(|a, b| a.1.0.cmp(&b.1.0).then_with(|| b.1.1.cmp(&a.1.1)))
+                    .map(|(value, _)| value)
+                    .unwrap_or(Value::Null);
+                Ok(mode)
             }
             AggregateFunctionType::PercentileCont => {
                 let frac = agg.percentile.unwrap_or(0.5);
@@ -1824,6 +1807,53 @@ fn column_definitions_from_names(columns: &[String]) -> Vec<ColumnDefinition> {
             generated: None,
         })
         .collect()
+}
+
+fn combine_rows(left: &[Value], right: &[Value]) -> Vec<Value> {
+    let mut combined = Vec::with_capacity(left.len() + right.len());
+    combined.extend_from_slice(left);
+    combined.extend_from_slice(right);
+    combined
+}
+
+fn combine_row_with_right_nulls(left: &[Value], right_len: usize) -> Vec<Value> {
+    let mut combined = Vec::with_capacity(left.len() + right_len);
+    combined.extend_from_slice(left);
+    combined.resize(left.len() + right_len, Value::Null);
+    combined
+}
+
+fn combine_row_with_left_nulls(left_len: usize, right: &[Value]) -> Vec<Value> {
+    let mut combined = Vec::with_capacity(left_len + right.len());
+    combined.resize(left_len, Value::Null);
+    combined.extend_from_slice(right);
+    combined
+}
+
+fn update_scoped_outer_row(
+    db: &mut Database,
+    temp_table_name: &str,
+    outer_scope_columns: &[ColumnDefinition],
+    current_row: &[Value],
+) {
+    if let Some(table) = db.tables.get_mut(temp_table_name) {
+        table.columns = outer_scope_columns.to_vec();
+        table.rows.clear();
+        table.rows.push(current_row.to_vec());
+        table.row_ids.clear();
+        table.row_ids.push(RowId(1));
+        table.next_row_id = 2;
+        table.constraints.clear();
+    } else {
+        db.tables.insert(
+            temp_table_name.to_string(),
+            Table::new(
+                outer_scope_columns.to_vec(),
+                vec![current_row.to_vec()],
+                vec![],
+            ),
+        );
+    }
 }
 
 fn lateral_subquery_with_outer_scope(

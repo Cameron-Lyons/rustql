@@ -27,21 +27,19 @@ pub fn perform_multiple_joins(
             let mut sub_columns: Option<Vec<ColumnDefinition>> = None;
             let outer_scope_columns =
                 lateral_outer_scope_columns(&table_names, &table_column_counts, &all_columns);
+            let temp_table_name = format!("__lateral_outer_{}", alias);
+            let rewritten_subquery = lateral_subquery_with_outer_scope(subquery, &temp_table_name);
+            let mut scoped_db = db.clone();
 
             for current_row in &current_rows {
-                let temp_table_name = format!("__lateral_outer_{}", alias);
-                let rewritten_subquery =
-                    lateral_subquery_with_outer_scope(subquery, &temp_table_name);
-                let mut scoped_db = db.clone();
-                scoped_db.tables.insert(
-                    temp_table_name.clone(),
-                    Table::new(
-                        outer_scope_columns.clone(),
-                        vec![current_row.clone()],
-                        vec![],
-                    ),
+                update_scoped_outer_row(
+                    &mut scoped_db,
+                    &temp_table_name,
+                    &outer_scope_columns,
+                    current_row,
                 );
-                let sub_result = execute_select_internal(None, rewritten_subquery, &scoped_db);
+                let sub_result =
+                    execute_select_internal(None, rewritten_subquery.clone(), &scoped_db);
 
                 match sub_result {
                     Ok(result) => {
@@ -74,8 +72,7 @@ pub fn perform_multiple_joins(
                         if result.rows.is_empty() {
                         } else {
                             for sub_row in &result.rows {
-                                let mut combined = current_row.clone();
-                                combined.extend(sub_row.clone());
+                                let combined = combine_rows(current_row, sub_row);
                                 let include = if let Some(ref on_expr) = join.on {
                                     evaluate_expression(
                                         Some(db),
@@ -94,17 +91,13 @@ pub fn perform_multiple_joins(
                         }
                         if matches!(join.join_type, JoinType::Left | JoinType::Full) && !has_match {
                             let null_count = sub_columns.as_ref().map_or(0, |c| c.len());
-                            let mut combined = current_row.clone();
-                            combined.extend(vec![Value::Null; null_count]);
-                            joined_rows.push(combined);
+                            joined_rows.push(combine_row_with_right_nulls(current_row, null_count));
                         }
                     }
                     Err(_) => {
                         if matches!(join.join_type, JoinType::Left | JoinType::Full) {
                             let null_count = sub_columns.as_ref().map_or(0, |c| c.len());
-                            let mut combined = current_row.clone();
-                            combined.extend(vec![Value::Null; null_count]);
-                            joined_rows.push(combined);
+                            joined_rows.push(combine_row_with_right_nulls(current_row, null_count));
                         }
                     }
                 }
@@ -147,8 +140,7 @@ pub fn perform_multiple_joins(
             for current_row in &current_rows {
                 let mut has_match = false;
                 for sub_row in &sub_table.rows {
-                    let mut combined = current_row.clone();
-                    combined.extend(sub_row.clone());
+                    let combined = combine_rows(current_row, sub_row);
                     if let Some(ref on_expr) = join.on {
                         if evaluate_expression(Some(db), on_expr, &temp_all_cols, &combined)? {
                             joined_rows.push(combined);
@@ -160,9 +152,7 @@ pub fn perform_multiple_joins(
                     }
                 }
                 if matches!(join.join_type, JoinType::Left | JoinType::Full) && !has_match {
-                    let mut combined = current_row.clone();
-                    combined.extend(vec![Value::Null; sub_columns.len()]);
-                    joined_rows.push(combined);
+                    joined_rows.push(combine_row_with_right_nulls(current_row, sub_columns.len()));
                 }
             }
 
@@ -267,17 +257,16 @@ pub fn perform_multiple_joins(
                             .unwrap_or(false)
                     });
                     if matches {
-                        let mut combined = current_row.clone();
-                        combined.extend(join_row.clone());
-                        joined_rows.push(combined);
+                        joined_rows.push(combine_rows(current_row, join_row));
                         has_match = true;
                         matched_pairs.insert((curr_idx, ji));
                     }
                 }
                 if matches!(join.join_type, JoinType::Left | JoinType::Full) && !has_match {
-                    let mut combined = current_row.clone();
-                    combined.extend(vec![Value::Null; join_table.columns.len()]);
-                    joined_rows.push(combined);
+                    joined_rows.push(combine_row_with_right_nulls(
+                        current_row,
+                        join_table.columns.len(),
+                    ));
                 }
             }
 
@@ -288,10 +277,10 @@ pub fn perform_multiple_joins(
                         .enumerate()
                         .any(|(curr_idx, _)| matched_pairs.contains(&(curr_idx, ji)));
                     if !has_match {
-                        let mut combined =
-                            vec![Value::Null; current_rows.first().map_or(0, |r| r.len())];
-                        combined.extend(join_row.clone());
-                        joined_rows.push(combined);
+                        joined_rows.push(combine_row_with_left_nulls(
+                            current_rows.first().map_or(0, |r| r.len()),
+                            join_row,
+                        ));
                     }
                 }
             }
@@ -302,26 +291,23 @@ pub fn perform_multiple_joins(
                         let mut has_match = false;
                         for (ji, join_row) in join_table.rows.iter().enumerate() {
                             if check_join_match(current_row, join_row) {
-                                let mut combined = current_row.clone();
-                                combined.extend(join_row.clone());
-                                joined_rows.push(combined);
+                                joined_rows.push(combine_rows(current_row, join_row));
                                 has_match = true;
                                 matched_pairs.insert((curr_idx, ji));
                             }
                         }
                         if matches!(join.join_type, JoinType::Left | JoinType::Full) && !has_match {
-                            let mut combined = current_row.clone();
-                            combined.extend(vec![Value::Null; join_table.columns.len()]);
-                            joined_rows.push(combined);
+                            joined_rows.push(combine_row_with_right_nulls(
+                                current_row,
+                                join_table.columns.len(),
+                            ));
                         }
                     }
                 }
                 JoinType::Cross => {
                     for current_row in current_rows.iter() {
                         for join_row in join_table.rows.iter() {
-                            let mut combined = current_row.clone();
-                            combined.extend(join_row.clone());
-                            joined_rows.push(combined);
+                            joined_rows.push(combine_rows(current_row, join_row));
                         }
                     }
                 }
@@ -349,17 +335,16 @@ pub fn perform_multiple_joins(
                                     .unwrap_or(false)
                             });
                             if matches {
-                                let mut combined = current_row.clone();
-                                combined.extend(join_row.clone());
-                                joined_rows.push(combined);
+                                joined_rows.push(combine_rows(current_row, join_row));
                                 has_match = true;
                                 matched_pairs.insert((curr_idx, ji));
                             }
                         }
                         if !has_match {
-                            let mut combined = current_row.clone();
-                            combined.extend(vec![Value::Null; join_table.columns.len()]);
-                            joined_rows.push(combined);
+                            joined_rows.push(combine_row_with_right_nulls(
+                                current_row,
+                                join_table.columns.len(),
+                            ));
                         }
                     }
                 }
@@ -375,16 +360,13 @@ pub fn perform_multiple_joins(
                             if !matches!(join.join_type, JoinType::Full)
                                 || !matched_pairs.contains(&(curr_idx, ji))
                             {
-                                let mut combined = current_row.clone();
-                                combined.extend(join_row.clone());
-                                joined_rows.push(combined);
+                                joined_rows.push(combine_rows(current_row, join_row));
                             }
                         }
                     }
                     if !has_match {
-                        let mut combined = vec![Value::Null; current_rows[0].len()];
-                        combined.extend(join_row.clone());
-                        joined_rows.push(combined);
+                        joined_rows
+                            .push(combine_row_with_left_nulls(current_rows[0].len(), join_row));
                     }
                 }
             }
@@ -417,6 +399,53 @@ fn lateral_outer_scope_columns(
     }
 
     qualified
+}
+
+fn combine_rows(left: &[Value], right: &[Value]) -> Vec<Value> {
+    let mut combined = Vec::with_capacity(left.len() + right.len());
+    combined.extend_from_slice(left);
+    combined.extend_from_slice(right);
+    combined
+}
+
+fn combine_row_with_right_nulls(left: &[Value], right_len: usize) -> Vec<Value> {
+    let mut combined = Vec::with_capacity(left.len() + right_len);
+    combined.extend_from_slice(left);
+    combined.resize(left.len() + right_len, Value::Null);
+    combined
+}
+
+fn combine_row_with_left_nulls(left_len: usize, right: &[Value]) -> Vec<Value> {
+    let mut combined = Vec::with_capacity(left_len + right.len());
+    combined.resize(left_len, Value::Null);
+    combined.extend_from_slice(right);
+    combined
+}
+
+fn update_scoped_outer_row(
+    db: &mut Database,
+    temp_table_name: &str,
+    outer_scope_columns: &[ColumnDefinition],
+    current_row: &[Value],
+) {
+    if let Some(table) = db.tables.get_mut(temp_table_name) {
+        table.columns = outer_scope_columns.to_vec();
+        table.rows.clear();
+        table.rows.push(current_row.to_vec());
+        table.row_ids.clear();
+        table.row_ids.push(crate::database::RowId(1));
+        table.next_row_id = 2;
+        table.constraints.clear();
+    } else {
+        db.tables.insert(
+            temp_table_name.to_string(),
+            Table::new(
+                outer_scope_columns.to_vec(),
+                vec![current_row.to_vec()],
+                vec![],
+            ),
+        );
+    }
 }
 
 fn lateral_subquery_with_outer_scope(
