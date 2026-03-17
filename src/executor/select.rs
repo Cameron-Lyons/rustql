@@ -30,342 +30,14 @@ pub fn execute_select(
             drop(db);
             return execute_select_with_materialized_sources(context, stmt);
         }
-        if let Some(plan) = plan_select_for_execution(&db, &stmt)? {
-            let execution = PlanExecutor::new(&db).execute(&plan, &stmt)?;
-            return Ok(rows_result(SelectResult {
-                headers: execution.columns,
-                rows: execution.rows,
-            }));
-        }
-    }
-
-    if let Some(ref tf) = stmt.from_function
-        && tf.name == "generate_series"
-    {
-        return execute_generate_series(stmt.clone(), tf);
-    }
-
-    if stmt.from.is_empty() {
-        let result = execute_select_without_from(stmt)?;
-        return Ok(rows_result(result));
     }
 
     let db = get_database_read(context);
-
-    if let Some((ref set_op_type, ref other_stmt)) = stmt.set_op {
-        let left_stmt = SelectStatement {
-            ctes: Vec::new(),
-            distinct: stmt.distinct,
-            distinct_on: stmt.distinct_on.clone(),
-            columns: stmt.columns.clone(),
-            from: stmt.from.clone(),
-            from_alias: stmt.from_alias.clone(),
-            from_subquery: stmt.from_subquery.clone(),
-            from_function: stmt.from_function.clone(),
-            joins: stmt.joins.clone(),
-            where_clause: stmt.where_clause.clone(),
-            group_by: stmt.group_by.clone(),
-            having: stmt.having.clone(),
-            order_by: stmt.order_by.clone(),
-            limit: stmt.limit,
-            offset: stmt.offset,
-            fetch: stmt.fetch.clone(),
-            set_op: None,
-            window_definitions: Vec::new(),
-            from_values: None,
-        };
-        return execute_set_operation(
-            Some(context),
-            left_stmt,
-            other_stmt.as_ref().clone(),
-            set_op_type,
-            &db,
-        );
-    }
-
-    if !stmt.joins.is_empty() {
-        return execute_select_with_joins(context, stmt, &db);
-    }
-
-    let db_ref: &Database = &db;
-    let table = db_ref
-        .tables
-        .get(&stmt.from)
-        .ok_or_else(|| RustqlError::TableNotFound(stmt.from.clone()))?;
-
-    let mut filtered_rows: Vec<&Vec<Value>> = Vec::new();
-
-    let candidate_indices: Option<HashSet<crate::database::RowId>> = if let Some(ref where_expr) =
-        stmt.where_clause
-    {
-        if let Some(index_usage) = super::ddl::find_index_usage(db_ref, &stmt.from, where_expr) {
-            super::ddl::get_indexed_rows(db_ref, table, &index_usage).ok()
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-
-    let rows_to_check: Vec<(usize, crate::database::RowId, &Vec<Value>)> =
-        if let Some(ref candidate_set) = candidate_indices {
-            table
-                .iter_rows_with_ids()
-                .enumerate()
-                .filter(|(_, (row_id, _))| candidate_set.contains(row_id))
-                .map(|(idx, (row_id, row))| (idx, row_id, row))
-                .collect()
-        } else {
-            table
-                .iter_rows_with_ids()
-                .enumerate()
-                .map(|(idx, (row_id, row))| (idx, row_id, row))
-                .collect()
-        };
-
-    for (_, _, row) in rows_to_check {
-        let include_row = if let Some(ref where_expr) = stmt.where_clause {
-            evaluate_expression(Some(db_ref), where_expr, &table.columns, row)?
-        } else {
-            true
-        };
-        if include_row {
-            filtered_rows.push(row);
-        }
-    }
-
-    if stmt.group_by.is_some() {
-        let grouped = execute_select_with_grouping_result(stmt, table, filtered_rows)?;
-        return Ok(rows_result(grouped));
-    }
-
-    let has_aggregate = stmt
-        .columns
-        .iter()
-        .any(|col| matches!(col, Column::Function(_)));
-
-    if has_aggregate {
-        let aggregated = execute_select_with_aggregates_result(stmt, table, filtered_rows)?;
-        return Ok(rows_result(aggregated));
-    }
-
-    let column_specs: Vec<(String, Column)> = if matches!(stmt.columns[0], Column::All) {
-        table
-            .columns
-            .iter()
-            .map(|c| {
-                (
-                    c.name.clone(),
-                    Column::Named {
-                        name: c.name.clone(),
-                        alias: None,
-                    },
-                )
-            })
-            .collect()
-    } else {
-        stmt.columns
-            .iter()
-            .map(|col| match col {
-                Column::Named { name, alias } => {
-                    (alias.clone().unwrap_or_else(|| name.clone()), col.clone())
-                }
-                Column::Subquery(_) => ("<subquery>".to_string(), col.clone()),
-                Column::Function(_) => ("<aggregate>".to_string(), col.clone()),
-                Column::Expression { alias, .. } => (
-                    alias.clone().unwrap_or_else(|| "<expression>".to_string()),
-                    col.clone(),
-                ),
-                Column::All => unreachable!(),
-            })
-            .collect()
-    };
-
-    let headers: Vec<String> = column_specs.iter().map(|(name, _)| name.clone()).collect();
-
-    let has_window_fn_main = column_specs.iter().any(|(_, col)| {
-        matches!(
-            col,
-            Column::Expression {
-                expr: Expression::WindowFunction { .. },
-                ..
-            }
-        )
-    });
-
-    let window_rows: Option<Vec<Vec<Value>>> = if has_window_fn_main {
-        let mut raw: Vec<Vec<Value>> = filtered_rows.iter().map(|r| (*r).clone()).collect();
-        evaluate_window_functions(&mut raw, &table.columns, &stmt.columns)?;
-        Some(raw)
-    } else {
-        None
-    };
-
-    let mut outputs: Vec<(Vec<Value>, Vec<Value>)> = Vec::with_capacity(filtered_rows.len());
-    for (row_idx, row_ref) in filtered_rows.iter().enumerate() {
-        let row = *row_ref;
-        let mut projected: Vec<Value> = Vec::with_capacity(column_specs.len());
-        let mut wf_offset = table.columns.len();
-        for (_, col) in &column_specs {
-            let val = match col {
-                Column::All => {
-                    unreachable!("Column::All should not appear in column_specs")
-                }
-                Column::Named { name, .. } => {
-                    let column_name = if name.contains('.') {
-                        name.split('.').next_back().unwrap_or(name)
-                    } else {
-                        name.as_str()
-                    };
-                    let idx = table
-                        .columns
-                        .iter()
-                        .position(|c| c.name == column_name)
-                        .ok_or_else(|| RustqlError::ColumnNotFound(name.clone()))?;
-                    row[idx].clone()
-                }
-                Column::Subquery(subquery) => {
-                    eval_scalar_subquery_with_outer(db_ref, subquery, &table.columns, row)?
-                }
-                Column::Expression {
-                    expr: Expression::WindowFunction { .. },
-                    ..
-                } => {
-                    if let Some(ref wr) = window_rows {
-                        let v = wr[row_idx].get(wf_offset).cloned().unwrap_or(Value::Null);
-                        wf_offset += 1;
-                        v
-                    } else {
-                        Value::Null
-                    }
-                }
-                Column::Expression { expr, .. } => {
-                    evaluate_value_expression_with_db(expr, &table.columns, row, Some(db_ref))?
-                }
-                Column::Function(_) => {
-                    return Err(RustqlError::Internal(
-                        "Aggregate functions must be used with GROUP BY or without other columns"
-                            .to_string(),
-                    ));
-                }
-            };
-            projected.push(val);
-        }
-
-        let mut order_values: Vec<Value> = Vec::new();
-        if let Some(ref order_by) = stmt.order_by {
-            for order_expr in order_by {
-                let value = evaluate_select_order_expression(
-                    &order_expr.expr,
-                    &table.columns,
-                    row,
-                    &column_specs,
-                    &projected,
-                    true,
-                )?;
-                order_values.push(value);
-            }
-        }
-
-        outputs.push((projected, order_values));
-    }
-
-    if let Some(ref order_by) = stmt.order_by {
-        outputs.sort_by(|a, b| {
-            for (idx, order_expr) in order_by.iter().enumerate() {
-                let cmp = compare_values_for_sort(&a.1[idx], &b.1[idx]);
-                if cmp != Ordering::Equal {
-                    return if order_expr.asc { cmp } else { cmp.reverse() };
-                }
-            }
-            Ordering::Equal
-        });
-    }
-
-    if let Some(ref distinct_on_exprs) = stmt.distinct_on {
-        let mut seen_keys: BTreeSet<Vec<Value>> = BTreeSet::new();
-        let mut deduped: Vec<(Vec<Value>, Vec<Value>)> = Vec::new();
-        for (projected, order_vals) in outputs {
-            let key: Vec<Value> = distinct_on_exprs
-                .iter()
-                .map(|expr| {
-                    if let Expression::Column(name) = expr {
-                        for (i, (header, _)) in column_specs.iter().enumerate() {
-                            if header == name {
-                                return projected[i].clone();
-                            }
-                        }
-                    }
-                    evaluate_value_expression_with_db(
-                        expr,
-                        &table.columns,
-                        &projected,
-                        Some(db_ref),
-                    )
-                    .unwrap_or(Value::Null)
-                })
-                .collect();
-            if seen_keys.insert(key) {
-                deduped.push((projected, order_vals));
-            }
-        }
-        outputs = deduped;
-    }
-
-    let offset = stmt.offset.unwrap_or(0);
-    let base_limit = stmt.limit.unwrap_or(outputs.len());
-
-    let limit = if let Some(ref fetch) = stmt.fetch {
-        if fetch.with_ties && stmt.order_by.is_some() {
-            let target = offset + fetch.count;
-            if target < outputs.len() {
-                let last_included = &outputs[target - 1].1;
-                let mut extended = target;
-                while extended < outputs.len() && outputs[extended].1 == *last_included {
-                    extended += 1;
-                }
-                extended - offset
-            } else {
-                fetch.count
-            }
-        } else {
-            fetch.count
-        }
-    } else {
-        base_limit
-    };
-
-    let mut seen: BTreeSet<Vec<Value>> = BTreeSet::new();
-    let mut emitted = 0usize;
-    let mut skipped = 0usize;
-    let mut rows = Vec::new();
-    for (projected, _) in outputs {
-        if stmt.distinct && !seen.insert(projected.clone()) {
-            continue;
-        }
-        if skipped < offset {
-            skipped += 1;
-            continue;
-        }
-        if emitted >= limit {
-            break;
-        }
-        rows.push(projected);
-        emitted += 1;
-    }
-
-    Ok(rows_result(SelectResult { headers, rows }))
-}
-
-fn execute_set_operation(
-    context: Option<&ExecutionContext>,
-    left_stmt: SelectStatement,
-    right_stmt: SelectStatement,
-    set_op_type: &SetOperation,
-    db: &Database,
-) -> Result<QueryResult, RustqlError> {
-    let result = execute_set_operation_result(context, left_stmt, right_stmt, set_op_type, db)?;
-    Ok(rows_result(result))
+    Ok(rows_result(execute_select_internal(
+        Some(context),
+        stmt,
+        &db,
+    )?))
 }
 
 fn execute_set_operation_result(
@@ -762,14 +434,6 @@ fn execute_select_without_from(stmt: SelectStatement) -> Result<SelectResult, Ru
         headers,
         rows: vec![result_row],
     })
-}
-
-fn execute_generate_series(
-    stmt: SelectStatement,
-    tf: &TableFunction,
-) -> Result<QueryResult, RustqlError> {
-    let result = execute_generate_series_result(stmt, tf)?;
-    Ok(rows_result(result))
 }
 
 fn execute_generate_series_result(
@@ -1293,6 +957,37 @@ pub(crate) fn execute_select_internal(
         });
     }
 
+    if let Some((ref set_op_type, ref other_stmt)) = stmt.set_op {
+        let left_stmt = SelectStatement {
+            ctes: Vec::new(),
+            distinct: stmt.distinct,
+            distinct_on: stmt.distinct_on.clone(),
+            columns: stmt.columns.clone(),
+            from: stmt.from.clone(),
+            from_alias: stmt.from_alias.clone(),
+            from_subquery: stmt.from_subquery.clone(),
+            from_function: stmt.from_function.clone(),
+            joins: stmt.joins.clone(),
+            where_clause: stmt.where_clause.clone(),
+            group_by: stmt.group_by.clone(),
+            having: stmt.having.clone(),
+            order_by: stmt.order_by.clone(),
+            limit: stmt.limit,
+            offset: stmt.offset,
+            fetch: stmt.fetch.clone(),
+            set_op: None,
+            window_definitions: Vec::new(),
+            from_values: None,
+        };
+        return execute_set_operation_result(
+            context,
+            left_stmt,
+            other_stmt.as_ref().clone(),
+            set_op_type,
+            db,
+        );
+    }
+
     if let Some(ref tf) = stmt.from_function
         && tf.name == "generate_series"
     {
@@ -1492,7 +1187,7 @@ pub(crate) fn execute_select_internal(
                     }
                 }
                 Column::Expression { expr, .. } => {
-                    evaluate_value_expression(expr, &all_columns, row)?
+                    evaluate_value_expression_with_db(expr, &all_columns, row, Some(db))?
                 }
             };
             projected.push(val);
@@ -2167,139 +1862,6 @@ pub fn eval_scalar_subquery_with_outer(
             )),
         }
     }
-}
-
-fn execute_select_with_joins(
-    context: &ExecutionContext,
-    stmt: SelectStatement,
-    db: &Database,
-) -> Result<QueryResult, RustqlError> {
-    let main_table = db
-        .tables
-        .get(&stmt.from)
-        .ok_or_else(|| RustqlError::TableNotFound(stmt.from.clone()))?;
-
-    let (joined_rows, all_columns) =
-        perform_multiple_joins(Some(context), db, main_table, &stmt.from, &stmt.joins)?;
-
-    let mut filtered_rows: Vec<Vec<Value>> = Vec::new();
-    let db_ref: &Database = db;
-    for row in &joined_rows {
-        let include_row = if let Some(ref where_expr) = stmt.where_clause {
-            evaluate_expression(Some(db_ref), where_expr, &all_columns, row)?
-        } else {
-            true
-        };
-        if include_row {
-            filtered_rows.push(row.clone());
-        }
-    }
-
-    let has_aggregate = stmt
-        .columns
-        .iter()
-        .any(|col| matches!(col, Column::Function(_)));
-
-    if stmt.group_by.is_some() {
-        let temp_table = Table::new(all_columns.clone(), Vec::new(), vec![]);
-        let row_refs: Vec<&Vec<Value>> = filtered_rows.iter().collect();
-        return Ok(rows_result(execute_select_with_grouping_result(
-            stmt,
-            &temp_table,
-            row_refs,
-        )?));
-    }
-
-    if has_aggregate {
-        let temp_table = Table::new(all_columns.clone(), Vec::new(), vec![]);
-        let row_refs: Vec<&Vec<Value>> = filtered_rows.iter().collect();
-        return Ok(rows_result(execute_select_with_aggregates_result(
-            stmt,
-            &temp_table,
-            row_refs,
-        )?));
-    }
-
-    if let Some(ref order_by) = stmt.order_by {
-        filtered_rows.sort_by(|a, b| {
-            for order_expr in order_by {
-                let a_val = evaluate_value_expression(&order_expr.expr, &all_columns, a)
-                    .unwrap_or(Value::Null);
-                let b_val = evaluate_value_expression(&order_expr.expr, &all_columns, b)
-                    .unwrap_or(Value::Null);
-                let cmp = compare_values_for_sort(&a_val, &b_val);
-                if cmp != Ordering::Equal {
-                    return if order_expr.asc { cmp } else { cmp.reverse() };
-                }
-            }
-            Ordering::Equal
-        });
-    }
-
-    let column_specs: Vec<(String, usize)> = match &stmt.columns[0] {
-        Column::All => all_columns
-            .iter()
-            .enumerate()
-            .map(|(idx, col)| (col.name.clone(), idx))
-            .collect(),
-        Column::Named { .. } => {
-            let mut specs = Vec::new();
-            for col in &stmt.columns {
-                match col {
-                    Column::Named { name, alias } => {
-                        let target_name = if name.contains('.') {
-                            name.split('.').next_back().unwrap_or(name)
-                        } else {
-                            name
-                        };
-                        let idx = all_columns
-                            .iter()
-                            .position(|c| c.name == target_name)
-                            .ok_or_else(|| RustqlError::ColumnNotFound(name.clone()))?;
-                        let header = alias.clone().unwrap_or_else(|| name.clone());
-                        specs.push((header, idx));
-                    }
-                    _ => return Err(RustqlError::TypeMismatch("Invalid column type".to_string())),
-                }
-            }
-            specs
-        }
-        _ => return Err(RustqlError::TypeMismatch("Invalid column type".to_string())),
-    };
-
-    let headers: Vec<String> = column_specs
-        .iter()
-        .map(|(header, _)| header.clone())
-        .collect();
-
-    let offset = stmt.offset.unwrap_or(0);
-    let limit = stmt.limit.unwrap_or(filtered_rows.len());
-
-    use std::collections::BTreeSet;
-    let mut seen: BTreeSet<Vec<Value>> = BTreeSet::new();
-    let mut skipped = 0usize;
-    let mut emitted = 0usize;
-    let mut rows = Vec::new();
-    for row in &filtered_rows {
-        let projected: Vec<Value> = column_specs
-            .iter()
-            .map(|(_, idx)| row[*idx].clone())
-            .collect();
-        if stmt.distinct && !seen.insert(projected.clone()) {
-            continue;
-        }
-        if skipped < offset {
-            skipped += 1;
-            continue;
-        }
-        if emitted >= limit {
-            break;
-        }
-        rows.push(projected);
-        emitted += 1;
-    }
-
-    Ok(rows_result(SelectResult { headers, rows }))
 }
 
 fn resolve_window_definitions(stmt: &mut SelectStatement) {

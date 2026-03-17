@@ -19,11 +19,6 @@ impl Parser {
         self.tokens.get(self.current).unwrap_or(&Token::Eof)
     }
 
-    #[allow(dead_code)]
-    fn peek_token(&self) -> &Token {
-        self.tokens.get(self.current + 1).unwrap_or(&Token::Eof)
-    }
-
     fn consume(&mut self, expected: Token) -> Result<(), RustqlError> {
         if *self.current_token() == expected {
             self.current += 1;
@@ -4036,7 +4031,6 @@ fn token_to_sql(tok: &Token) -> String {
         Token::Star => "*".to_string(),
         Token::Plus => "+".to_string(),
         Token::Minus => "-".to_string(),
-        Token::Multiply => "*".to_string(),
         Token::Divide => "/".to_string(),
         Token::Equal => "=".to_string(),
         Token::NotEqual => "<>".to_string(),

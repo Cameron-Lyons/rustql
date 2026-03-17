@@ -1,7 +1,5 @@
 use crate::ast::*;
 use crate::error::RustqlError;
-#[allow(unused_imports)]
-use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 

@@ -590,12 +590,10 @@ pub enum UnaryOperator {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Value {
-    #[allow(dead_code)]
     Null,
     Integer(i64),
     Float(f64),
     Text(String),
-    #[allow(dead_code)]
     Boolean(bool),
     Date(String),
     Time(String),

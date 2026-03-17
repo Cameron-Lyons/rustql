@@ -734,208 +734,6 @@ impl BTreeFile {
         Ok(BTreeFile { file })
     }
 
-    #[allow(dead_code)]
-    fn read_database_via_pages(&mut self) -> Result<Database, RustqlError> {
-        let file_size = self
-            .file
-            .metadata()
-            .map_err(|e| RustqlError::StorageError(format!("Failed to get file metadata: {}", e)))?
-            .len();
-
-        if file_size == 0 {
-            return Ok(Database::new());
-        }
-
-        if file_size < FILE_HEADER_SIZE as u64 {
-            return Err(RustqlError::StorageError(
-                "BTree storage file header is truncated".to_string(),
-            ));
-        }
-
-        let mut header = [0u8; FILE_HEADER_SIZE];
-        self.file
-            .seek(SeekFrom::Start(0))
-            .map_err(|e| RustqlError::StorageError(format!("Failed to seek to start: {}", e)))?;
-        self.file.read_exact(&mut header).map_err(|e| {
-            RustqlError::StorageError(format!("Failed to read BTree storage header: {}", e))
-        })?;
-
-        if header[0..8] != Self::MAGIC {
-            return Err(RustqlError::StorageError(
-                "BTree storage file has an invalid header".to_string(),
-            ));
-        }
-
-        let version = u32::from_le_bytes([header[8], header[9], header[10], header[11]]);
-        if version != Self::VERSION {
-            return Err(RustqlError::StorageError(format!(
-                "Unsupported BTree storage format version: {}",
-                version
-            )));
-        }
-
-        if file_size < FILE_HEADER_SIZE as u64 + BTREE_PAGE_SIZE as u64 {
-            return Ok(Database::new());
-        }
-
-        let meta_page = match self.read_page(0) {
-            Ok(page) => page,
-            Err(_) => return Ok(Database::new()),
-        };
-        let root_page_id = meta_page
-            .entries
-            .iter()
-            .find(|e| {
-                if let Value::Text(ref s) = e.key {
-                    s == "root"
-                } else {
-                    false
-                }
-            })
-            .map(|e| e.pointer)
-            .unwrap_or(1);
-
-        self.load_database_from_rows(root_page_id)
-    }
-
-    #[allow(dead_code)]
-    fn load_database_from_rows(&mut self, root_page_id: u64) -> Result<Database, RustqlError> {
-        let mut db = Database::new();
-
-        let schema_prefix = Value::Text("schema:".to_string());
-        let schema_end = Value::Text("schema;".to_string());
-        let schemas = self.range_scan(Some(&schema_prefix), Some(&schema_end), root_page_id)?;
-
-        for (key, pointer) in schemas {
-            if let Value::Text(ref key_str) = key
-                && let Some(table_name) = key_str.strip_prefix("schema:")
-            {
-                let schema_json = self.read_data_from_pointer(pointer)?;
-                let schema: TableStorageRecord =
-                    serde_json::from_str(&schema_json).map_err(|e| {
-                        format!(
-                            "Failed to deserialize schema for table {}: {}",
-                            table_name, e
-                        )
-                    })?;
-
-                db.tables.insert(
-                    table_name.to_string(),
-                    crate::database::Table {
-                        columns: schema.columns,
-                        rows: Vec::new(),
-                        row_ids: Vec::new(),
-                        next_row_id: schema.next_row_id,
-                        constraints: schema.constraints,
-                    },
-                );
-            }
-        }
-
-        for table_name in db.tables.keys().cloned().collect::<Vec<_>>() {
-            let row_prefix = Value::Text(format!("row:{}:", table_name));
-            let row_end = Value::Text(format!("row:{};", table_name));
-            let rows = self.range_scan(Some(&row_prefix), Some(&row_end), root_page_id)?;
-
-            let mut row_indices: Vec<(RowId, Vec<Value>)> = Vec::new();
-
-            for (key, pointer) in rows {
-                if let Value::Text(ref key_str) = key
-                    && let Some(row_id_str) = key_str.strip_prefix(&format!("row:{}:", table_name))
-                    && let Ok(row_id) = row_id_str.parse::<u64>()
-                {
-                    let row_json = self.read_data_from_pointer(pointer)?;
-                    let row: Vec<Value> = serde_json::from_str(&row_json).map_err(|e| {
-                        format!(
-                            "Failed to deserialize row {} for table {}: {}",
-                            row_id_str, table_name, e
-                        )
-                    })?;
-                    row_indices.push((RowId(row_id), row));
-                }
-            }
-
-            row_indices.sort_by_key(|(row_id, _)| *row_id);
-            let sorted_row_ids: Vec<RowId> =
-                row_indices.iter().map(|(row_id, _)| *row_id).collect();
-            let sorted_rows: Vec<Vec<Value>> =
-                row_indices.into_iter().map(|(_, row)| row).collect();
-
-            if let Some(table_ref) = db.tables.get_mut(&table_name) {
-                table_ref.rows = sorted_rows;
-                table_ref.row_ids = sorted_row_ids;
-            }
-        }
-
-        let index_prefix = Value::Text("index:".to_string());
-        let index_end = Value::Text("index;".to_string());
-        let indexes = self.range_scan(Some(&index_prefix), Some(&index_end), root_page_id)?;
-
-        for (key, pointer) in indexes {
-            if let Value::Text(ref key_str) = key
-                && let Some(index_name) = key_str.strip_prefix("index:")
-            {
-                let index_json = self.read_data_from_pointer(pointer)?;
-                let index: crate::database::Index = serde_json::from_str(&index_json)
-                    .map_err(|e| format!("Failed to deserialize index {}: {}", index_name, e))?;
-                db.indexes.insert(index_name.to_string(), index);
-            }
-        }
-
-        let cindex_prefix = Value::Text("cindex:".to_string());
-        let cindex_end = Value::Text("cindex;".to_string());
-        let composite_indexes =
-            self.range_scan(Some(&cindex_prefix), Some(&cindex_end), root_page_id)?;
-
-        for (key, pointer) in composite_indexes {
-            if let Value::Text(ref key_str) = key
-                && let Some(index_name) = key_str.strip_prefix("cindex:")
-            {
-                let index_json = self.read_data_from_pointer(pointer)?;
-                let index: crate::database::CompositeIndex = serde_json::from_str(&index_json)
-                    .map_err(|e| {
-                        format!(
-                            "Failed to deserialize composite index {}: {}",
-                            index_name, e
-                        )
-                    })?;
-                db.composite_indexes.insert(index_name.to_string(), index);
-            }
-        }
-
-        let view_prefix = Value::Text("view:".to_string());
-        let view_end = Value::Text("view;".to_string());
-        let views = self.range_scan(Some(&view_prefix), Some(&view_end), root_page_id)?;
-
-        for (key, pointer) in views {
-            if let Value::Text(ref key_str) = key
-                && let Some(view_name) = key_str.strip_prefix("view:")
-            {
-                let view_json = self.read_data_from_pointer(pointer)?;
-                let view: crate::database::View = serde_json::from_str(&view_json)
-                    .map_err(|e| format!("Failed to deserialize view {}: {}", view_name, e))?;
-                db.views.insert(view_name.to_string(), view);
-            }
-        }
-
-        Ok(db)
-    }
-
-    #[allow(dead_code)]
-    fn read_data_from_pointer(&mut self, pointer: u64) -> Result<String, RustqlError> {
-        let data_page = self.read_page(pointer)?;
-
-        if let Some(entry) = data_page.entries.first()
-            && let Value::Text(ref json_str) = entry.key
-        {
-            return Ok(json_str.clone());
-        }
-
-        Err(RustqlError::StorageError(
-            "Data page does not contain valid JSON".to_string(),
-        ))
-    }
-
     fn write_data_to_pointer(&mut self, data: &str) -> Result<u64, RustqlError> {
         let page_id = self.get_next_page_id()?;
         let mut data_page = BTreePage::new(page_id, PageKind::Leaf);
@@ -1640,6 +1438,7 @@ impl BTreeFile {
         }
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn range_scan(
         &mut self,
         start_key: Option<&Value>,
@@ -1660,6 +1459,7 @@ impl BTreeFile {
             .collect())
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     fn collect_entries(
         &mut self,
         page_id: u64,

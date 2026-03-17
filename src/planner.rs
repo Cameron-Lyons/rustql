@@ -3,6 +3,8 @@ use crate::database::{Database, Table};
 use crate::error::RustqlError;
 use crate::executor::aggregate::format_aggregate_header;
 use crate::executor::ddl::{IndexUsage, find_index_usage};
+use crate::executor::expr::compare_values_same_type;
+use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt;
 
@@ -922,12 +924,14 @@ impl<'a> QueryPlanner<'a> {
                         } else {
                             distinct_values.insert(val.clone());
                             if min_val.is_none()
-                                || self.compare_values(val, min_val.as_ref().unwrap()) < 0
+                                || compare_values_same_type(val, min_val.as_ref().unwrap())
+                                    == Ordering::Less
                             {
                                 min_val = Some(val.clone());
                             }
                             if max_val.is_none()
-                                || self.compare_values(val, max_val.as_ref().unwrap()) > 0
+                                || compare_values_same_type(val, max_val.as_ref().unwrap())
+                                    == Ordering::Greater
                             {
                                 max_val = Some(val.clone());
                             }
@@ -951,18 +955,6 @@ impl<'a> QueryPlanner<'a> {
             row_count,
             column_stats,
             has_index,
-        }
-    }
-
-    fn compare_values(&self, a: &Value, b: &Value) -> i32 {
-        match (a, b) {
-            (Value::Integer(i1), Value::Integer(i2)) => i1.cmp(i2) as i32,
-            (Value::Float(f1), Value::Float(f2)) => {
-                f1.partial_cmp(f2).unwrap_or(std::cmp::Ordering::Equal) as i32
-            }
-            (Value::Text(s1), Value::Text(s2)) => s1.cmp(s2) as i32,
-            (Value::Boolean(b1), Value::Boolean(b2)) => b1.cmp(b2) as i32,
-            _ => 0,
         }
     }
 

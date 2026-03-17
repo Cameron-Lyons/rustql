@@ -1,6 +1,10 @@
 use crate::ast::*;
 use crate::database::{Database, RowId, Table};
 use crate::error::RustqlError;
+use crate::executor::expr::{
+    apply_arithmetic, compare_values, compare_values_same_type, evaluate_expression,
+    evaluate_value_expression_with_db,
+};
 use crate::executor::select::execute_select_internal;
 use crate::planner::PlanNode;
 use std::cmp::Ordering;
@@ -606,7 +610,7 @@ impl<'a> PlanExecutor<'a> {
                 let b_val = self
                     .get_sort_value(&order_expr.expr, &input.columns, b)
                     .unwrap_or(Value::Null);
-                let cmp = self.compare_values(&a_val, &b_val);
+                let cmp = compare_values_same_type(&a_val, &b_val);
                 if cmp != Ordering::Equal {
                     return if order_expr.asc { cmp } else { cmp.reverse() };
                 }
@@ -873,98 +877,7 @@ impl<'a> PlanExecutor<'a> {
         columns: &[ColumnDefinition],
         row: &[Value],
     ) -> Result<bool, RustqlError> {
-        match expr {
-            Expression::BinaryOp { left, op, right } => match op {
-                BinaryOperator::And => Ok(self.evaluate_expression(left, columns, row)?
-                    && self.evaluate_expression(right, columns, row)?),
-                BinaryOperator::Or => Ok(self.evaluate_expression(left, columns, row)?
-                    || self.evaluate_expression(right, columns, row)?),
-                BinaryOperator::Like => {
-                    let left_val = self.evaluate_value_expression(left, columns, row)?;
-                    let right_val = self.evaluate_value_expression(right, columns, row)?;
-                    match (left_val, right_val) {
-                        (Value::Text(text), Value::Text(pattern)) => {
-                            Ok(self.match_like(&text, &pattern))
-                        }
-                        _ => Err(RustqlError::TypeMismatch(
-                            "LIKE operator requires text values".to_string(),
-                        )),
-                    }
-                }
-                BinaryOperator::ILike => {
-                    let left_val = self.evaluate_value_expression(left, columns, row)?;
-                    let right_val = self.evaluate_value_expression(right, columns, row)?;
-                    match (left_val, right_val) {
-                        (Value::Text(text), Value::Text(pattern)) => {
-                            Ok(self.match_like(&text.to_lowercase(), &pattern.to_lowercase()))
-                        }
-                        _ => Err(RustqlError::TypeMismatch(
-                            "ILIKE operator requires text values".to_string(),
-                        )),
-                    }
-                }
-                BinaryOperator::Between => {
-                    let left_val = self.evaluate_value_expression(left, columns, row)?;
-                    match &**right {
-                        Expression::BinaryOp {
-                            left: lb,
-                            op: lb_op,
-                            right: rb,
-                        } if *lb_op == BinaryOperator::And => {
-                            let lower = self.evaluate_value_expression(lb, columns, row)?;
-                            let upper = self.evaluate_value_expression(rb, columns, row)?;
-                            Ok(self.is_between(&left_val, &lower, &upper))
-                        }
-                        _ => Err(RustqlError::TypeMismatch(
-                            "BETWEEN requires two values".to_string(),
-                        )),
-                    }
-                }
-                BinaryOperator::In => {
-                    let left_val = self.evaluate_value_expression(left, columns, row)?;
-                    match &**right {
-                        Expression::In { values, .. } => Ok(values.contains(&left_val)),
-                        _ => {
-                            let right_val = self.evaluate_value_expression(right, columns, row)?;
-                            self.compare_values_for_where(&left_val, op, &right_val)
-                        }
-                    }
-                }
-                _ => {
-                    let left_val = self.evaluate_value_expression(left, columns, row)?;
-                    let right_val = self.evaluate_value_expression(right, columns, row)?;
-                    self.compare_values_for_where(&left_val, op, &right_val)
-                }
-            },
-            Expression::In { left, values } => {
-                let left_val = self.evaluate_value_expression(left, columns, row)?;
-                Ok(values.contains(&left_val))
-            }
-            Expression::IsNull { expr, not } => {
-                let value = self.evaluate_value_expression(expr, columns, row)?;
-                let is_null = matches!(value, Value::Null);
-                Ok(if *not { !is_null } else { is_null })
-            }
-            Expression::UnaryOp { op, expr } => match op {
-                UnaryOperator::Not => Ok(!self.evaluate_expression(expr, columns, row)?),
-                _ => Err(RustqlError::Internal(
-                    "Unsupported unary operation in WHERE clause".to_string(),
-                )),
-            },
-            Expression::IsDistinctFrom { left, right, not } => {
-                let left_val = self.evaluate_value_expression(left, columns, row)?;
-                let right_val = self.evaluate_value_expression(right, columns, row)?;
-                let is_distinct = match (&left_val, &right_val) {
-                    (Value::Null, Value::Null) => false,
-                    (Value::Null, _) | (_, Value::Null) => true,
-                    _ => left_val != right_val,
-                };
-                Ok(if *not { !is_distinct } else { is_distinct })
-            }
-            _ => Err(RustqlError::Internal(
-                "Invalid expression in WHERE clause".to_string(),
-            )),
-        }
+        evaluate_expression(Some(self.db), expr, columns, row)
     }
 
     fn evaluate_value_expression(
@@ -973,271 +886,7 @@ impl<'a> PlanExecutor<'a> {
         columns: &[ColumnDefinition],
         row: &[Value],
     ) -> Result<Value, RustqlError> {
-        match expr {
-            Expression::Column(name) => {
-                if name == "*" {
-                    return Ok(Value::Integer(1));
-                }
-                let idx = find_defined_column_index(columns, name)
-                    .ok_or_else(|| RustqlError::ColumnNotFound(name.to_string()))?;
-                Ok(row.get(idx).cloned().unwrap_or(Value::Null))
-            }
-            Expression::Value(val) => Ok(val.clone()),
-            Expression::BinaryOp { left, op, right } => {
-                let left_val = self.evaluate_value_expression(left, columns, row)?;
-                let right_val = self.evaluate_value_expression(right, columns, row)?;
-                match op {
-                    BinaryOperator::Plus
-                    | BinaryOperator::Minus
-                    | BinaryOperator::Multiply
-                    | BinaryOperator::Divide => self.apply_arithmetic(&left_val, &right_val, op),
-                    _ => Err(RustqlError::Internal(
-                        "Only arithmetic operators are supported in SELECT expressions".to_string(),
-                    )),
-                }
-            }
-            Expression::UnaryOp { op, expr } => {
-                let val = self.evaluate_value_expression(expr, columns, row)?;
-                match op {
-                    UnaryOperator::Minus => match val {
-                        Value::Integer(n) => Ok(Value::Integer(-n)),
-                        Value::Float(f) => Ok(Value::Float(-f)),
-                        _ => Err(RustqlError::Internal(
-                            "Unary minus only supported for numeric types".to_string(),
-                        )),
-                    },
-                    _ => Err(RustqlError::Internal(
-                        "Unsupported unary operator in SELECT expression".to_string(),
-                    )),
-                }
-            }
-            _ => Err(RustqlError::Internal(
-                "Complex expressions not yet supported in SELECT".to_string(),
-            )),
-        }
-    }
-
-    fn apply_arithmetic(
-        &self,
-        left: &Value,
-        right: &Value,
-        op: &BinaryOperator,
-    ) -> Result<Value, RustqlError> {
-        let to_float = |value: &Value| -> Result<f64, RustqlError> {
-            match value {
-                Value::Integer(i) => Ok(*i as f64),
-                Value::Float(f) => Ok(*f),
-                Value::Null => Ok(0.0),
-                _ => Err(RustqlError::TypeMismatch(
-                    "Arithmetic requires numeric values".to_string(),
-                )),
-            }
-        };
-
-        match (left, right) {
-            (Value::Integer(l), Value::Integer(r)) => match op {
-                BinaryOperator::Plus => Ok(Value::Integer(l + r)),
-                BinaryOperator::Minus => Ok(Value::Integer(l - r)),
-                BinaryOperator::Multiply => Ok(Value::Integer(l * r)),
-                BinaryOperator::Divide => {
-                    if *r == 0 {
-                        Err(RustqlError::DivisionByZero)
-                    } else if l % r == 0 {
-                        Ok(Value::Integer(l / r))
-                    } else {
-                        Ok(Value::Float(*l as f64 / *r as f64))
-                    }
-                }
-                _ => unreachable!(),
-            },
-            _ => {
-                let l = to_float(left)?;
-                let r = to_float(right)?;
-                match op {
-                    BinaryOperator::Plus => Ok(Value::Float(l + r)),
-                    BinaryOperator::Minus => Ok(Value::Float(l - r)),
-                    BinaryOperator::Multiply => Ok(Value::Float(l * r)),
-                    BinaryOperator::Divide => {
-                        if r.abs() < f64::EPSILON {
-                            Err(RustqlError::DivisionByZero)
-                        } else {
-                            Ok(Value::Float(l / r))
-                        }
-                    }
-                    _ => unreachable!(),
-                }
-            }
-        }
-    }
-
-    fn compare_values_for_where(
-        &self,
-        left: &Value,
-        op: &BinaryOperator,
-        right: &Value,
-    ) -> Result<bool, RustqlError> {
-        if matches!(left, Value::Null) || matches!(right, Value::Null) {
-            return Ok(false);
-        }
-
-        let (left_num, right_num) = match (left, right) {
-            (Value::Integer(l), Value::Integer(r)) => (Some(*l as f64), Some(*r as f64)),
-            (Value::Float(l), Value::Float(r)) => (Some(*l), Some(*r)),
-            (Value::Integer(l), Value::Float(r)) => (Some(*l as f64), Some(*r)),
-            (Value::Float(l), Value::Integer(r)) => (Some(*l), Some(*r as f64)),
-            _ => (None, None),
-        };
-        if let (Some(l), Some(r)) = (left_num, right_num) {
-            Ok(match op {
-                BinaryOperator::Equal => (l - r).abs() < f64::EPSILON,
-                BinaryOperator::NotEqual => (l - r).abs() >= f64::EPSILON,
-                BinaryOperator::LessThan => l < r,
-                BinaryOperator::LessThanOrEqual => l <= r,
-                BinaryOperator::GreaterThan => l > r,
-                BinaryOperator::GreaterThanOrEqual => l >= r,
-                _ => {
-                    return Err(RustqlError::TypeMismatch(
-                        "Invalid operator for numeric comparison".to_string(),
-                    ));
-                }
-            })
-        } else {
-            match (left, right, op) {
-                (Value::Text(l), Value::Text(r), op) => Ok(match op {
-                    BinaryOperator::Equal => l == r,
-                    BinaryOperator::NotEqual => l != r,
-                    BinaryOperator::LessThan => l < r,
-                    BinaryOperator::LessThanOrEqual => l <= r,
-                    BinaryOperator::GreaterThan => l > r,
-                    BinaryOperator::GreaterThanOrEqual => l >= r,
-                    _ => {
-                        return Err(RustqlError::TypeMismatch(
-                            "Invalid operator for strings".to_string(),
-                        ));
-                    }
-                }),
-                (Value::Boolean(l), Value::Boolean(r), op) => Ok(match op {
-                    BinaryOperator::Equal => l == r,
-                    BinaryOperator::NotEqual => l != r,
-                    _ => {
-                        return Err(RustqlError::TypeMismatch(
-                            "Invalid operator for booleans".to_string(),
-                        ));
-                    }
-                }),
-                (Value::Date(l), Value::Date(r), op) => Ok(match op {
-                    BinaryOperator::Equal => l == r,
-                    BinaryOperator::NotEqual => l != r,
-                    BinaryOperator::LessThan => l < r,
-                    BinaryOperator::LessThanOrEqual => l <= r,
-                    BinaryOperator::GreaterThan => l > r,
-                    BinaryOperator::GreaterThanOrEqual => l >= r,
-                    _ => {
-                        return Err(RustqlError::TypeMismatch(
-                            "Invalid operator for dates".to_string(),
-                        ));
-                    }
-                }),
-                (Value::Time(l), Value::Time(r), op) => Ok(match op {
-                    BinaryOperator::Equal => l == r,
-                    BinaryOperator::NotEqual => l != r,
-                    BinaryOperator::LessThan => l < r,
-                    BinaryOperator::LessThanOrEqual => l <= r,
-                    BinaryOperator::GreaterThan => l > r,
-                    BinaryOperator::GreaterThanOrEqual => l >= r,
-                    _ => {
-                        return Err(RustqlError::TypeMismatch(
-                            "Invalid operator for times".to_string(),
-                        ));
-                    }
-                }),
-                (Value::DateTime(l), Value::DateTime(r), op) => Ok(match op {
-                    BinaryOperator::Equal => l == r,
-                    BinaryOperator::NotEqual => l != r,
-                    BinaryOperator::LessThan => l < r,
-                    BinaryOperator::LessThanOrEqual => l <= r,
-                    BinaryOperator::GreaterThan => l > r,
-                    BinaryOperator::GreaterThanOrEqual => l >= r,
-                    _ => {
-                        return Err(RustqlError::TypeMismatch(
-                            "Invalid operator for datetimes".to_string(),
-                        ));
-                    }
-                }),
-                _ => Err(RustqlError::TypeMismatch(
-                    "Cannot compare incompatible types".to_string(),
-                )),
-            }
-        }
-    }
-
-    fn match_like(&self, text: &str, pattern: &str) -> bool {
-        let text_chars: Vec<char> = text.chars().collect();
-        let pattern_chars: Vec<char> = pattern.chars().collect();
-
-        fn match_pattern(
-            text: &[char],
-            pattern: &[char],
-            text_idx: usize,
-            pattern_idx: usize,
-        ) -> bool {
-            let text_len = text.len();
-            let pattern_len = pattern.len();
-
-            if pattern_idx == pattern_len {
-                return text_idx == text_len;
-            }
-
-            if pattern[pattern_idx] == '%' {
-                if pattern_idx + 1 == pattern_len {
-                    return true;
-                }
-                for i in text_idx..=text_len {
-                    if match_pattern(text, pattern, i, pattern_idx + 1) {
-                        return true;
-                    }
-                }
-                return false;
-            }
-
-            if pattern[pattern_idx] == '_' {
-                if text_idx < text_len {
-                    return match_pattern(text, pattern, text_idx + 1, pattern_idx + 1);
-                }
-                return false;
-            }
-
-            if text_idx < text_len && text[text_idx] == pattern[pattern_idx] {
-                return match_pattern(text, pattern, text_idx + 1, pattern_idx + 1);
-            }
-
-            false
-        }
-
-        match_pattern(&text_chars, &pattern_chars, 0, 0)
-    }
-
-    fn is_between(&self, val: &Value, lower: &Value, upper: &Value) -> bool {
-        match (val, lower, upper) {
-            (Value::Integer(v), Value::Integer(l), Value::Integer(u)) => *v >= *l && *v <= *u,
-            (Value::Float(v), Value::Float(l), Value::Float(u)) => *v >= *l && *v <= *u,
-            (Value::Integer(v), Value::Integer(l), Value::Float(u)) => {
-                *v as f64 >= *l as f64 && *v as f64 <= *u
-            }
-            (Value::Integer(v), Value::Float(l), Value::Integer(u)) => {
-                *v as f64 >= *l && *v as f64 <= *u as f64
-            }
-            (Value::Float(v), Value::Integer(l), Value::Integer(u)) => {
-                *v >= *l as f64 && *v <= *u as f64
-            }
-            (Value::Float(v), Value::Integer(l), Value::Float(u)) => *v >= *l as f64 && *v <= *u,
-            (Value::Float(v), Value::Float(l), Value::Integer(u)) => *v >= *l && *v <= *u as f64,
-            (Value::Integer(v), Value::Float(l), Value::Float(u)) => {
-                *v as f64 >= *l && *v as f64 <= *u
-            }
-            (Value::Text(v), Value::Text(l), Value::Text(u)) => v >= l && v <= u,
-            _ => false,
-        }
+        evaluate_value_expression_with_db(expr, columns, row, Some(self.db))
     }
 
     fn evaluate_join_condition(
@@ -1344,16 +993,6 @@ impl<'a> PlanExecutor<'a> {
                     .unwrap_or(Value::Null)
             })
             .collect()
-    }
-
-    fn compare_values(&self, a: &Value, b: &Value) -> Ordering {
-        match (a, b) {
-            (Value::Integer(i1), Value::Integer(i2)) => i1.cmp(i2),
-            (Value::Float(f1), Value::Float(f2)) => f1.partial_cmp(f2).unwrap_or(Ordering::Equal),
-            (Value::Text(s1), Value::Text(s2)) => s1.cmp(s2),
-            (Value::Boolean(b1), Value::Boolean(b2)) => b1.cmp(b2),
-            _ => Ordering::Equal,
-        }
     }
 
     fn compute_aggregate(
@@ -1506,7 +1145,7 @@ impl<'a> PlanExecutor<'a> {
                     min_val = Some(match min_val {
                         None => val,
                         Some(current) => {
-                            if self.compare_values(&val, &current) == Ordering::Less {
+                            if compare_values_same_type(&val, &current) == Ordering::Less {
                                 val
                             } else {
                                 current
@@ -1531,7 +1170,7 @@ impl<'a> PlanExecutor<'a> {
                     max_val = Some(match max_val {
                         None => val,
                         Some(current) => {
-                            if self.compare_values(&val, &current) == Ordering::Greater {
+                            if compare_values_same_type(&val, &current) == Ordering::Greater {
                                 val
                             } else {
                                 current
@@ -1865,7 +1504,7 @@ impl<'a> PlanExecutor<'a> {
                         input_columns,
                         group_rows,
                     )?;
-                    self.compare_values_for_where(&left_val, op, &right_val)
+                    compare_values(&left_val, op, &right_val)
                 }
             },
             Expression::IsNull { expr, not } => {
@@ -1944,7 +1583,7 @@ impl<'a> PlanExecutor<'a> {
                     BinaryOperator::Plus
                     | BinaryOperator::Minus
                     | BinaryOperator::Multiply
-                    | BinaryOperator::Divide => self.apply_arithmetic(&left_val, &right_val, op),
+                    | BinaryOperator::Divide => apply_arithmetic(&left_val, &right_val, op),
                     _ => Err(RustqlError::Internal(
                         "Only arithmetic operators are supported in HAVING expressions".to_string(),
                     )),
@@ -2134,18 +1773,6 @@ fn find_result_column_index(columns: &[String], reference: &str) -> Option<usize
             columns
                 .iter()
                 .position(|column| column_names_match(column, unqualified))
-        })
-}
-
-fn find_defined_column_index(columns: &[ColumnDefinition], reference: &str) -> Option<usize> {
-    columns
-        .iter()
-        .position(|column| column.name == reference)
-        .or_else(|| {
-            let unqualified = unqualified_column_name(reference);
-            columns
-                .iter()
-                .position(|column| column_names_match(&column.name, unqualified))
         })
 }
 
