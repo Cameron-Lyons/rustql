@@ -630,46 +630,12 @@ impl<'a> CachedBTreeFile<'a> {
         end_key: Option<&Value>,
         root_page_id: u64,
     ) -> Result<Vec<(Value, u64)>, RustqlError> {
-        let mut entries = Vec::new();
-        self.collect_entries(root_page_id, &mut entries)?;
-        entries.sort_by(|a, b| a.0.cmp(&b.0));
-        Ok(entries
-            .into_iter()
-            .filter(|(key, _)| match (start_key, end_key) {
-                (Some(start), Some(end)) => key >= start && key <= end,
-                (Some(start), None) => key >= start,
-                (None, Some(end)) => key <= end,
-                (None, None) => true,
-            })
-            .collect())
-    }
-
-    fn collect_entries(
-        &self,
-        page_id: u64,
-        entries: &mut Vec<(Value, u64)>,
-    ) -> Result<(), RustqlError> {
-        let page = self.read_page(page_id)?;
-
-        match page.header.kind {
-            PageKind::Leaf => {
-                entries.extend(
-                    page.entries
-                        .iter()
-                        .map(|entry| (entry.key.clone(), entry.pointer)),
-                );
-                Ok(())
-            }
-            PageKind::Internal => {
-                for entry in &page.entries {
-                    self.collect_entries(entry.pointer, entries)?;
-                }
-                Ok(())
-            }
-            PageKind::Meta => Err(RustqlError::StorageError(
-                "Cannot scan entries from meta page".to_string(),
-            )),
-        }
+        scan_pages_in_order(
+            |page_id| self.read_page(page_id),
+            start_key,
+            end_key,
+            root_page_id,
+        )
     }
 }
 
@@ -1418,47 +1384,84 @@ impl BTreeFile {
         end_key: Option<&Value>,
         root_page_id: u64,
     ) -> Result<Vec<(Value, u64)>, RustqlError> {
-        let mut entries = Vec::new();
-        self.collect_entries(root_page_id, &mut entries)?;
-        entries.sort_by(|a, b| a.0.cmp(&b.0));
-        Ok(entries
-            .into_iter()
-            .filter(|(key, _)| match (start_key, end_key) {
-                (Some(start), Some(end)) => key >= start && key <= end,
-                (Some(start), None) => key >= start,
-                (None, Some(end)) => key <= end,
-                (None, None) => true,
-            })
-            .collect())
+        scan_pages_in_order(
+            |page_id| self.read_page(page_id),
+            start_key,
+            end_key,
+            root_page_id,
+        )
     }
+}
 
-    #[cfg_attr(not(test), allow(dead_code))]
-    fn collect_entries(
-        &mut self,
-        page_id: u64,
-        entries: &mut Vec<(Value, u64)>,
-    ) -> Result<(), RustqlError> {
-        let page = self.read_page(page_id)?;
+fn scan_pages_in_order<F>(
+    mut read_page: F,
+    start_key: Option<&Value>,
+    end_key: Option<&Value>,
+    root_page_id: u64,
+) -> Result<Vec<(Value, u64)>, RustqlError>
+where
+    F: FnMut(u64) -> Result<BTreePage, RustqlError>,
+{
+    let mut entries = Vec::new();
+    scan_page_in_order_recursive(
+        &mut read_page,
+        root_page_id,
+        start_key,
+        end_key,
+        &mut entries,
+    )?;
+    Ok(entries)
+}
 
-        match page.header.kind {
-            PageKind::Leaf => {
-                entries.extend(
-                    page.entries
-                        .iter()
-                        .map(|entry| (entry.key.clone(), entry.pointer)),
-                );
-                Ok(())
-            }
-            PageKind::Internal => {
-                for entry in &page.entries {
-                    self.collect_entries(entry.pointer, entries)?;
+fn scan_page_in_order_recursive<F>(
+    read_page: &mut F,
+    page_id: u64,
+    start_key: Option<&Value>,
+    end_key: Option<&Value>,
+    entries: &mut Vec<(Value, u64)>,
+) -> Result<(), RustqlError>
+where
+    F: FnMut(u64) -> Result<BTreePage, RustqlError>,
+{
+    let page = read_page(page_id)?;
+
+    match page.header.kind {
+        PageKind::Leaf => {
+            for entry in page.entries {
+                if start_key.is_some_and(|start| &entry.key < start) {
+                    continue;
                 }
-                Ok(())
+                if end_key.is_some_and(|end| &entry.key > end) {
+                    break;
+                }
+                entries.push((entry.key, entry.pointer));
             }
-            PageKind::Meta => Err(RustqlError::StorageError(
-                "Cannot scan entries from meta page".to_string(),
-            )),
+            Ok(())
         }
+        PageKind::Internal => {
+            for (idx, entry) in page.entries.iter().enumerate() {
+                if end_key.is_some_and(|end| &entry.key > end) {
+                    break;
+                }
+
+                let next_min = page.entries.get(idx + 1).map(|next| &next.key);
+                if start_key.is_some_and(|start| next_min.is_some_and(|min| min <= start)) {
+                    continue;
+                }
+
+                scan_page_in_order_recursive(
+                    read_page,
+                    entry.pointer,
+                    start_key,
+                    end_key,
+                    entries,
+                )?;
+            }
+            Ok(())
+        }
+        PageKind::Meta => Err(RustqlError::StorageError(
+            "Cannot scan entries from meta page".to_string(),
+        )),
     }
 }
 
@@ -1647,6 +1650,52 @@ mod tests {
             .expect("Failed to range scan");
 
         assert!(results.len() >= 5, "Range scan should find multiple keys");
+
+        remove_storage_artifacts(&temp_path);
+    }
+
+    #[test]
+    fn btree_range_scan_after_split_stays_ordered() {
+        let temp_path = std::env::temp_dir().join("rustql_btree_range_split_test.dat");
+        remove_storage_artifacts(&temp_path);
+
+        let mut file = BTreeFile::create(&temp_path).expect("Failed to create BTree file");
+
+        let mut meta_page = BTreePage::new(0, PageKind::Meta);
+        meta_page
+            .entries
+            .push(BTreeEntry::new(Value::Text("root".to_string()), 1));
+        meta_page.header.entry_count = meta_page.entries.len() as u16;
+        file.write_page(&meta_page)
+            .expect("Failed to write meta page");
+
+        let mut root_page = BTreePage::new(1, PageKind::Leaf);
+        root_page.header.entry_count = 0;
+        file.write_page(&root_page)
+            .expect("Failed to write root page");
+
+        let mut root_id = 1;
+        for i in 1..=400 {
+            let key = Value::Integer(i);
+            let value_json = serde_json::to_string(&Value::Text(format!("value{}", i))).unwrap();
+            let data_pointer = file
+                .write_data_to_pointer(&value_json)
+                .unwrap_or_else(|_| panic!("Failed to write data for key {}", i));
+            root_id = file
+                .insert(key, data_pointer, root_id)
+                .unwrap_or_else(|_| panic!("Failed to insert key {}", i));
+        }
+
+        let start = Value::Integer(101);
+        let end = Value::Integer(199);
+        let results = file
+            .range_scan(Some(&start), Some(&end), root_id)
+            .expect("Failed to range scan after split");
+
+        assert_eq!(results.len(), 99);
+        assert!(matches!(results.first(), Some((Value::Integer(101), _))));
+        assert!(matches!(results.last(), Some((Value::Integer(199), _))));
+        assert!(results.windows(2).all(|pair| pair[0].0 <= pair[1].0));
 
         remove_storage_artifacts(&temp_path);
     }

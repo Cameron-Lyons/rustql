@@ -1,5 +1,5 @@
 use crate::ast::*;
-use crate::database::{Database, Table};
+use crate::database::{DatabaseCatalog, Table};
 use crate::error::RustqlError;
 use crate::executor::aggregate::format_aggregate_header;
 use crate::executor::ddl::{IndexUsage, find_index_usage};
@@ -121,11 +121,11 @@ pub struct ColumnStats {
 }
 
 pub struct QueryPlanner<'a> {
-    db: &'a Database,
+    db: &'a dyn DatabaseCatalog,
 }
 
 impl<'a> QueryPlanner<'a> {
-    pub fn new(db: &'a Database) -> Self {
+    pub fn new(db: &'a dyn DatabaseCatalog) -> Self {
         QueryPlanner { db }
     }
 
@@ -169,8 +169,7 @@ impl<'a> QueryPlanner<'a> {
             )?
         } else {
             let base_table = db
-                .tables
-                .get(&stmt.from)
+                .get_table(&stmt.from)
                 .ok_or_else(|| RustqlError::TableNotFound(stmt.from.clone()))?;
             let base_stats = self.collect_table_stats(&stmt.from, base_table, db);
             self.plan_table_access(
@@ -248,7 +247,7 @@ impl<'a> QueryPlanner<'a> {
         stats: &TableStats,
         output_label: Option<String>,
         where_clause: Option<&Expression>,
-        db: &Database,
+        db: &dyn DatabaseCatalog,
     ) -> Result<PlanNode, RustqlError> {
         if let Some(where_expr) = where_clause
             && let Some(index_usage) = self.find_best_index(table_name, where_expr, db)
@@ -313,15 +312,14 @@ impl<'a> QueryPlanner<'a> {
         &self,
         left_plan: PlanNode,
         stmt: &SelectStatement,
-        db: &Database,
+        db: &dyn DatabaseCatalog,
         mut remaining_predicates: Vec<Expression>,
     ) -> Result<PlanNode, RustqlError> {
         let mut current_plan = left_plan;
         let base_label = stmt.from_alias.clone().unwrap_or_else(|| stmt.from.clone());
         let mut left_columns = self
             .db
-            .tables
-            .get(&stmt.from)
+            .get_table(&stmt.from)
             .map(|table| self.qualified_column_definitions(&table.columns, &base_label))
             .unwrap_or_default();
 
@@ -349,8 +347,7 @@ impl<'a> QueryPlanner<'a> {
             }
 
             let right_table = db
-                .tables
-                .get(&join.table)
+                .get_table(&join.table)
                 .ok_or_else(|| RustqlError::TableNotFound(join.table.clone()))?;
             let right_label = join
                 .table_alias
@@ -845,19 +842,17 @@ impl<'a> QueryPlanner<'a> {
     fn estimate_index_selectivity(
         &self,
         index_usage: &IndexUsage,
-        db: &Database,
+        db: &dyn DatabaseCatalog,
         stats: &TableStats,
     ) -> usize {
         match index_usage {
             IndexUsage::Equality { index_name, value } => db
-                .indexes
-                .get(index_name)
+                .get_index(index_name)
                 .and_then(|index| index.entries.get(value))
                 .map(|rows| rows.len())
                 .unwrap_or(0),
             IndexUsage::In { index_name, values } => db
-                .indexes
-                .get(index_name)
+                .get_index(index_name)
                 .map(|index| {
                     values
                         .iter()
@@ -869,8 +864,7 @@ impl<'a> QueryPlanner<'a> {
             | IndexUsage::RangeLess { .. }
             | IndexUsage::RangeBetween { .. } => (stats.row_count as f64 * 0.1) as usize,
             IndexUsage::CompositePrefix { index_name, values } => db
-                .composite_indexes
-                .get(index_name)
+                .get_composite_index(index_name)
                 .map(|index| {
                     if values.len() == index.columns.len() {
                         index
@@ -899,14 +893,18 @@ impl<'a> QueryPlanner<'a> {
         }
     }
 
-    fn collect_table_stats(&self, table_name: &str, table: &Table, db: &Database) -> TableStats {
+    fn collect_table_stats(
+        &self,
+        table_name: &str,
+        table: &Table,
+        db: &dyn DatabaseCatalog,
+    ) -> TableStats {
         let row_count = table.rows.len();
         let mut column_stats = HashMap::new();
 
-        let has_index = db.indexes.values().any(|idx| idx.table == table_name)
+        let has_index = db.indexes_iter().any(|idx| idx.table == table_name)
             || db
-                .composite_indexes
-                .values()
+                .composite_indexes_iter()
                 .any(|idx| idx.table == table_name);
 
         for (col_idx, col_def) in table.columns.iter().enumerate() {
@@ -962,7 +960,7 @@ impl<'a> QueryPlanner<'a> {
         &self,
         table_name: &str,
         where_expr: &Expression,
-        db: &Database,
+        db: &dyn DatabaseCatalog,
     ) -> Option<IndexUsage> {
         find_index_usage(db, table_name, where_expr)
     }
@@ -1240,11 +1238,11 @@ impl<'a> QueryPlanner<'a> {
                 .collect()
         } else if stmt.from.is_empty() {
             Vec::new()
-        } else if let Some(table) = self.db.tables.get(&stmt.from) {
+        } else if let Some(table) = self.db.get_table(&stmt.from) {
             table.columns.clone()
         } else if let Some(cte) = stmt.ctes.iter().find(|cte| cte.name == stmt.from) {
             self.infer_select_output_columns(&cte.query)?
-        } else if let Some(view) = self.db.views.get(&stmt.from) {
+        } else if let Some(view) = self.db.get_view(&stmt.from) {
             self.infer_select_output_columns(&self.parse_view_query(&view.query_sql)?)?
         } else {
             return Err(RustqlError::TableNotFound(stmt.from.clone()));
@@ -1253,9 +1251,9 @@ impl<'a> QueryPlanner<'a> {
         for join in &stmt.joins {
             if let Some((subquery, _)) = join.subquery.as_ref() {
                 columns.extend(self.infer_select_output_columns(subquery)?);
-            } else if let Some(table) = self.db.tables.get(&join.table) {
+            } else if let Some(table) = self.db.get_table(&join.table) {
                 columns.extend(table.columns.clone());
-            } else if let Some(view) = self.db.views.get(&join.table) {
+            } else if let Some(view) = self.db.get_view(&join.table) {
                 columns.extend(
                     self.infer_select_output_columns(&self.parse_view_query(&view.query_sql)?)?,
                 );
@@ -1500,18 +1498,24 @@ impl PlanNode {
     }
 }
 
-pub fn explain_query(db: &Database, stmt: &SelectStatement) -> Result<String, RustqlError> {
+pub fn explain_query(
+    db: &dyn DatabaseCatalog,
+    stmt: &SelectStatement,
+) -> Result<String, RustqlError> {
     let planner = QueryPlanner::new(db);
     let plan = planner.plan_select(stmt)?;
     Ok(format!("Query Plan:\n{}", plan))
 }
 
-pub fn plan_query(db: &Database, stmt: &SelectStatement) -> Result<PlanNode, RustqlError> {
+pub fn plan_query(
+    db: &dyn DatabaseCatalog,
+    stmt: &SelectStatement,
+) -> Result<PlanNode, RustqlError> {
     QueryPlanner::new(db).plan_select(stmt)
 }
 
 pub(crate) fn infer_select_output_columns(
-    db: &Database,
+    db: &dyn DatabaseCatalog,
     stmt: &SelectStatement,
 ) -> Result<Vec<ColumnDefinition>, RustqlError> {
     QueryPlanner::new(db).infer_select_output_columns(stmt)

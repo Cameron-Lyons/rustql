@@ -1,10 +1,10 @@
 use crate::ast::*;
-use crate::database::Database;
+use crate::database::DatabaseCatalog;
 use crate::error::RustqlError;
 use std::cmp::Ordering;
 
 pub fn evaluate_expression(
-    db: Option<&Database>,
+    db: Option<&dyn DatabaseCatalog>,
     expr: &Expression,
     columns: &[ColumnDefinition],
     row: &[Value],
@@ -198,14 +198,14 @@ pub fn evaluate_value_expression(
     columns: &[ColumnDefinition],
     row: &[Value],
 ) -> Result<Value, RustqlError> {
-    evaluate_value_expression_with_db(expr, columns, row, None)
+    evaluate_value_expression_with_db(expr, columns, row, None::<&dyn DatabaseCatalog>)
 }
 
 pub fn evaluate_value_expression_with_db(
     expr: &Expression,
     columns: &[ColumnDefinition],
     row: &[Value],
-    db: Option<&Database>,
+    db: Option<&dyn DatabaseCatalog>,
 ) -> Result<Value, RustqlError> {
     match expr {
         Expression::Column(name) => {

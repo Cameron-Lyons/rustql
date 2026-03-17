@@ -1,5 +1,5 @@
 use crate::ast::*;
-use crate::database::{Database, RowId, Table};
+use crate::database::{DatabaseCatalog, RowId, ScopedDatabase};
 use crate::error::RustqlError;
 use crate::executor::expr::{
     apply_arithmetic, compare_values, compare_values_same_type, evaluate_expression,
@@ -17,11 +17,11 @@ pub struct ExecutionResult {
 }
 
 pub struct PlanExecutor<'a> {
-    db: &'a Database,
+    db: &'a dyn DatabaseCatalog,
 }
 
 impl<'a> PlanExecutor<'a> {
-    pub fn new(db: &'a Database) -> Self {
+    pub fn new(db: &'a dyn DatabaseCatalog) -> Self {
         PlanExecutor { db }
     }
 
@@ -160,8 +160,7 @@ impl<'a> PlanExecutor<'a> {
     ) -> Result<ExecutionResult, RustqlError> {
         let table = self
             .db
-            .tables
-            .get(table_name)
+            .get_table(table_name)
             .ok_or_else(|| format!("Table '{}' does not exist", table_name))?;
 
         let mut rows = Vec::new();
@@ -192,8 +191,7 @@ impl<'a> PlanExecutor<'a> {
     ) -> Result<ExecutionResult, RustqlError> {
         let table = self
             .db
-            .tables
-            .get(table_name)
+            .get_table(table_name)
             .ok_or_else(|| format!("Table '{}' does not exist", table_name))?;
 
         let row_ids = if let Some(filter_expr) = filter {
@@ -230,7 +228,7 @@ impl<'a> PlanExecutor<'a> {
     }
 
     fn all_row_ids_for_index(&self, index_name: &str) -> Result<HashSet<RowId>, RustqlError> {
-        if let Some(index) = self.db.indexes.get(index_name) {
+        if let Some(index) = self.db.get_index(index_name) {
             let mut row_ids = HashSet::new();
             for rows in index.entries.values() {
                 row_ids.extend(rows.iter().copied());
@@ -238,7 +236,7 @@ impl<'a> PlanExecutor<'a> {
             return Ok(row_ids);
         }
 
-        if let Some(index) = self.db.composite_indexes.get(index_name) {
+        if let Some(index) = self.db.get_composite_index(index_name) {
             let mut row_ids = HashSet::new();
             for rows in index.entries.values() {
                 row_ids.extend(rows.iter().copied());
@@ -467,15 +465,11 @@ impl<'a> PlanExecutor<'a> {
         joined_columns.extend(right_columns.iter().cloned());
         let temp_table_name = format!("__lateral_outer_{}", alias);
         let rewritten_subquery = lateral_subquery_with_outer_scope(subquery, &temp_table_name);
-        let mut scoped_db = self.db.clone();
+        let mut scoped_db =
+            ScopedDatabase::new(self.db, temp_table_name, outer_scope_columns.clone());
 
         for left_row in &left.rows {
-            update_scoped_outer_row(
-                &mut scoped_db,
-                &temp_table_name,
-                &outer_scope_columns,
-                left_row,
-            );
+            scoped_db.update_temp_row(left_row);
 
             let subquery_result =
                 match execute_select_internal(None, rewritten_subquery.clone(), &scoped_db) {
@@ -1828,32 +1822,6 @@ fn combine_row_with_left_nulls(left_len: usize, right: &[Value]) -> Vec<Value> {
     combined.resize(left_len, Value::Null);
     combined.extend_from_slice(right);
     combined
-}
-
-fn update_scoped_outer_row(
-    db: &mut Database,
-    temp_table_name: &str,
-    outer_scope_columns: &[ColumnDefinition],
-    current_row: &[Value],
-) {
-    if let Some(table) = db.tables.get_mut(temp_table_name) {
-        table.columns = outer_scope_columns.to_vec();
-        table.rows.clear();
-        table.rows.push(current_row.to_vec());
-        table.row_ids.clear();
-        table.row_ids.push(RowId(1));
-        table.next_row_id = 2;
-        table.constraints.clear();
-    } else {
-        db.tables.insert(
-            temp_table_name.to_string(),
-            Table::new(
-                outer_scope_columns.to_vec(),
-                vec![current_row.to_vec()],
-                vec![],
-            ),
-        );
-    }
 }
 
 fn lateral_subquery_with_outer_scope(

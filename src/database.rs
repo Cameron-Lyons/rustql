@@ -313,3 +313,168 @@ impl Database {
         crate::storage::save_database(self)
     }
 }
+
+pub trait DatabaseCatalog {
+    fn get_table(&self, name: &str) -> Option<&Table>;
+    fn get_index(&self, name: &str) -> Option<&Index>;
+    fn get_view(&self, name: &str) -> Option<&View>;
+    fn get_composite_index(&self, name: &str) -> Option<&CompositeIndex>;
+    fn indexes_iter(&self) -> Box<dyn Iterator<Item = &Index> + '_>;
+    fn composite_indexes_iter(&self) -> Box<dyn Iterator<Item = &CompositeIndex> + '_>;
+
+    fn contains_table(&self, name: &str) -> bool {
+        self.get_table(name).is_some()
+    }
+
+    fn contains_view(&self, name: &str) -> bool {
+        self.get_view(name).is_some()
+    }
+}
+
+impl DatabaseCatalog for Database {
+    fn get_table(&self, name: &str) -> Option<&Table> {
+        self.tables.get(name)
+    }
+
+    fn get_index(&self, name: &str) -> Option<&Index> {
+        self.indexes.get(name)
+    }
+
+    fn get_view(&self, name: &str) -> Option<&View> {
+        self.views.get(name)
+    }
+
+    fn get_composite_index(&self, name: &str) -> Option<&CompositeIndex> {
+        self.composite_indexes.get(name)
+    }
+
+    fn indexes_iter(&self) -> Box<dyn Iterator<Item = &Index> + '_> {
+        Box::new(self.indexes.values())
+    }
+
+    fn composite_indexes_iter(&self) -> Box<dyn Iterator<Item = &CompositeIndex> + '_> {
+        Box::new(self.composite_indexes.values())
+    }
+}
+
+impl DatabaseCatalog for std::sync::RwLockReadGuard<'_, Database> {
+    fn get_table(&self, name: &str) -> Option<&Table> {
+        self.tables.get(name)
+    }
+
+    fn get_index(&self, name: &str) -> Option<&Index> {
+        self.indexes.get(name)
+    }
+
+    fn get_view(&self, name: &str) -> Option<&View> {
+        self.views.get(name)
+    }
+
+    fn get_composite_index(&self, name: &str) -> Option<&CompositeIndex> {
+        self.composite_indexes.get(name)
+    }
+
+    fn indexes_iter(&self) -> Box<dyn Iterator<Item = &Index> + '_> {
+        Box::new(self.indexes.values())
+    }
+
+    fn composite_indexes_iter(&self) -> Box<dyn Iterator<Item = &CompositeIndex> + '_> {
+        Box::new(self.composite_indexes.values())
+    }
+}
+
+impl DatabaseCatalog for std::sync::RwLockWriteGuard<'_, Database> {
+    fn get_table(&self, name: &str) -> Option<&Table> {
+        self.tables.get(name)
+    }
+
+    fn get_index(&self, name: &str) -> Option<&Index> {
+        self.indexes.get(name)
+    }
+
+    fn get_view(&self, name: &str) -> Option<&View> {
+        self.views.get(name)
+    }
+
+    fn get_composite_index(&self, name: &str) -> Option<&CompositeIndex> {
+        self.composite_indexes.get(name)
+    }
+
+    fn indexes_iter(&self) -> Box<dyn Iterator<Item = &Index> + '_> {
+        Box::new(self.indexes.values())
+    }
+
+    fn composite_indexes_iter(&self) -> Box<dyn Iterator<Item = &CompositeIndex> + '_> {
+        Box::new(self.composite_indexes.values())
+    }
+}
+
+pub struct ScopedDatabase<'a> {
+    base: &'a dyn DatabaseCatalog,
+    temp_table_name: String,
+    temp_table: Table,
+}
+
+impl<'a> ScopedDatabase<'a> {
+    pub fn new(
+        base: &'a dyn DatabaseCatalog,
+        temp_table_name: String,
+        columns: Vec<ColumnDefinition>,
+    ) -> Self {
+        let temp_table = Table {
+            columns,
+            rows: vec![Vec::new()],
+            row_ids: vec![RowId(1)],
+            next_row_id: 2,
+            constraints: Vec::new(),
+        };
+
+        Self {
+            base,
+            temp_table_name,
+            temp_table,
+        }
+    }
+
+    pub fn update_temp_row(&mut self, row: &[Value]) {
+        if self.temp_table.rows.is_empty() {
+            self.temp_table.rows.push(row.to_vec());
+        } else {
+            self.temp_table.rows[0].clear();
+            self.temp_table.rows[0].extend_from_slice(row);
+        }
+        self.temp_table.row_ids.clear();
+        self.temp_table.row_ids.push(RowId(1));
+        self.temp_table.next_row_id = 2;
+    }
+}
+
+impl DatabaseCatalog for ScopedDatabase<'_> {
+    fn get_table(&self, name: &str) -> Option<&Table> {
+        if name == self.temp_table_name {
+            Some(&self.temp_table)
+        } else {
+            self.base.get_table(name)
+        }
+    }
+
+    fn get_index(&self, name: &str) -> Option<&Index> {
+        self.base.get_index(name)
+    }
+
+    fn get_view(&self, name: &str) -> Option<&View> {
+        self.base.get_view(name)
+    }
+
+    fn get_composite_index(&self, name: &str) -> Option<&CompositeIndex> {
+        self.base.get_composite_index(name)
+    }
+
+    fn indexes_iter(&self) -> Box<dyn Iterator<Item = &Index> + '_> {
+        self.base.indexes_iter()
+    }
+
+    fn composite_indexes_iter(&self) -> Box<dyn Iterator<Item = &CompositeIndex> + '_> {
+        self.base.composite_indexes_iter()
+    }
+}

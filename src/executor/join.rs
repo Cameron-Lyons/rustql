@@ -1,5 +1,5 @@
 use crate::ast::*;
-use crate::database::{Database, Table};
+use crate::database::{DatabaseCatalog, ScopedDatabase, Table};
 use crate::error::RustqlError;
 use std::collections::HashSet;
 
@@ -9,7 +9,7 @@ use super::select::execute_select_internal;
 
 pub fn perform_multiple_joins(
     context: Option<&ExecutionContext>,
-    db: &Database,
+    db: &dyn DatabaseCatalog,
     from_table: &Table,
     from_table_name: &str,
     joins: &[Join],
@@ -29,15 +29,11 @@ pub fn perform_multiple_joins(
                 lateral_outer_scope_columns(&table_names, &table_column_counts, &all_columns);
             let temp_table_name = format!("__lateral_outer_{}", alias);
             let rewritten_subquery = lateral_subquery_with_outer_scope(subquery, &temp_table_name);
-            let mut scoped_db = db.clone();
+            let mut scoped_db =
+                ScopedDatabase::new(db, temp_table_name, outer_scope_columns.clone());
 
             for current_row in &current_rows {
-                update_scoped_outer_row(
-                    &mut scoped_db,
-                    &temp_table_name,
-                    &outer_scope_columns,
-                    current_row,
-                );
+                scoped_db.update_temp_row(current_row);
                 let sub_result =
                     execute_select_internal(None, rewritten_subquery.clone(), &scoped_db);
 
@@ -164,8 +160,7 @@ pub fn perform_multiple_joins(
         }
 
         let join_table = db
-            .tables
-            .get(&join.table)
+            .get_table(&join.table)
             .ok_or_else(|| RustqlError::TableNotFound(join.table.clone()))?;
 
         let join_table_name = join.table.clone();
@@ -195,7 +190,7 @@ pub fn perform_multiple_joins(
                                         let table = if idx == 0 {
                                             from_table
                                         } else {
-                                            db.tables.get(&joins[idx - 1].table).unwrap()
+                                            db.get_table(&joins[idx - 1].table).unwrap()
                                         };
                                         if let Some(col_idx) =
                                             table.columns.iter().position(|c| c.name == col_name)
@@ -420,32 +415,6 @@ fn combine_row_with_left_nulls(left_len: usize, right: &[Value]) -> Vec<Value> {
     combined.resize(left_len, Value::Null);
     combined.extend_from_slice(right);
     combined
-}
-
-fn update_scoped_outer_row(
-    db: &mut Database,
-    temp_table_name: &str,
-    outer_scope_columns: &[ColumnDefinition],
-    current_row: &[Value],
-) {
-    if let Some(table) = db.tables.get_mut(temp_table_name) {
-        table.columns = outer_scope_columns.to_vec();
-        table.rows.clear();
-        table.rows.push(current_row.to_vec());
-        table.row_ids.clear();
-        table.row_ids.push(crate::database::RowId(1));
-        table.next_row_id = 2;
-        table.constraints.clear();
-    } else {
-        db.tables.insert(
-            temp_table_name.to_string(),
-            Table::new(
-                outer_scope_columns.to_vec(),
-                vec![current_row.to_vec()],
-                vec![],
-            ),
-        );
-    }
 }
 
 fn lateral_subquery_with_outer_scope(

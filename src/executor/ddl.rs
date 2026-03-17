@@ -1,5 +1,5 @@
 use crate::ast::*;
-use crate::database::{CompositeIndex, Database, Index, RowId, Table};
+use crate::database::{CompositeIndex, Database, DatabaseCatalog, Index, RowId, Table};
 use crate::engine::{CommandTag, QueryResult};
 use crate::error::RustqlError;
 use crate::wal::WalEntry;
@@ -718,7 +718,11 @@ pub enum IndexUsage {
     },
 }
 
-pub fn find_index_usage(db: &Database, table_name: &str, expr: &Expression) -> Option<IndexUsage> {
+pub fn find_index_usage(
+    db: &dyn DatabaseCatalog,
+    table_name: &str,
+    expr: &Expression,
+) -> Option<IndexUsage> {
     let composite_usage = find_best_composite_index_usage(db, table_name, expr);
     let single_usage = find_single_index_usage(db, table_name, expr, expr);
 
@@ -747,14 +751,14 @@ impl IndexUsage {
 }
 
 fn find_best_composite_index_usage(
-    db: &Database,
+    db: &dyn DatabaseCatalog,
     table_name: &str,
     expr: &Expression,
 ) -> Option<(usize, IndexUsage)> {
     let equality_predicates = extract_equality_predicates(expr);
     let mut best_match: Option<(usize, IndexUsage)> = None;
 
-    for (index_name, index) in &db.composite_indexes {
+    for index in db.composite_indexes_iter() {
         if index.table != table_name || !query_implies_filter(expr, index.filter_expr.as_ref()) {
             continue;
         }
@@ -774,7 +778,7 @@ fn find_best_composite_index_usage(
         }
 
         let usage = IndexUsage::CompositePrefix {
-            index_name: index_name.clone(),
+            index_name: index.name.clone(),
             values: prefix_values,
         };
 
@@ -834,7 +838,7 @@ fn extract_column_equality(expr: &Expression) -> Option<(String, Value)> {
 }
 
 fn find_single_index_usage(
-    db: &Database,
+    db: &dyn DatabaseCatalog,
     table_name: &str,
     expr: &Expression,
     query_expr: &Expression,
@@ -953,14 +957,14 @@ fn find_single_index_usage(
 }
 
 fn find_index_for_column<'a>(
-    db: &'a Database,
+    db: &'a dyn DatabaseCatalog,
     table_name: &str,
     column_name: &str,
     query_expr: &Expression,
 ) -> Option<&'a Index> {
     let normalized_col = normalize_column_name(column_name);
 
-    db.indexes.values().find(|idx| {
+    db.indexes_iter().find(|idx| {
         idx.table == table_name
             && idx.column == normalized_col
             && query_implies_filter(query_expr, idx.filter_expr.as_ref())
@@ -991,7 +995,7 @@ fn get_column_positions(table: &Table, columns: &[String]) -> Result<Vec<usize>,
 }
 
 pub(crate) fn row_matches_index_filter(
-    db: &Database,
+    db: &dyn DatabaseCatalog,
     table: &Table,
     filter_expr: Option<&Expression>,
     row: &[Value],
@@ -1038,7 +1042,7 @@ fn composite_key_for_row(row: &[Value], column_positions: &[usize]) -> Vec<Value
 }
 
 pub fn get_indexed_rows(
-    db: &Database,
+    db: &dyn DatabaseCatalog,
     table: &Table,
     usage: &IndexUsage,
 ) -> Result<HashSet<RowId>, RustqlError> {
@@ -1047,8 +1051,7 @@ pub fn get_indexed_rows(
     match usage {
         IndexUsage::Equality { value, .. } => {
             let index = db
-                .indexes
-                .get(usage.index_name())
+                .get_index(usage.index_name())
                 .ok_or_else(|| "Index not found".to_string())?;
             if let Some(rows) = index.entries.get(value) {
                 row_ids.extend(rows.iter().copied());
@@ -1056,8 +1059,7 @@ pub fn get_indexed_rows(
         }
         IndexUsage::In { values, .. } => {
             let index = db
-                .indexes
-                .get(usage.index_name())
+                .get_index(usage.index_name())
                 .ok_or_else(|| "Index not found".to_string())?;
             for value in values {
                 if let Some(rows) = index.entries.get(value) {
@@ -1069,8 +1071,7 @@ pub fn get_indexed_rows(
             value, inclusive, ..
         } => {
             let index = db
-                .indexes
-                .get(usage.index_name())
+                .get_index(usage.index_name())
                 .ok_or_else(|| "Index not found".to_string())?;
             if *inclusive {
                 for (_, rows) in index.entries.range(value..) {
@@ -1090,8 +1091,7 @@ pub fn get_indexed_rows(
             value, inclusive, ..
         } => {
             let index = db
-                .indexes
-                .get(usage.index_name())
+                .get_index(usage.index_name())
                 .ok_or_else(|| "Index not found".to_string())?;
             if *inclusive {
                 for (_, rows) in index.entries.range(..=value) {
@@ -1105,8 +1105,7 @@ pub fn get_indexed_rows(
         }
         IndexUsage::RangeBetween { lower, upper, .. } => {
             let index = db
-                .indexes
-                .get(usage.index_name())
+                .get_index(usage.index_name())
                 .ok_or_else(|| "Index not found".to_string())?;
             for (_, rows) in index.entries.range(lower..=upper) {
                 row_ids.extend(rows.iter().copied());
@@ -1114,8 +1113,7 @@ pub fn get_indexed_rows(
         }
         IndexUsage::CompositePrefix { values, .. } => {
             let index = db
-                .composite_indexes
-                .get(usage.index_name())
+                .get_composite_index(usage.index_name())
                 .ok_or_else(|| "Index not found".to_string())?;
 
             if values.len() == index.columns.len() {

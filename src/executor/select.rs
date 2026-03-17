@@ -1,5 +1,5 @@
 use crate::ast::*;
-use crate::database::{Database, RowId, Table};
+use crate::database::{Database, DatabaseCatalog, RowId, Table};
 use crate::engine::QueryResult;
 use crate::error::RustqlError;
 use crate::plan_executor::PlanExecutor;
@@ -45,7 +45,7 @@ fn execute_set_operation_result(
     left_stmt: SelectStatement,
     right_stmt: SelectStatement,
     set_op_type: &SetOperation,
-    db: &Database,
+    db: &dyn DatabaseCatalog,
 ) -> Result<SelectResult, RustqlError> {
     let mut left_stmt_internal = left_stmt;
     left_stmt_internal.set_op = None;
@@ -147,7 +147,7 @@ fn execute_set_operation_result(
 }
 
 pub(crate) fn plan_select_for_execution(
-    db: &Database,
+    db: &dyn DatabaseCatalog,
     stmt: &SelectStatement,
 ) -> Result<Option<planner::PlanNode>, RustqlError> {
     if !can_execute_via_plan(db, stmt) {
@@ -157,7 +157,7 @@ pub(crate) fn plan_select_for_execution(
     Ok(Some(planner::plan_query(db, stmt)?))
 }
 
-fn can_execute_via_plan(db: &Database, stmt: &SelectStatement) -> bool {
+fn can_execute_via_plan(db: &dyn DatabaseCatalog, stmt: &SelectStatement) -> bool {
     let has_aggregate_columns = stmt
         .columns
         .iter()
@@ -253,7 +253,7 @@ fn column_supported_by_plan(column: &Column) -> bool {
     }
 }
 
-fn join_supported_by_plan(db: &Database, join: &Join) -> bool {
+fn join_supported_by_plan(db: &dyn DatabaseCatalog, join: &Join) -> bool {
     if join.lateral {
         return join.using_columns.is_none()
             && !matches!(join.join_type, JoinType::Natural)
@@ -593,14 +593,15 @@ impl TempTableScope {
     }
 }
 
-fn select_requires_source_materialization(db: &Database, stmt: &SelectStatement) -> bool {
+fn select_requires_source_materialization(
+    db: &dyn DatabaseCatalog,
+    stmt: &SelectStatement,
+) -> bool {
     stmt.from_values.is_some()
         || stmt.from_subquery.is_some()
         || stmt.joins.iter().any(join_requires_source_materialization)
         || !stmt.ctes.is_empty()
-        || (!stmt.from.is_empty()
-            && !db.tables.contains_key(&stmt.from)
-            && db.views.contains_key(&stmt.from))
+        || (!stmt.from.is_empty() && !db.contains_table(&stmt.from) && db.contains_view(&stmt.from))
 }
 
 pub(crate) fn explain_select(
@@ -735,8 +736,8 @@ fn rewrite_select_sources_for_scope(
     }
 
     if !stmt.from.is_empty()
-        && !db.tables.contains_key(&stmt.from)
-        && let Some(view) = db.views.get(&stmt.from).cloned()
+        && !db.contains_table(&stmt.from)
+        && let Some(view) = db.get_view(&stmt.from).cloned()
     {
         let view_result = execute_view_select_in_db(context, &view.query_sql, db)?;
         temp_scope.insert_or_replace(
@@ -947,7 +948,7 @@ fn value_data_type(value: &Value) -> DataType {
 pub(crate) fn execute_select_internal(
     context: Option<&ExecutionContext>,
     stmt: SelectStatement,
-    db: &Database,
+    db: &dyn DatabaseCatalog,
 ) -> Result<SelectResult, RustqlError> {
     if let Some(plan) = plan_select_for_execution(db, &stmt)? {
         let execution = PlanExecutor::new(db).execute(&plan, &stmt)?;
@@ -1001,14 +1002,12 @@ pub(crate) fn execute_select_internal(
     let mut joined_rows_storage: Option<Vec<Vec<Value>>> = None;
     let all_columns = if stmt.joins.is_empty() {
         let table = db
-            .tables
-            .get(&stmt.from)
+            .get_table(&stmt.from)
             .ok_or_else(|| RustqlError::TableNotFound(stmt.from.clone()))?;
         table.columns.clone()
     } else {
         let main_table = db
-            .tables
-            .get(&stmt.from)
+            .get_table(&stmt.from)
             .ok_or_else(|| RustqlError::TableNotFound(stmt.from.clone()))?;
         let (joined_rows, all_cols) =
             perform_multiple_joins(context, db, main_table, &stmt.from, &stmt.joins)?;
@@ -1032,8 +1031,7 @@ pub(crate) fn execute_select_internal(
         }
     } else {
         let table = db
-            .tables
-            .get(&stmt.from)
+            .get_table(&stmt.from)
             .ok_or_else(|| RustqlError::TableNotFound(stmt.from.clone()))?;
         filtered_rows.reserve(table.rows.len());
 
@@ -1288,7 +1286,7 @@ pub(crate) fn execute_select_internal(
 }
 
 pub fn eval_subquery_values(
-    db: &Database,
+    db: &dyn DatabaseCatalog,
     subquery: &SelectStatement,
 ) -> Result<Vec<Value>, RustqlError> {
     if subquery.columns.len() != 1 {
@@ -1297,8 +1295,7 @@ pub fn eval_subquery_values(
         ));
     }
     let table = db
-        .tables
-        .get(&subquery.from)
+        .get_table(&subquery.from)
         .ok_or_else(|| RustqlError::TableNotFound(subquery.from.clone()))?;
 
     let mut filtered_rows: Vec<&Vec<Value>> = Vec::new();
@@ -1479,7 +1476,7 @@ pub fn eval_subquery_values(
 }
 
 pub fn eval_subquery_exists_with_outer(
-    db: &Database,
+    db: &dyn DatabaseCatalog,
     subquery: &SelectStatement,
     outer_columns: &[ColumnDefinition],
     outer_row: &[Value],
@@ -1489,8 +1486,7 @@ pub fn eval_subquery_exists_with_outer(
     }
 
     let table = db
-        .tables
-        .get(&subquery.from)
+        .get_table(&subquery.from)
         .ok_or_else(|| RustqlError::TableNotFound(subquery.from.clone()))?;
 
     let mut combined_columns: Vec<ColumnDefinition> = outer_columns.to_vec();
@@ -1513,14 +1509,13 @@ pub fn eval_subquery_exists_with_outer(
 }
 
 fn eval_subquery_exists_with_joins(
-    db: &Database,
+    db: &dyn DatabaseCatalog,
     subquery: &SelectStatement,
     outer_columns: &[ColumnDefinition],
     outer_row: &[Value],
 ) -> Result<bool, RustqlError> {
     let main_table = db
-        .tables
-        .get(&subquery.from)
+        .get_table(&subquery.from)
         .ok_or_else(|| RustqlError::TableNotFound(subquery.from.clone()))?;
 
     let (joined_rows, all_subquery_columns) =
@@ -1546,7 +1541,7 @@ fn eval_subquery_exists_with_joins(
 }
 
 pub fn eval_scalar_subquery_with_outer(
-    db: &Database,
+    db: &dyn DatabaseCatalog,
     subquery: &SelectStatement,
     outer_columns: &[ColumnDefinition],
     outer_row: &[Value],
@@ -1559,8 +1554,7 @@ pub fn eval_scalar_subquery_with_outer(
 
     if !subquery.joins.is_empty() {
         let main_table = db
-            .tables
-            .get(&subquery.from)
+            .get_table(&subquery.from)
             .ok_or_else(|| RustqlError::TableNotFound(subquery.from.clone()))?;
 
         let (joined_rows, all_subquery_columns) =
@@ -1690,8 +1684,7 @@ pub fn eval_scalar_subquery_with_outer(
     }
 
     let table = db
-        .tables
-        .get(&subquery.from)
+        .get_table(&subquery.from)
         .ok_or_else(|| RustqlError::TableNotFound(subquery.from.clone()))?;
 
     let mut combined_columns: Vec<ColumnDefinition> = outer_columns.to_vec();
