@@ -2,19 +2,15 @@ use crate::ast::*;
 use crate::database::Table;
 use crate::error::RustqlError;
 use std::cmp::Ordering;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
+use super::SelectResult;
 use super::expr::{
     apply_arithmetic, compare_values_for_sort, evaluate_value_expression, format_value,
 };
 
-fn remember_distinct(seen: &mut Vec<Value>, val: &Value) -> bool {
-    if seen.iter().any(|existing| existing == val) {
-        false
-    } else {
-        seen.push(val.clone());
-        true
-    }
+fn remember_distinct(seen: &mut BTreeSet<Value>, val: &Value) -> bool {
+    seen.insert(val.clone())
 }
 
 pub fn format_aggregate_header(agg: &AggregateFunction) -> String {
@@ -128,7 +124,7 @@ fn compute_aggregate_inner(
                 Ok(Value::Integer(rows.len() as i64))
             } else {
                 let mut count = 0;
-                let mut seen: Vec<Value> = Vec::new();
+                let mut seen: BTreeSet<Value> = BTreeSet::new();
                 for row in rows {
                     let val = evaluate_value_expression(expr, &table.columns, row)?;
                     if matches!(&val, Value::Null) {
@@ -145,7 +141,7 @@ fn compute_aggregate_inner(
         AggregateFunctionType::Sum => {
             let mut sum = 0.0;
             let mut has_value = false;
-            let mut seen: Vec<Value> = Vec::new();
+            let mut seen: BTreeSet<Value> = BTreeSet::new();
             for row in rows {
                 let val = evaluate_value_expression(expr, &table.columns, row)?;
                 if matches!(&val, Value::Null) {
@@ -179,7 +175,7 @@ fn compute_aggregate_inner(
         AggregateFunctionType::Avg => {
             let mut sum = 0.0;
             let mut count = 0;
-            let mut seen: Vec<Value> = Vec::new();
+            let mut seen: BTreeSet<Value> = BTreeSet::new();
             for row in rows {
                 let val = evaluate_value_expression(expr, &table.columns, row)?;
                 if matches!(&val, Value::Null) {
@@ -212,7 +208,7 @@ fn compute_aggregate_inner(
         }
         AggregateFunctionType::Min => {
             let mut min_val: Option<Value> = None;
-            let mut seen: Vec<Value> = Vec::new();
+            let mut seen: BTreeSet<Value> = BTreeSet::new();
             for row in rows {
                 let val = evaluate_value_expression(expr, &table.columns, row)?;
                 if matches!(&val, Value::Null) {
@@ -236,7 +232,7 @@ fn compute_aggregate_inner(
         }
         AggregateFunctionType::Max => {
             let mut max_val: Option<Value> = None;
-            let mut seen: Vec<Value> = Vec::new();
+            let mut seen: BTreeSet<Value> = BTreeSet::new();
             for row in rows {
                 let val = evaluate_value_expression(expr, &table.columns, row)?;
                 if matches!(&val, Value::Null) {
@@ -260,7 +256,7 @@ fn compute_aggregate_inner(
         }
         AggregateFunctionType::Variance => {
             let mut values: Vec<f64> = Vec::new();
-            let mut seen: Vec<Value> = Vec::new();
+            let mut seen: BTreeSet<Value> = BTreeSet::new();
             for row in rows {
                 let val = evaluate_value_expression(expr, &table.columns, row)?;
                 if matches!(&val, Value::Null) {
@@ -289,7 +285,7 @@ fn compute_aggregate_inner(
         }
         AggregateFunctionType::Stddev => {
             let mut values: Vec<f64> = Vec::new();
-            let mut seen: Vec<Value> = Vec::new();
+            let mut seen: BTreeSet<Value> = BTreeSet::new();
             for row in rows {
                 let val = evaluate_value_expression(expr, &table.columns, row)?;
                 if matches!(&val, Value::Null) {
@@ -319,7 +315,7 @@ fn compute_aggregate_inner(
         AggregateFunctionType::GroupConcat => {
             let sep = separator.unwrap_or(",");
             let mut parts: Vec<String> = Vec::new();
-            let mut seen_vals: Vec<Value> = Vec::new();
+            let mut seen_vals: BTreeSet<Value> = BTreeSet::new();
             for row in rows {
                 let val = evaluate_value_expression(expr, &table.columns, row)?;
                 if matches!(&val, Value::Null) {
@@ -404,7 +400,7 @@ fn compute_aggregate_inner(
         }
         AggregateFunctionType::Median => {
             let mut values: Vec<f64> = Vec::new();
-            let mut seen_vals: Vec<Value> = Vec::new();
+            let mut seen_vals: BTreeSet<Value> = BTreeSet::new();
             for row in rows {
                 let val = evaluate_value_expression(expr, &table.columns, row)?;
                 if matches!(&val, Value::Null) {
@@ -435,8 +431,9 @@ fn compute_aggregate_inner(
             }
         }
         AggregateFunctionType::Mode => {
-            let mut counts: Vec<(Value, usize)> = Vec::new();
-            let mut seen_vals: Vec<Value> = Vec::new();
+            let mut counts: BTreeMap<Value, (usize, usize)> = BTreeMap::new();
+            let mut seen_vals: BTreeSet<Value> = BTreeSet::new();
+            let mut seen_order = 0usize;
             for row in rows {
                 let val = evaluate_value_expression(expr, &table.columns, row)?;
                 if matches!(&val, Value::Null) {
@@ -445,22 +442,32 @@ fn compute_aggregate_inner(
                 if distinct && !remember_distinct(&mut seen_vals, &val) {
                     continue;
                 }
-                if let Some(entry) = counts.iter_mut().find(|(v, _)| v == &val) {
-                    entry.1 += 1;
-                } else {
-                    counts.push((val, 1));
-                }
+                let entry = counts.entry(val).or_insert((0, seen_order));
+                entry.0 += 1;
+                seen_order += 1;
             }
             if counts.is_empty() {
                 return Ok(Value::Null);
             }
-            counts.sort_by(|a, b| b.1.cmp(&a.1));
-            Ok(counts[0].0.clone())
+            let mut best: Option<(Value, usize, usize)> = None;
+            for (val, (count, first_seen)) in counts {
+                match best {
+                    None => best = Some((val, count, first_seen)),
+                    Some((_, best_count, best_first_seen))
+                        if count > best_count
+                            || (count == best_count && first_seen < best_first_seen) =>
+                    {
+                        best = Some((val, count, first_seen));
+                    }
+                    _ => {}
+                }
+            }
+            Ok(best.map(|(val, _, _)| val).unwrap_or(Value::Null))
         }
         AggregateFunctionType::PercentileCont => {
             let frac = percentile.unwrap_or(0.5);
             let mut values: Vec<f64> = Vec::new();
-            let mut seen_vals: Vec<Value> = Vec::new();
+            let mut seen_vals: BTreeSet<Value> = BTreeSet::new();
             for row in rows {
                 let val = evaluate_value_expression(expr, &table.columns, row)?;
                 if matches!(&val, Value::Null) {
@@ -502,7 +509,7 @@ fn compute_aggregate_inner(
         AggregateFunctionType::PercentileDisc => {
             let frac = percentile.unwrap_or(0.5);
             let mut values: Vec<Value> = Vec::new();
-            let mut seen_vals: Vec<Value> = Vec::new();
+            let mut seen_vals: BTreeSet<Value> = BTreeSet::new();
             for row in rows {
                 let val = evaluate_value_expression(expr, &table.columns, row)?;
                 if matches!(&val, Value::Null) {
@@ -600,33 +607,33 @@ pub fn execute_select_with_aggregates(
     table: &Table,
     rows: Vec<&Vec<Value>>,
 ) -> Result<String, RustqlError> {
-    let mut result = String::new();
-    for col in &stmt.columns {
-        match col {
-            Column::Function(agg) => {
-                let name = format_aggregate_header(agg);
-                result.push_str(&format!("{}\t", name));
-            }
-            Column::Named { name, alias } => {
-                let header = alias.clone().unwrap_or_else(|| name.clone());
-                result.push_str(&format!("{}\t", header));
-            }
-            Column::Expression { alias, .. } => {
-                let header = alias.clone().unwrap_or_else(|| "<expression>".to_string());
-                result.push_str(&format!("{}\t", header));
-            }
-            _ => {}
-        }
-    }
-    result.push('\n');
-    result.push_str(&"-".repeat(40));
-    result.push('\n');
+    let result = execute_select_with_aggregates_result(stmt, table, rows)?;
+    Ok(format_result_table(&result))
+}
 
+pub(crate) fn execute_select_with_aggregates_result(
+    stmt: SelectStatement,
+    table: &Table,
+    rows: Vec<&Vec<Value>>,
+) -> Result<SelectResult, RustqlError> {
+    let headers: Vec<String> = stmt
+        .columns
+        .iter()
+        .filter_map(|col| match col {
+            Column::Function(agg) => Some(format_aggregate_header(agg)),
+            Column::Named { name, alias } => Some(alias.clone().unwrap_or_else(|| name.clone())),
+            Column::Expression { alias, .. } => {
+                Some(alias.clone().unwrap_or_else(|| "<expression>".to_string()))
+            }
+            _ => None,
+        })
+        .collect();
+
+    let mut projected = Vec::new();
     for col in &stmt.columns {
         match col {
             Column::Function(agg) => {
-                let value = compute_aggregate_filtered(agg, table, &rows)?;
-                result.push_str(&format!("{}\t", format_value(&value)));
+                projected.push(compute_aggregate_filtered(agg, table, &rows)?);
             }
             _ => {
                 return Err(RustqlError::Internal(
@@ -635,8 +642,11 @@ pub fn execute_select_with_aggregates(
             }
         }
     }
-    result.push('\n');
-    Ok(result)
+
+    Ok(SelectResult {
+        headers,
+        rows: vec![projected],
+    })
 }
 
 pub fn execute_select_with_grouping(
@@ -644,18 +654,27 @@ pub fn execute_select_with_grouping(
     table: &Table,
     rows: Vec<&Vec<Value>>,
 ) -> Result<String, RustqlError> {
+    let result = execute_select_with_grouping_result(stmt, table, rows)?;
+    Ok(format_result_table(&result))
+}
+
+pub(crate) fn execute_select_with_grouping_result(
+    stmt: SelectStatement,
+    table: &Table,
+    rows: Vec<&Vec<Value>>,
+) -> Result<SelectResult, RustqlError> {
     let raw_group_by = stmt.group_by.clone().unwrap();
 
     match &raw_group_by {
         GroupByClause::GroupingSets(sets) => {
-            return execute_multi_grouping_sets(stmt, table, rows, sets);
+            return execute_multi_grouping_sets_result(stmt, table, rows, sets);
         }
         GroupByClause::Rollup(exprs) => {
             let mut sets: Vec<Vec<Expression>> = Vec::new();
             for i in (0..=exprs.len()).rev() {
                 sets.push(exprs[..i].to_vec());
             }
-            return execute_multi_grouping_sets(stmt, table, rows, &sets);
+            return execute_multi_grouping_sets_result(stmt, table, rows, &sets);
         }
         GroupByClause::Cube(exprs) => {
             let n = exprs.len();
@@ -669,7 +688,7 @@ pub fn execute_select_with_grouping(
                 }
                 sets.push(set);
             }
-            return execute_multi_grouping_sets(stmt, table, rows, &sets);
+            return execute_multi_grouping_sets_result(stmt, table, rows, &sets);
         }
         GroupByClause::Simple(_) => {}
     }
@@ -738,13 +757,7 @@ pub fn execute_select_with_grouping(
         }
     }
 
-    let mut result = String::new();
-    for (header, _) in &column_specs {
-        result.push_str(&format!("{}\t", header));
-    }
-    result.push('\n');
-    result.push_str(&"-".repeat(40));
-    result.push('\n');
+    let headers: Vec<String> = column_specs.iter().map(|(h, _)| h.clone()).collect();
 
     let mut grouped_outputs: Vec<(Vec<Value>, Vec<Value>)> = Vec::new();
 
@@ -834,6 +847,7 @@ pub fn execute_select_with_grouping(
     let mut seen: BTreeSet<Vec<Value>> = BTreeSet::new();
     let mut skipped = 0usize;
     let mut emitted = 0usize;
+    let mut output_rows: Vec<Vec<Value>> = Vec::new();
 
     for (row_values, _) in grouped_outputs {
         if stmt.distinct && !seen.insert(row_values.clone()) {
@@ -846,14 +860,14 @@ pub fn execute_select_with_grouping(
         if emitted >= limit {
             break;
         }
-        for val in &row_values {
-            result.push_str(&format!("{}\t", format_value(val)));
-        }
-        result.push('\n');
+        output_rows.push(row_values);
         emitted += 1;
     }
 
-    Ok(result)
+    Ok(SelectResult {
+        headers,
+        rows: output_rows,
+    })
 }
 
 pub fn evaluate_group_order_expression(
@@ -1644,12 +1658,12 @@ pub fn evaluate_window_functions(
     Ok(())
 }
 
-fn execute_multi_grouping_sets(
+fn execute_multi_grouping_sets_result(
     stmt: SelectStatement,
     table: &Table,
     rows: Vec<&Vec<Value>>,
     sets: &[Vec<Expression>],
-) -> Result<String, RustqlError> {
+) -> Result<SelectResult, RustqlError> {
     let all_gb_exprs: Vec<Expression> = {
         let mut all = Vec::new();
         for set in sets {
@@ -1706,13 +1720,7 @@ fn execute_multi_grouping_sets(
         }
     }
 
-    let mut result = String::new();
-    for (header, _) in &column_specs {
-        result.push_str(&format!("{}\t", header));
-    }
-    result.push('\n');
-    result.push_str(&"-".repeat(40));
-    result.push('\n');
+    let headers: Vec<String> = column_specs.iter().map(|(h, _)| h.clone()).collect();
 
     let mut all_output_rows: Vec<Vec<Value>> = Vec::new();
 
@@ -1842,6 +1850,7 @@ fn execute_multi_grouping_sets(
 
     let mut emitted = 0usize;
     let mut skipped = 0usize;
+    let mut output_rows: Vec<Vec<Value>> = Vec::new();
     for row_values in all_output_rows {
         if skipped < offset {
             skipped += 1;
@@ -1850,12 +1859,38 @@ fn execute_multi_grouping_sets(
         if emitted >= limit {
             break;
         }
-        for val in &row_values {
-            result.push_str(&format!("{}\t", format_value(val)));
-        }
-        result.push('\n');
+        output_rows.push(row_values);
         emitted += 1;
     }
 
-    Ok(result)
+    Ok(SelectResult {
+        headers,
+        rows: output_rows,
+    })
+}
+
+fn format_result_table(result: &SelectResult) -> String {
+    let mut output = String::new();
+
+    for (idx, header) in result.headers.iter().enumerate() {
+        if idx > 0 {
+            output.push('\t');
+        }
+        output.push_str(header);
+    }
+    output.push('\n');
+    output.push_str(&"-".repeat(40));
+    output.push('\n');
+
+    for row in &result.rows {
+        for (idx, val) in row.iter().enumerate() {
+            if idx > 0 {
+                output.push('\t');
+            }
+            output.push_str(&format_value(val));
+        }
+        output.push('\n');
+    }
+
+    output
 }

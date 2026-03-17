@@ -1,9 +1,10 @@
 use crate::ast::*;
-use crate::database::Database;
+use crate::database::{Database, RowId, Table};
 use crate::error::RustqlError;
+use crate::executor::select::execute_select_internal;
 use crate::planner::PlanNode;
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 #[derive(Debug)]
 pub struct ExecutionResult {
@@ -39,15 +40,25 @@ impl<'a> PlanExecutor<'a> {
 
     fn execute_plan_node(&self, plan: &PlanNode) -> Result<ExecutionResult, RustqlError> {
         match plan {
-            PlanNode::SeqScan { table, filter, .. } => {
-                self.execute_seq_scan(table, filter.as_ref())
-            }
+            PlanNode::SeqScan {
+                table,
+                output_label,
+                filter,
+                ..
+            } => self.execute_seq_scan(table, output_label.as_deref(), filter.as_ref()),
             PlanNode::IndexScan {
                 table,
                 index,
+                output_label,
                 filter,
                 ..
-            } => self.execute_index_scan(table, index, filter.as_ref()),
+            } => self.execute_index_scan(table, index, output_label.as_deref(), filter.as_ref()),
+            PlanNode::FunctionScan {
+                function,
+                output_label,
+                filter,
+                ..
+            } => self.execute_function_scan(function, output_label.as_deref(), filter.as_ref()),
             PlanNode::Filter {
                 input, condition, ..
             } => {
@@ -57,12 +68,13 @@ impl<'a> PlanExecutor<'a> {
             PlanNode::NestedLoopJoin {
                 left,
                 right,
+                join_type,
                 condition,
                 ..
             } => {
                 let left_result = self.execute_plan_node(left)?;
                 let right_result = self.execute_plan_node(right)?;
-                self.execute_nested_loop_join(left_result, right_result, condition)
+                self.execute_nested_loop_join(left_result, right_result, join_type, condition)
             }
             PlanNode::HashJoin {
                 left,
@@ -74,30 +86,64 @@ impl<'a> PlanExecutor<'a> {
                 let right_result = self.execute_plan_node(right)?;
                 self.execute_hash_join(left_result, right_result, condition)
             }
+            PlanNode::LateralJoin {
+                left,
+                subquery,
+                alias,
+                right_columns,
+                join_type,
+                condition,
+                ..
+            } => {
+                let left_result = self.execute_plan_node(left)?;
+                self.execute_lateral_join(
+                    left_result,
+                    subquery,
+                    alias,
+                    right_columns,
+                    join_type,
+                    condition,
+                )
+            }
             PlanNode::Sort {
                 input, order_by, ..
             } => {
                 let input_result = self.execute_plan_node(input)?;
                 self.execute_sort(input_result, order_by)
             }
+            PlanNode::DistinctOn {
+                input, distinct_on, ..
+            } => {
+                let input_result = self.execute_plan_node(input)?;
+                self.execute_distinct_on(input_result, distinct_on)
+            }
             PlanNode::Limit {
                 input,
                 limit,
                 offset,
+                with_ties,
+                order_by,
                 ..
             } => {
                 let input_result = self.execute_plan_node(input)?;
-                self.execute_limit(input_result, *limit, *offset)
+                self.execute_limit(input_result, *limit, *offset, *with_ties, order_by)
             }
             PlanNode::Aggregate {
                 input,
                 group_by,
+                grouping_sets,
                 aggregates,
                 having,
                 ..
             } => {
                 let input_result = self.execute_plan_node(input)?;
-                self.execute_aggregate(input_result, group_by, aggregates, having.as_ref())
+                self.execute_aggregate(
+                    input_result,
+                    group_by,
+                    grouping_sets.as_deref(),
+                    aggregates,
+                    having.as_ref(),
+                )
             }
         }
     }
@@ -105,6 +151,7 @@ impl<'a> PlanExecutor<'a> {
     fn execute_seq_scan(
         &self,
         table_name: &str,
+        output_label: Option<&str>,
         filter: Option<&Expression>,
     ) -> Result<ExecutionResult, RustqlError> {
         let table = self
@@ -127,7 +174,7 @@ impl<'a> PlanExecutor<'a> {
             }
         }
 
-        let columns: Vec<String> = table.columns.iter().map(|c| c.name.clone()).collect();
+        let columns = qualify_column_names(&table.columns, output_label);
 
         Ok(ExecutionResult { columns, rows })
     }
@@ -136,6 +183,7 @@ impl<'a> PlanExecutor<'a> {
         &self,
         table_name: &str,
         index_name: &str,
+        output_label: Option<&str>,
         filter: Option<&Expression>,
     ) -> Result<ExecutionResult, RustqlError> {
         let table = self
@@ -144,22 +192,22 @@ impl<'a> PlanExecutor<'a> {
             .get(table_name)
             .ok_or_else(|| format!("Table '{}' does not exist", table_name))?;
 
-        let row_indices = if let Some(filter_expr) = filter
-            && let Some(index_usage) =
+        let row_ids = if let Some(filter_expr) = filter {
+            if let Some(index_usage) =
                 crate::executor::ddl::find_index_usage(self.db, table_name, filter_expr)
-            && index_usage.index_name() == index_name
-        {
-            crate::executor::ddl::get_indexed_rows(self.db, table, &index_usage)?
+                    .filter(|usage| usage.index_name() == index_name)
+            {
+                crate::executor::ddl::get_indexed_rows(self.db, table, &index_usage)?
+            } else {
+                self.all_row_ids_for_index(index_name)?
+            }
         } else {
-            collect_index_rows(self.db, index_name)
-                .ok_or_else(|| format!("Index '{}' does not exist", index_name))?
+            self.all_row_ids_for_index(index_name)?
         };
 
         let mut rows = Vec::new();
-        for &row_idx in &row_indices {
-            if row_idx < table.rows.len() {
-                let row = &table.rows[row_idx];
-
+        for row_id in row_ids {
+            if let Some(row) = table.row_by_id(row_id) {
                 let include = if let Some(filter_expr) = filter {
                     self.evaluate_expression(filter_expr, &table.columns, row)?
                 } else {
@@ -172,9 +220,151 @@ impl<'a> PlanExecutor<'a> {
             }
         }
 
-        let columns: Vec<String> = table.columns.iter().map(|c| c.name.clone()).collect();
+        let columns = qualify_column_names(&table.columns, output_label);
 
         Ok(ExecutionResult { columns, rows })
+    }
+
+    fn all_row_ids_for_index(&self, index_name: &str) -> Result<HashSet<RowId>, RustqlError> {
+        if let Some(index) = self.db.indexes.get(index_name) {
+            let mut row_ids = HashSet::new();
+            for rows in index.entries.values() {
+                row_ids.extend(rows.iter().copied());
+            }
+            return Ok(row_ids);
+        }
+
+        if let Some(index) = self.db.composite_indexes.get(index_name) {
+            let mut row_ids = HashSet::new();
+            for rows in index.entries.values() {
+                row_ids.extend(rows.iter().copied());
+            }
+            return Ok(row_ids);
+        }
+
+        Err(RustqlError::Internal(format!(
+            "Index '{}' does not exist",
+            index_name
+        )))
+    }
+
+    fn execute_function_scan(
+        &self,
+        function: &TableFunction,
+        output_label: Option<&str>,
+        filter: Option<&Expression>,
+    ) -> Result<ExecutionResult, RustqlError> {
+        match function.name.as_str() {
+            "generate_series" => {
+                let empty_columns: Vec<ColumnDefinition> = Vec::new();
+                let empty_row: Vec<Value> = Vec::new();
+
+                let start = match self.evaluate_value_expression(
+                    &function.args[0],
+                    &empty_columns,
+                    &empty_row,
+                )? {
+                    Value::Integer(value) => value,
+                    _ => {
+                        return Err(RustqlError::TypeMismatch(
+                            "GENERATE_SERIES arguments must be integers".to_string(),
+                        ));
+                    }
+                };
+                let stop = match self.evaluate_value_expression(
+                    &function.args[1],
+                    &empty_columns,
+                    &empty_row,
+                )? {
+                    Value::Integer(value) => value,
+                    _ => {
+                        return Err(RustqlError::TypeMismatch(
+                            "GENERATE_SERIES arguments must be integers".to_string(),
+                        ));
+                    }
+                };
+                let step = if function.args.len() > 2 {
+                    match self.evaluate_value_expression(
+                        &function.args[2],
+                        &empty_columns,
+                        &empty_row,
+                    )? {
+                        Value::Integer(value) => value,
+                        _ => {
+                            return Err(RustqlError::TypeMismatch(
+                                "GENERATE_SERIES step must be an integer".to_string(),
+                            ));
+                        }
+                    }
+                } else if start <= stop {
+                    1
+                } else {
+                    -1
+                };
+
+                if step == 0 {
+                    return Err(RustqlError::Internal(
+                        "GENERATE_SERIES step cannot be zero".to_string(),
+                    ));
+                }
+
+                let column_name = qualified_column_name(
+                    output_label,
+                    function.alias.as_deref().unwrap_or("generate_series"),
+                );
+                let columns = vec![ColumnDefinition {
+                    name: column_name.clone(),
+                    data_type: DataType::Integer,
+                    nullable: false,
+                    primary_key: false,
+                    unique: false,
+                    default_value: None,
+                    foreign_key: None,
+                    check: None,
+                    auto_increment: false,
+                    generated: None,
+                }];
+
+                let mut rows = Vec::new();
+                let mut current = start;
+                if step > 0 {
+                    while current <= stop {
+                        let row = vec![Value::Integer(current)];
+                        let include = if let Some(filter_expr) = filter {
+                            self.evaluate_expression(filter_expr, &columns, &row)?
+                        } else {
+                            true
+                        };
+                        if include {
+                            rows.push(row);
+                        }
+                        current += step;
+                    }
+                } else {
+                    while current >= stop {
+                        let row = vec![Value::Integer(current)];
+                        let include = if let Some(filter_expr) = filter {
+                            self.evaluate_expression(filter_expr, &columns, &row)?
+                        } else {
+                            true
+                        };
+                        if include {
+                            rows.push(row);
+                        }
+                        current += step;
+                    }
+                }
+
+                Ok(ExecutionResult {
+                    columns: vec![column_name],
+                    rows,
+                })
+            }
+            other => Err(RustqlError::Internal(format!(
+                "Unsupported table function in plan executor: {}",
+                other
+            ))),
+        }
     }
 
     fn execute_filter(
@@ -218,23 +408,131 @@ impl<'a> PlanExecutor<'a> {
         &self,
         left: ExecutionResult,
         right: ExecutionResult,
+        join_type: &JoinType,
         condition: &Expression,
     ) -> Result<ExecutionResult, RustqlError> {
         let mut joined_rows = Vec::new();
         let mut joined_columns = left.columns.clone();
-        joined_columns.extend(right.columns.iter().map(|c| format!("{}.{}", "right", c)));
+        joined_columns.extend(right.columns.clone());
+        let mut matched_right = vec![false; right.rows.len()];
 
         for left_row in &left.rows {
-            for right_row in &right.rows {
+            let mut has_match = false;
+            for (right_idx, right_row) in right.rows.iter().enumerate() {
                 let combined_row: Vec<Value> =
                     left_row.iter().chain(right_row.iter()).cloned().collect();
 
-                let include =
-                    self.evaluate_join_condition(condition, &left, &right, left_row, right_row)?;
+                let include = if matches!(join_type, JoinType::Cross) {
+                    true
+                } else {
+                    self.evaluate_join_condition(
+                        condition,
+                        &left.columns,
+                        &right.columns,
+                        left_row,
+                        right_row,
+                    )?
+                };
 
                 if include {
                     joined_rows.push(combined_row);
+                    has_match = true;
+                    matched_right[right_idx] = true;
                 }
+            }
+
+            if matches!(
+                join_type,
+                JoinType::Left | JoinType::Full | JoinType::Natural
+            ) && !has_match
+            {
+                let mut combined_row = left_row.clone();
+                combined_row.extend(vec![Value::Null; right.columns.len()]);
+                joined_rows.push(combined_row);
+            }
+        }
+
+        if matches!(join_type, JoinType::Right | JoinType::Full) {
+            for (right_idx, right_row) in right.rows.iter().enumerate() {
+                if !matched_right[right_idx] {
+                    let mut combined_row = vec![Value::Null; left.columns.len()];
+                    combined_row.extend(right_row.clone());
+                    joined_rows.push(combined_row);
+                }
+            }
+        }
+
+        Ok(ExecutionResult {
+            columns: joined_columns,
+            rows: joined_rows,
+        })
+    }
+
+    fn execute_lateral_join(
+        &self,
+        left: ExecutionResult,
+        subquery: &SelectStatement,
+        alias: &str,
+        right_columns: &[String],
+        join_type: &JoinType,
+        condition: &Expression,
+    ) -> Result<ExecutionResult, RustqlError> {
+        let outer_scope_columns = column_definitions_from_names(&left.columns);
+        let mut joined_rows = Vec::new();
+        let mut joined_columns = left.columns.clone();
+        joined_columns.extend(right_columns.iter().cloned());
+
+        for left_row in &left.rows {
+            let temp_table_name = format!("__lateral_outer_{}", alias);
+            let rewritten_subquery = lateral_subquery_with_outer_scope(subquery, &temp_table_name);
+            let mut scoped_db = self.db.clone();
+            scoped_db.tables.insert(
+                temp_table_name,
+                Table::new(outer_scope_columns.clone(), vec![left_row.clone()], vec![]),
+            );
+
+            let subquery_result =
+                match execute_select_internal(None, rewritten_subquery, &scoped_db) {
+                    Ok(result) => result,
+                    Err(err) => {
+                        if matches!(join_type, JoinType::Left | JoinType::Full) {
+                            let mut combined_row = left_row.clone();
+                            combined_row.extend(vec![Value::Null; right_columns.len()]);
+                            joined_rows.push(combined_row);
+                            continue;
+                        }
+                        return Err(err);
+                    }
+                };
+
+            if subquery_result.headers.len() != right_columns.len() {
+                return Err(RustqlError::Internal(
+                    "LATERAL subquery output shape changed during execution".to_string(),
+                ));
+            }
+
+            let mut has_match = false;
+            for right_row in &subquery_result.rows {
+                let include = self.evaluate_join_condition(
+                    condition,
+                    &left.columns,
+                    right_columns,
+                    left_row,
+                    right_row,
+                )?;
+
+                if include {
+                    let mut combined_row = left_row.clone();
+                    combined_row.extend(right_row.clone());
+                    joined_rows.push(combined_row);
+                    has_match = true;
+                }
+            }
+
+            if matches!(join_type, JoinType::Left | JoinType::Full) && !has_match {
+                let mut combined_row = left_row.clone();
+                combined_row.extend(vec![Value::Null; right_columns.len()]);
+                joined_rows.push(combined_row);
             }
         }
 
@@ -269,7 +567,7 @@ impl<'a> PlanExecutor<'a> {
 
         let mut joined_rows = Vec::new();
         let mut joined_columns = left.columns.clone();
-        joined_columns.extend(right.columns.iter().map(|c| format!("{}.{}", "right", c)));
+        joined_columns.extend(right.columns.clone());
 
         for probe_row in &probe.rows {
             if probe_key_idx < probe_row.len() {
@@ -327,6 +625,8 @@ impl<'a> PlanExecutor<'a> {
         input: ExecutionResult,
         limit: usize,
         offset: usize,
+        with_ties: bool,
+        order_by: &[OrderByExpr],
     ) -> Result<ExecutionResult, RustqlError> {
         let mut rows = input.rows;
 
@@ -337,7 +637,66 @@ impl<'a> PlanExecutor<'a> {
         }
 
         if rows.len() > limit {
-            rows.truncate(limit);
+            let limit_with_ties = if with_ties && !order_by.is_empty() && limit > 0 {
+                let boundary_values =
+                    self.extract_order_values(order_by, &input.columns, &rows[limit - 1]);
+                let mut extended_limit = limit;
+                while extended_limit < rows.len()
+                    && self.extract_order_values(order_by, &input.columns, &rows[extended_limit])
+                        == boundary_values
+                {
+                    extended_limit += 1;
+                }
+                extended_limit
+            } else {
+                limit
+            };
+
+            rows.truncate(limit_with_ties);
+        }
+
+        Ok(ExecutionResult {
+            columns: input.columns,
+            rows,
+        })
+    }
+
+    fn execute_distinct_on(
+        &self,
+        input: ExecutionResult,
+        distinct_on: &[Expression],
+    ) -> Result<ExecutionResult, RustqlError> {
+        let column_defs: Vec<ColumnDefinition> = input
+            .columns
+            .iter()
+            .map(|name| ColumnDefinition {
+                name: name.clone(),
+                data_type: DataType::Text,
+                nullable: true,
+                primary_key: false,
+                unique: false,
+                default_value: None,
+                foreign_key: None,
+                check: None,
+                auto_increment: false,
+                generated: None,
+            })
+            .collect();
+
+        let mut seen = BTreeSet::new();
+        let mut rows = Vec::new();
+
+        for row in input.rows {
+            let key: Vec<Value> = distinct_on
+                .iter()
+                .map(|expr| {
+                    self.evaluate_distinct_on_value(expr, &input.columns, &column_defs, &row)
+                })
+                .collect::<Result<_, _>>()?;
+
+            if seen.insert(key) {
+                rows.push(row);
+            }
         }
 
         Ok(ExecutionResult {
@@ -350,6 +709,7 @@ impl<'a> PlanExecutor<'a> {
         &self,
         input: ExecutionResult,
         group_by: &[Expression],
+        grouping_sets: Option<&[Vec<Expression>]>,
         aggregates: &[AggregateFunction],
         having: Option<&Expression>,
     ) -> Result<ExecutionResult, RustqlError> {
@@ -377,89 +737,132 @@ impl<'a> PlanExecutor<'a> {
                 _ => format!("{:?}", expr),
             })
             .collect();
+        let aggregate_names: Vec<String> = aggregates
+            .iter()
+            .map(|agg| format!("{:?}", agg.function))
+            .collect();
 
-        let mut groups: BTreeMap<Vec<Value>, Vec<Vec<Value>>> = BTreeMap::new();
-        for row in &input.rows {
-            let key: Vec<Value> = group_by
-                .iter()
-                .map(|expr| {
-                    self.evaluate_value_expression(expr, &column_defs, row)
-                        .unwrap_or(Value::Null)
-                })
-                .collect();
-            groups.entry(key).or_default().push(row.clone());
-        }
+        let result_column_defs: Vec<ColumnDefinition> = group_by_names
+            .iter()
+            .chain(aggregate_names.iter())
+            .map(|name| ColumnDefinition {
+                name: name.clone(),
+                data_type: DataType::Text,
+                nullable: true,
+                primary_key: false,
+                unique: false,
+                default_value: None,
+                foreign_key: None,
+                check: None,
+                auto_increment: false,
+                generated: None,
+            })
+            .collect();
 
         let mut result_rows = Vec::new();
-        for (group_key, group_rows) in groups {
-            let mut result_row = group_key.clone();
+        if let Some(grouping_sets) = grouping_sets {
+            for set in grouping_sets {
+                let mut groups: BTreeMap<Vec<Value>, Vec<Vec<Value>>> = BTreeMap::new();
+                for row in &input.rows {
+                    let key: Vec<Value> = set
+                        .iter()
+                        .map(|expr| {
+                            self.evaluate_value_expression(expr, &column_defs, row)
+                                .unwrap_or(Value::Null)
+                        })
+                        .collect();
+                    groups.entry(key).or_default().push(row.clone());
+                }
 
-            for agg in aggregates {
-                let agg_value = self.compute_aggregate(agg, &group_rows, &input.columns)?;
-                result_row.push(agg_value);
+                if groups.is_empty() && set.is_empty() {
+                    groups.insert(Vec::new(), Vec::new());
+                }
+
+                for group_rows in groups.into_values() {
+                    let mut result_row = Vec::with_capacity(group_by.len() + aggregates.len());
+
+                    for group_expr in group_by {
+                        if set.iter().any(|active_expr| active_expr == group_expr) {
+                            let value = group_rows
+                                .first()
+                                .map(|row| {
+                                    self.evaluate_value_expression(group_expr, &column_defs, row)
+                                })
+                                .transpose()?
+                                .unwrap_or(Value::Null);
+                            result_row.push(value);
+                        } else {
+                            result_row.push(Value::Null);
+                        }
+                    }
+
+                    for agg in aggregates {
+                        let agg_value = self.compute_aggregate(agg, &group_rows, &input.columns)?;
+                        result_row.push(agg_value);
+                    }
+
+                    if let Some(having_expr) = having {
+                        let include = self.evaluate_having(
+                            having_expr,
+                            &result_column_defs,
+                            &result_row,
+                            &column_defs,
+                            &group_rows,
+                        )?;
+
+                        if !include {
+                            continue;
+                        }
+                    }
+
+                    result_rows.push(result_row);
+                }
+            }
+        } else {
+            let mut groups: BTreeMap<Vec<Value>, Vec<Vec<Value>>> = BTreeMap::new();
+            for row in &input.rows {
+                let key: Vec<Value> = group_by
+                    .iter()
+                    .map(|expr| {
+                        self.evaluate_value_expression(expr, &column_defs, row)
+                            .unwrap_or(Value::Null)
+                    })
+                    .collect();
+                groups.entry(key).or_default().push(row.clone());
             }
 
-            if let Some(having_expr) = having {
-                let mut result_columns: Vec<String> = group_by_names.clone();
+            if groups.is_empty() && group_by.is_empty() {
+                groups.insert(Vec::new(), Vec::new());
+            }
+
+            for (group_key, group_rows) in groups {
+                let mut result_row = group_key.clone();
+
                 for agg in aggregates {
-                    result_columns.push(format!("{:?}", agg.function));
+                    let agg_value = self.compute_aggregate(agg, &group_rows, &input.columns)?;
+                    result_row.push(agg_value);
                 }
-                let result_column_defs: Vec<ColumnDefinition> = result_columns
-                    .iter()
-                    .map(|name| ColumnDefinition {
-                        name: name.clone(),
-                        data_type: DataType::Text,
-                        nullable: true,
-                        primary_key: false,
-                        unique: false,
-                        default_value: None,
-                        foreign_key: None,
-                        check: None,
-                        auto_increment: false,
-                        generated: None,
-                    })
-                    .collect();
 
-                let input_column_defs: Vec<ColumnDefinition> = input
-                    .columns
-                    .iter()
-                    .map(|name| ColumnDefinition {
-                        name: name.clone(),
-                        data_type: DataType::Text,
-                        nullable: true,
-                        primary_key: false,
-                        unique: false,
-                        default_value: None,
-                        foreign_key: None,
-                        check: None,
-                        auto_increment: false,
-                        generated: None,
-                    })
-                    .collect();
+                if let Some(having_expr) = having {
+                    let include = self.evaluate_having(
+                        having_expr,
+                        &result_column_defs,
+                        &result_row,
+                        &column_defs,
+                        &group_rows,
+                    )?;
 
-                let include = self.evaluate_having(
-                    having_expr,
-                    &result_column_defs,
-                    &result_row,
-                    &input_column_defs,
-                    &group_rows,
-                )?;
-
-                if !include {
-                    continue;
+                    if !include {
+                        continue;
+                    }
                 }
+
+                result_rows.push(result_row);
             }
-
-            result_rows.push(result_row);
-        }
-
-        let mut result_columns = group_by_names;
-        for agg in aggregates {
-            result_columns.push(format!("{:?}", agg.function));
         }
 
         Ok(ExecutionResult {
-            columns: result_columns,
+            columns: group_by_names.into_iter().chain(aggregate_names).collect(),
             rows: result_rows,
         })
     }
@@ -575,14 +978,7 @@ impl<'a> PlanExecutor<'a> {
                 if name == "*" {
                     return Ok(Value::Integer(1));
                 }
-                let col_name = if name.contains('.') {
-                    name.split('.').next_back().unwrap_or(name)
-                } else {
-                    name
-                };
-                let idx = columns
-                    .iter()
-                    .position(|c| c.name == col_name)
+                let idx = find_defined_column_index(columns, name)
                     .ok_or_else(|| RustqlError::ColumnNotFound(name.to_string()))?;
                 Ok(row.get(idx).cloned().unwrap_or(Value::Null))
             }
@@ -847,39 +1243,17 @@ impl<'a> PlanExecutor<'a> {
     fn evaluate_join_condition(
         &self,
         condition: &Expression,
-        left: &ExecutionResult,
-        right: &ExecutionResult,
+        left_columns: &[String],
+        right_columns: &[String],
         left_row: &[Value],
         right_row: &[Value],
     ) -> Result<bool, RustqlError> {
-        let mut combined_columns: Vec<ColumnDefinition> = left
-            .columns
-            .iter()
-            .map(|name| ColumnDefinition {
-                name: name.clone(),
-                data_type: DataType::Text,
-                nullable: true,
-                primary_key: false,
-                unique: false,
-                default_value: None,
-                foreign_key: None,
-                check: None,
-                auto_increment: false,
-                generated: None,
-            })
-            .collect();
-        combined_columns.extend(right.columns.iter().map(|name| ColumnDefinition {
-            name: format!("right.{}", name),
-            data_type: DataType::Text,
-            nullable: true,
-            primary_key: false,
-            unique: false,
-            default_value: None,
-            foreign_key: None,
-            check: None,
-            auto_increment: false,
-            generated: None,
-        }));
+        if let Expression::Value(Value::Boolean(value)) = condition {
+            return Ok(*value);
+        }
+
+        let mut combined_columns = column_definitions_from_names(left_columns);
+        combined_columns.extend(column_definitions_from_names(right_columns));
 
         let combined_row: Vec<Value> = left_row.iter().chain(right_row.iter()).cloned().collect();
 
@@ -902,12 +1276,23 @@ impl<'a> PlanExecutor<'a> {
         {
             let build_idx = build_cols
                 .iter()
-                .position(|c| c.ends_with(left_col.split('.').next_back().unwrap_or(left_col)));
+                .position(|c| column_names_match(c, left_col));
             let probe_idx = probe_cols
                 .iter()
-                .position(|c| c.ends_with(right_col.split('.').next_back().unwrap_or(right_col)));
+                .position(|c| column_names_match(c, right_col));
 
             if let (Some(bi), Some(pi)) = (build_idx, probe_idx) {
+                return Ok((bi, pi));
+            }
+
+            let swapped_build_idx = build_cols
+                .iter()
+                .position(|c| column_names_match(c, right_col));
+            let swapped_probe_idx = probe_cols
+                .iter()
+                .position(|c| column_names_match(c, left_col));
+
+            if let (Some(bi), Some(pi)) = (swapped_build_idx, swapped_probe_idx) {
                 return Ok((bi, pi));
             }
         }
@@ -922,16 +1307,43 @@ impl<'a> PlanExecutor<'a> {
         columns: &[String],
         row: &[Value],
     ) -> Option<Value> {
-        if let Expression::Column(col) = expr {
-            let col_name = col.split('.').next_back().unwrap_or(col);
-            if let Some(idx) = columns
-                .iter()
-                .position(|c| c == col_name || c.ends_with(col_name))
-            {
-                return row.get(idx).cloned();
-            }
+        if let Expression::Column(col) = expr
+            && let Some(idx) = find_result_column_index(columns, col)
+        {
+            return row.get(idx).cloned();
         }
         None
+    }
+
+    fn evaluate_distinct_on_value(
+        &self,
+        expr: &Expression,
+        columns: &[String],
+        column_defs: &[ColumnDefinition],
+        row: &[Value],
+    ) -> Result<Value, RustqlError> {
+        if let Expression::Column(column_name) = expr
+            && let Some(idx) = find_result_column_index(columns, column_name)
+        {
+            return Ok(row.get(idx).cloned().unwrap_or(Value::Null));
+        }
+
+        self.evaluate_value_expression(expr, column_defs, row)
+    }
+
+    fn extract_order_values(
+        &self,
+        order_by: &[OrderByExpr],
+        columns: &[String],
+        row: &[Value],
+    ) -> Vec<Value> {
+        order_by
+            .iter()
+            .map(|order_expr| {
+                self.get_sort_value(&order_expr.expr, columns, row)
+                    .unwrap_or(Value::Null)
+            })
+            .collect()
     }
 
     fn compare_values(&self, a: &Value, b: &Value) -> Ordering {
@@ -972,6 +1384,16 @@ impl<'a> PlanExecutor<'a> {
             self.evaluate_value_expression(&agg.expr, &column_defs, row)
         };
 
+        let filtered_rows: Vec<&Vec<Value>> = rows
+            .iter()
+            .filter(|row| {
+                agg.filter.as_deref().is_none_or(|filter_expr| {
+                    self.evaluate_expression(filter_expr, &column_defs, row)
+                        .unwrap_or(false)
+                })
+            })
+            .collect();
+
         let mut seen: BTreeSet<Value> = BTreeSet::new();
 
         match agg.function {
@@ -984,11 +1406,11 @@ impl<'a> PlanExecutor<'a> {
                             "COUNT(DISTINCT *) is not supported".to_string(),
                         ));
                     }
-                    return Ok(Value::Integer(rows.len() as i64));
+                    return Ok(Value::Integer(filtered_rows.len() as i64));
                 }
 
                 let mut count = 0i64;
-                for row in rows {
+                for row in &filtered_rows {
                     let val = eval_expr_for_row(row)?;
                     if matches!(val, Value::Null) {
                         continue;
@@ -1004,7 +1426,7 @@ impl<'a> PlanExecutor<'a> {
                 let mut sum = 0.0f64;
                 let mut has_value = false;
 
-                for row in rows {
+                for row in &filtered_rows {
                     let val = eval_expr_for_row(row)?;
                     if matches!(val, Value::Null) {
                         continue;
@@ -1039,7 +1461,7 @@ impl<'a> PlanExecutor<'a> {
                 let mut sum = 0.0f64;
                 let mut count = 0i64;
 
-                for row in rows {
+                for row in &filtered_rows {
                     let val = eval_expr_for_row(row)?;
                     if matches!(val, Value::Null) {
                         continue;
@@ -1073,7 +1495,7 @@ impl<'a> PlanExecutor<'a> {
             AggregateFunctionType::Min => {
                 let mut min_val: Option<Value> = None;
 
-                for row in rows {
+                for row in &filtered_rows {
                     let val = eval_expr_for_row(row)?;
                     if matches!(val, Value::Null) {
                         continue;
@@ -1098,7 +1520,7 @@ impl<'a> PlanExecutor<'a> {
             AggregateFunctionType::Max => {
                 let mut max_val: Option<Value> = None;
 
-                for row in rows {
+                for row in &filtered_rows {
                     let val = eval_expr_for_row(row)?;
                     if matches!(val, Value::Null) {
                         continue;
@@ -1123,7 +1545,7 @@ impl<'a> PlanExecutor<'a> {
             AggregateFunctionType::Variance => {
                 let mut values = Vec::new();
 
-                for row in rows {
+                for row in &filtered_rows {
                     let val = eval_expr_for_row(row)?;
                     if matches!(val, Value::Null) {
                         continue;
@@ -1154,7 +1576,7 @@ impl<'a> PlanExecutor<'a> {
             AggregateFunctionType::Stddev => {
                 let mut values = Vec::new();
 
-                for row in rows {
+                for row in &filtered_rows {
                     let val = eval_expr_for_row(row)?;
                     if matches!(val, Value::Null) {
                         continue;
@@ -1185,7 +1607,7 @@ impl<'a> PlanExecutor<'a> {
             AggregateFunctionType::GroupConcat => {
                 let sep = agg.separator.as_deref().unwrap_or(",");
                 let mut parts: Vec<String> = Vec::new();
-                for row in rows {
+                for row in &filtered_rows {
                     let val = eval_expr_for_row(row)?;
                     if matches!(val, Value::Null) {
                         continue;
@@ -1213,7 +1635,7 @@ impl<'a> PlanExecutor<'a> {
             AggregateFunctionType::BoolAnd => {
                 let mut result = true;
                 let mut has_value = false;
-                for row in rows {
+                for row in &filtered_rows {
                     let val = eval_expr_for_row(row)?;
                     if matches!(val, Value::Null) {
                         continue;
@@ -1246,7 +1668,7 @@ impl<'a> PlanExecutor<'a> {
             AggregateFunctionType::BoolOr => {
                 let mut result = false;
                 let mut has_value = false;
-                for row in rows {
+                for row in &filtered_rows {
                     let val = eval_expr_for_row(row)?;
                     if matches!(val, Value::Null) {
                         continue;
@@ -1278,7 +1700,7 @@ impl<'a> PlanExecutor<'a> {
             }
             AggregateFunctionType::Median => {
                 let mut values: Vec<f64> = Vec::new();
-                for row in rows {
+                for row in &filtered_rows {
                     let val = eval_expr_for_row(row)?;
                     if matches!(val, Value::Null) {
                         continue;
@@ -1309,7 +1731,7 @@ impl<'a> PlanExecutor<'a> {
             }
             AggregateFunctionType::Mode => {
                 let mut counts: Vec<(Value, usize)> = Vec::new();
-                for row in rows {
+                for row in &filtered_rows {
                     let val = eval_expr_for_row(row)?;
                     if matches!(val, Value::Null) {
                         continue;
@@ -1332,7 +1754,7 @@ impl<'a> PlanExecutor<'a> {
             AggregateFunctionType::PercentileCont => {
                 let frac = agg.percentile.unwrap_or(0.5);
                 let mut values: Vec<f64> = Vec::new();
-                for row in rows {
+                for row in &filtered_rows {
                     let val = eval_expr_for_row(row)?;
                     if matches!(val, Value::Null) {
                         continue;
@@ -1371,7 +1793,7 @@ impl<'a> PlanExecutor<'a> {
             AggregateFunctionType::PercentileDisc => {
                 let frac = agg.percentile.unwrap_or(0.5);
                 let mut values: Vec<Value> = Vec::new();
-                for row in rows {
+                for row in &filtered_rows {
                     let val = eval_expr_for_row(row)?;
                     if matches!(val, Value::Null) {
                         continue;
@@ -1499,14 +1921,7 @@ impl<'a> PlanExecutor<'a> {
                 };
                 let idx = result_columns
                     .iter()
-                    .position(|c| {
-                        let c_name = if c.name.contains('.') {
-                            c.name.split('.').next_back().unwrap_or(&c.name)
-                        } else {
-                            &c.name
-                        };
-                        c_name == col_name || c.name.ends_with(col_name)
-                    })
+                    .position(|c| column_names_match(&c.name, col_name))
                     .ok_or_else(|| format!("Column '{}' not found in HAVING clause", name))?;
                 Ok(result_row.get(idx).cloned().unwrap_or(Value::Null))
             }
@@ -1590,54 +2005,81 @@ impl<'a> PlanExecutor<'a> {
                             alias.clone().unwrap_or_else(|| "<expression>".to_string()),
                             col.clone(),
                         ),
-                        Column::Function(agg) => {
-                            let alias = agg
-                                .alias
-                                .clone()
-                                .unwrap_or_else(|| format!("{:?}", agg.function));
-                            (alias, col.clone())
-                        }
+                        Column::Function(agg) => (
+                            crate::executor::aggregate::format_aggregate_header(agg),
+                            col.clone(),
+                        ),
                         Column::Subquery(_) => ("<subquery>".to_string(), col.clone()),
                         Column::All => unreachable!(),
                     })
                     .collect()
             };
 
+        let aggregate_count = select_stmt
+            .columns
+            .iter()
+            .filter(|col| matches!(col, Column::Function(_)))
+            .count();
+        let has_window_functions = select_stmt.columns.iter().any(|column| {
+            matches!(
+                column,
+                Column::Expression {
+                    expr: Expression::WindowFunction { .. },
+                    ..
+                }
+            )
+        });
+
+        for (_, col) in &column_specs {
+            if let Column::Named { name, .. } = col {
+                find_result_column_index(&result.columns, name)
+                    .ok_or_else(|| RustqlError::ColumnNotFound(name.to_string()))?;
+            }
+        }
+
+        let window_rows = if has_window_functions {
+            let mut rows = result.rows.clone();
+            crate::executor::aggregate::evaluate_window_functions(
+                &mut rows,
+                &column_defs,
+                &select_stmt.columns,
+            )?;
+            Some(rows)
+        } else {
+            None
+        };
+
         let mut projected_rows = Vec::new();
-        for row in &result.rows {
+        for (row_idx, row) in result.rows.iter().enumerate() {
             let mut projected_row = Vec::new();
+            let mut aggregate_offset = result.columns.len().saturating_sub(aggregate_count);
+            let mut window_offset = result.columns.len();
             for (_, col) in &column_specs {
                 let val = match col {
                     Column::All => {
                         unreachable!("Column::All should not appear in column_specs")
                     }
                     Column::Named { name, .. } => {
-                        let column_name = if name.contains('.') {
-                            name.split('.').next_back().unwrap_or(name)
-                        } else {
-                            name.as_str()
-                        };
-                        let idx = result
-                            .columns
-                            .iter()
-                            .position(|c| {
-                                let c_name = if c.contains('.') {
-                                    c.split('.').next_back().unwrap_or(c)
-                                } else {
-                                    c.as_str()
-                                };
-                                c_name == column_name || c.ends_with(column_name)
-                            })
+                        let idx = find_result_column_index(&result.columns, name)
                             .ok_or_else(|| RustqlError::ColumnNotFound(name.to_string()))?;
                         row.get(idx).cloned().unwrap_or(Value::Null)
                     }
-                    Column::Expression { expr, .. } => {
-                        self.evaluate_value_expression(expr, &column_defs, row)?
-                    }
+                    Column::Expression { expr, .. } => match expr {
+                        Expression::WindowFunction { .. } => window_rows
+                            .as_ref()
+                            .and_then(|rows| rows.get(row_idx))
+                            .and_then(|window_row| window_row.get(window_offset))
+                            .cloned()
+                            .inspect(|_| {
+                                window_offset += 1;
+                            })
+                            .unwrap_or(Value::Null),
+                        _ => self.evaluate_value_expression(expr, &column_defs, row)?,
+                    },
                     Column::Function(_) => {
-                        return Err(RustqlError::Internal(
-                            "Aggregate functions should be handled before projection".to_string(),
-                        ));
+                        let value = row.get(aggregate_offset).cloned().unwrap_or(Value::Null);
+                        aggregate_offset += 1;
+                        value
                     }
                     Column::Subquery(_) => {
                         return Err(RustqlError::Internal(
@@ -1678,24 +2120,50 @@ impl<'a> PlanExecutor<'a> {
     }
 }
 
-fn collect_index_rows(db: &Database, index_name: &str) -> Option<HashSet<usize>> {
-    if let Some(index) = db.indexes.get(index_name) {
-        let mut rows = HashSet::new();
-        for indices in index.entries.values() {
-            rows.extend(indices.iter().copied());
-        }
-        return Some(rows);
-    }
+fn column_names_match(candidate: &str, reference: &str) -> bool {
+    candidate == reference
+        || unqualified_column_name(candidate) == unqualified_column_name(reference)
+}
 
-    if let Some(index) = db.composite_indexes.get(index_name) {
-        let mut rows = HashSet::new();
-        for indices in index.entries.values() {
-            rows.extend(indices.iter().copied());
-        }
-        return Some(rows);
-    }
+fn find_result_column_index(columns: &[String], reference: &str) -> Option<usize> {
+    columns
+        .iter()
+        .position(|column| column == reference)
+        .or_else(|| {
+            let unqualified = unqualified_column_name(reference);
+            columns
+                .iter()
+                .position(|column| column_names_match(column, unqualified))
+        })
+}
 
-    None
+fn find_defined_column_index(columns: &[ColumnDefinition], reference: &str) -> Option<usize> {
+    columns
+        .iter()
+        .position(|column| column.name == reference)
+        .or_else(|| {
+            let unqualified = unqualified_column_name(reference);
+            columns
+                .iter()
+                .position(|column| column_names_match(&column.name, unqualified))
+        })
+}
+
+fn qualify_column_names(columns: &[ColumnDefinition], output_label: Option<&str>) -> Vec<String> {
+    columns
+        .iter()
+        .map(|column| qualified_column_name(output_label, &column.name))
+        .collect()
+}
+
+fn qualified_column_name(output_label: Option<&str>, column_name: &str) -> String {
+    output_label
+        .map(|label| format!("{}.{}", label, column_name))
+        .unwrap_or_else(|| column_name.to_string())
+}
+
+fn unqualified_column_name(name: &str) -> &str {
+    name.split('.').next_back().unwrap_or(name)
 }
 
 impl ExecutionResult {
@@ -1711,4 +2179,47 @@ impl Clone for ExecutionResult {
             rows: self.rows.clone(),
         }
     }
+}
+
+fn column_definitions_from_names(columns: &[String]) -> Vec<ColumnDefinition> {
+    columns
+        .iter()
+        .map(|name| ColumnDefinition {
+            name: name.clone(),
+            data_type: DataType::Text,
+            nullable: true,
+            primary_key: false,
+            unique: false,
+            default_value: None,
+            foreign_key: None,
+            check: None,
+            auto_increment: false,
+            generated: None,
+        })
+        .collect()
+}
+
+fn lateral_subquery_with_outer_scope(
+    subquery: &SelectStatement,
+    outer_table_name: &str,
+) -> SelectStatement {
+    let mut rewritten = subquery.clone();
+    if rewritten.from.is_empty()
+        && rewritten.from_subquery.is_none()
+        && rewritten.from_function.is_none()
+        && rewritten.from_values.is_none()
+    {
+        rewritten.from = outer_table_name.to_string();
+    } else {
+        rewritten.joins.push(Join {
+            join_type: JoinType::Cross,
+            table: outer_table_name.to_string(),
+            table_alias: None,
+            on: None,
+            using_columns: None,
+            lateral: true,
+            subquery: None,
+        });
+    }
+    rewritten
 }

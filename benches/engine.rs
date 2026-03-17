@@ -1,4 +1,4 @@
-use rustql::{process_query, reset_database};
+use rustql::testing::{process_query, reset_database};
 use std::time::{Duration, Instant};
 
 fn main() {

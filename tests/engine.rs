@@ -1,102 +1,121 @@
-use rustql::Engine;
+use rustql::ast::Value;
+use rustql::testing::render_result;
+use rustql::{Engine, EngineOptions, QueryResult, StorageMode};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[test]
 fn engine_instances_are_isolated() {
-    let engine_a = Engine::new();
-    let engine_b = Engine::new();
+    let engine_a = open_memory_engine();
+    let engine_b = open_memory_engine();
+    let mut session_a = engine_a.session();
+    let mut session_b = engine_b.session();
 
-    engine_a
-        .process_query("CREATE TABLE isolated (id INTEGER)")
+    session_a
+        .execute_one("CREATE TABLE isolated (id INTEGER)")
         .unwrap();
-    engine_a
-        .process_query("INSERT INTO isolated VALUES (1)")
+    session_a
+        .execute_one("INSERT INTO isolated VALUES (1)")
         .unwrap();
 
-    let result = engine_b.process_query("SELECT * FROM isolated");
+    let result = session_b.execute_one("SELECT * FROM isolated");
     assert!(result.is_err(), "{result:?}");
     assert!(
-        result.unwrap_err().contains("does not exist"),
+        result.unwrap_err().to_string().contains("does not exist"),
         "expected missing-table error"
     );
 }
 
 #[test]
 fn transaction_state_is_per_engine() {
-    let engine_a = Engine::new();
-    let engine_b = Engine::new();
+    let engine_a = open_memory_engine();
+    let engine_b = open_memory_engine();
+    let mut session_a = engine_a.session();
+    let mut session_b = engine_b.session();
 
-    engine_a.process_query("BEGIN TRANSACTION").unwrap();
-    engine_b.process_query("BEGIN TRANSACTION").unwrap();
+    session_a.execute_one("BEGIN TRANSACTION").unwrap();
+    session_b.execute_one("BEGIN TRANSACTION").unwrap();
 
-    engine_a.process_query("ROLLBACK").unwrap();
-    engine_b.process_query("ROLLBACK").unwrap();
+    session_a.execute_one("ROLLBACK").unwrap();
+    session_b.execute_one("ROLLBACK").unwrap();
 }
 
 #[test]
 fn scalar_subqueries_use_current_engine_context() {
-    let engine = Engine::new();
+    let engine = open_memory_engine();
+    let mut session = engine.session();
 
-    engine
-        .process_query("CREATE TABLE sub_ctx (id INTEGER, value INTEGER)")
+    session
+        .execute_one("CREATE TABLE sub_ctx (id INTEGER, value INTEGER)")
         .unwrap();
-    engine
-        .process_query("INSERT INTO sub_ctx VALUES (1, 10), (2, 20)")
+    session
+        .execute_one("INSERT INTO sub_ctx VALUES (1, 10), (2, 20)")
         .unwrap();
 
-    let result = engine
-        .process_query(
+    let result = session
+        .execute_one(
             "SELECT CASE WHEN id = 1 THEN (SELECT MAX(value) FROM sub_ctx) ELSE 0 END AS max_value FROM sub_ctx WHERE id = 1",
         )
         .unwrap();
 
-    assert!(result.contains("20"), "got: {result}");
+    match result {
+        QueryResult::Rows(rows) => {
+            assert_eq!(rows.rows, vec![vec![Value::Integer(20)]]);
+        }
+        other => panic!("expected row result, got: {other:?}"),
+    }
 }
 
 #[test]
-fn json_engine_uses_custom_path() {
-    let path = unique_temp_path("json");
-    fs::remove_file(&path).ok();
+fn disk_engine_uses_custom_path() {
+    let path = unique_temp_path("db");
+    cleanup_storage_files(&path);
 
-    let engine = Engine::builder().json_file(&path).build();
-    engine
-        .process_query("CREATE TABLE persisted_json (id INTEGER)")
-        .unwrap();
-    engine
-        .process_query("INSERT INTO persisted_json VALUES (7)")
+    let engine = open_disk_engine(&path);
+    {
+        let mut session = engine.session();
+        session
+            .execute_one("CREATE TABLE persisted_disk (id INTEGER)")
+            .unwrap();
+        session
+            .execute_one("INSERT INTO persisted_disk VALUES (11)")
+            .unwrap();
+    }
+    drop(engine);
+
+    let reloaded = open_disk_engine(&path);
+    let mut reloaded_session = reloaded.session();
+    let result = reloaded_session
+        .execute_one("SELECT * FROM persisted_disk")
         .unwrap();
 
-    let reloaded = Engine::builder().json_file(&path).build();
-    let result = reloaded
-        .process_query("SELECT * FROM persisted_json")
-        .unwrap();
-
-    assert!(result.contains("7"), "got: {result}");
-    fs::remove_file(path).ok();
+    assert!(render_result(&result).contains("11"), "got: {result:?}");
+    cleanup_storage_files(&path);
 }
 
-#[test]
-fn btree_engine_uses_custom_path() {
-    let path = unique_temp_path("dat");
-    fs::remove_file(&path).ok();
+fn open_memory_engine() -> Engine {
+    Engine::open(EngineOptions {
+        storage: StorageMode::Memory,
+    })
+    .unwrap()
+}
 
-    let engine = Engine::builder().btree_file(&path).build();
-    engine
-        .process_query("CREATE TABLE persisted_btree (id INTEGER)")
-        .unwrap();
-    engine
-        .process_query("INSERT INTO persisted_btree VALUES (11)")
-        .unwrap();
+fn open_disk_engine(path: &Path) -> Engine {
+    Engine::open(EngineOptions {
+        storage: StorageMode::Disk {
+            path: path.to_path_buf(),
+        },
+    })
+    .unwrap()
+}
 
-    let reloaded = Engine::builder().btree_file(&path).build();
-    let result = reloaded
-        .process_query("SELECT * FROM persisted_btree")
-        .unwrap();
-
-    assert!(result.contains("11"), "got: {result}");
+fn cleanup_storage_files(path: &Path) {
     fs::remove_file(path).ok();
+
+    let mut wal = path.as_os_str().to_os_string();
+    wal.push(".wal");
+    fs::remove_file(PathBuf::from(wal)).ok();
 }
 
 fn unique_temp_path(extension: &str) -> PathBuf {

@@ -1,53 +1,52 @@
 use crate::ast::*;
-use crate::database::{CompositeIndex, Database, Index, Table};
-use crate::engine::ExecutionContext;
+use crate::database::{CompositeIndex, Database, Index, RowId, Table};
+use crate::engine::{CommandTag, QueryResult};
 use crate::error::RustqlError;
-use crate::wal::{self, WalEntry};
+use crate::wal::WalEntry;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use super::{get_database_read, get_database_write, save_if_not_in_transaction};
+use super::{
+    ExecutionContext, SelectResult, command_result, get_database_read, get_database_write,
+    rows_result, save_if_not_in_transaction,
+};
 
-pub(crate) fn execute_create_table(
+pub fn execute_create_table(
+    context: &ExecutionContext,
     stmt: CreateTableStatement,
-    ctx: &ExecutionContext,
-) -> Result<String, RustqlError> {
+) -> Result<QueryResult, RustqlError> {
     if let Some(source_query) = stmt.as_query {
-        return execute_create_table_as_select(stmt.name, *source_query, ctx);
+        return execute_create_table_as_select(context, stmt.name, *source_query);
     }
 
-    let mut db = get_database_write(ctx);
+    let mut db = get_database_write(context);
     if db.tables.contains_key(&stmt.name) {
         if stmt.if_not_exists {
-            return Ok(format!("Table '{}' already exists, skipping", stmt.name));
+            return Ok(command_result(CommandTag::CreateTable, 0));
         }
         return Err(RustqlError::TableAlreadyExists(stmt.name.clone()));
     }
     db.tables.insert(
         stmt.name.clone(),
-        Table {
-            columns: stmt.columns,
-            rows: Vec::new(),
-            constraints: stmt.constraints,
-        },
+        Table::new(stmt.columns, Vec::new(), stmt.constraints),
     );
-    wal::record_wal_entry(
-        ctx,
+    super::record_wal_entry(
+        context,
         WalEntry::CreateTable {
             name: stmt.name.clone(),
         },
     );
-    save_if_not_in_transaction(ctx, &db)?;
-    Ok(format!("Table '{}' created", stmt.name))
+    save_if_not_in_transaction(context, &db)?;
+    Ok(command_result(CommandTag::CreateTable, 0))
 }
 
 fn execute_create_table_as_select(
+    context: &ExecutionContext,
     name: String,
     query: crate::ast::SelectStatement,
-    ctx: &ExecutionContext,
-) -> Result<String, RustqlError> {
+) -> Result<QueryResult, RustqlError> {
     let result = {
-        let db = get_database_read(ctx);
-        super::select::execute_select_internal(query, &db, Some(ctx))?
+        let db = get_database_read(context);
+        super::select::execute_select_internal(Some(context), query, &db)?
     };
 
     let columns: Vec<crate::ast::ColumnDefinition> = result
@@ -84,56 +83,53 @@ fn execute_create_table_as_select(
         })
         .collect();
 
-    let mut db = get_database_write(ctx);
+    let mut db = get_database_write(context);
     if db.tables.contains_key(&name) {
         return Err(RustqlError::TableAlreadyExists(name));
     }
-    db.tables.insert(
-        name.clone(),
-        Table {
-            columns,
-            rows: result.rows,
-            constraints: Vec::new(),
-        },
-    );
-    wal::record_wal_entry(ctx, WalEntry::CreateTable { name: name.clone() });
-    save_if_not_in_transaction(ctx, &db)?;
-    Ok(format!("Table '{}' created", name))
+    let row_count = result.rows.len() as u64;
+    db.tables
+        .insert(name.clone(), Table::new(columns, result.rows, Vec::new()));
+    super::record_wal_entry(context, WalEntry::CreateTable { name: name.clone() });
+    save_if_not_in_transaction(context, &db)?;
+    Ok(command_result(CommandTag::CreateTable, row_count))
 }
 
-pub(crate) fn execute_drop_table(
+pub fn execute_drop_table(
+    context: &ExecutionContext,
     stmt: DropTableStatement,
-    ctx: &ExecutionContext,
-) -> Result<String, RustqlError> {
-    let mut db = get_database_write(ctx);
+) -> Result<QueryResult, RustqlError> {
+    let mut db = get_database_write(context);
     if let Some(removed) = db.tables.remove(&stmt.name) {
         let (removed_indexes, removed_composite_indexes) =
             remove_indexes_for_table(&mut db, &stmt.name);
-        wal::record_wal_entry(
-            ctx,
+        super::record_wal_entry(
+            context,
             WalEntry::DropTable {
                 name: stmt.name.clone(),
                 columns: removed.columns,
                 rows: removed.rows,
+                row_ids: removed.row_ids,
+                next_row_id: removed.next_row_id,
                 constraints: removed.constraints,
                 indexes: removed_indexes,
                 composite_indexes: removed_composite_indexes,
             },
         );
-        save_if_not_in_transaction(ctx, &db)?;
-        Ok(format!("Table '{}' dropped", stmt.name))
+        save_if_not_in_transaction(context, &db)?;
+        Ok(command_result(CommandTag::DropTable, 0))
     } else if stmt.if_exists {
-        Ok(format!("Table '{}' does not exist, skipping", stmt.name))
+        Ok(command_result(CommandTag::DropTable, 0))
     } else {
         Err(RustqlError::TableNotFound(stmt.name.clone()))
     }
 }
 
-pub(crate) fn execute_alter_table(
+pub fn execute_alter_table(
+    context: &ExecutionContext,
     stmt: AlterTableStatement,
-    ctx: &ExecutionContext,
-) -> Result<String, RustqlError> {
-    let mut db = get_database_write(ctx);
+) -> Result<QueryResult, RustqlError> {
+    let mut db = get_database_write(context);
 
     if let AlterOperation::RenameTable(ref new_name) = stmt.operation {
         let table_data = db
@@ -151,15 +147,15 @@ pub(crate) fn execute_alter_table(
                 ci.table = new_name.clone();
             }
         }
-        wal::record_wal_entry(
-            ctx,
+        super::record_wal_entry(
+            context,
             WalEntry::AlterRenameTable {
                 old_name: stmt.table.clone(),
                 new_name: new_name.clone(),
             },
         );
-        save_if_not_in_transaction(ctx, &db)?;
-        return Ok(format!("Table '{}' renamed to '{}'", stmt.table, new_name));
+        save_if_not_in_transaction(context, &db)?;
+        return Ok(command_result(CommandTag::AlterTable, 0));
     }
 
     let table = db
@@ -188,18 +184,15 @@ pub(crate) fn execute_alter_table(
             for row in &mut table.rows {
                 row.push(default_value.clone());
             }
-            wal::record_wal_entry(
-                ctx,
+            super::record_wal_entry(
+                context,
                 WalEntry::AlterAddColumn {
                     table: stmt.table.clone(),
                     column_name: col_def.name.clone(),
                 },
             );
-            save_if_not_in_transaction(ctx, &db)?;
-            Ok(format!(
-                "Column '{}' added to table '{}'",
-                col_def.name, stmt.table
-            ))
+            save_if_not_in_transaction(context, &db)?;
+            Ok(command_result(CommandTag::AlterTable, 0))
         }
         AlterOperation::DropColumn(col_name) => {
             let col_index = table
@@ -214,8 +207,8 @@ pub(crate) fn execute_alter_table(
                     removed_values.push(row.remove(col_index));
                 }
             }
-            wal::record_wal_entry(
-                ctx,
+            super::record_wal_entry(
+                context,
                 WalEntry::AlterDropColumn {
                     table: stmt.table.clone(),
                     col_index,
@@ -223,11 +216,8 @@ pub(crate) fn execute_alter_table(
                     values: removed_values,
                 },
             );
-            save_if_not_in_transaction(ctx, &db)?;
-            Ok(format!(
-                "Column '{}' dropped from table '{}'",
-                col_name, stmt.table
-            ))
+            save_if_not_in_transaction(context, &db)?;
+            Ok(command_result(CommandTag::AlterTable, 0))
         }
         AlterOperation::RenameColumn { old, new } => {
             let col_exists = table.columns.iter().any(|c| c.name == old);
@@ -246,19 +236,16 @@ pub(crate) fn execute_alter_table(
                     break;
                 }
             }
-            wal::record_wal_entry(
-                ctx,
+            super::record_wal_entry(
+                context,
                 WalEntry::AlterRenameColumn {
                     table: stmt.table.clone(),
                     old_name: old.clone(),
                     new_name: new.clone(),
                 },
             );
-            save_if_not_in_transaction(ctx, &db)?;
-            Ok(format!(
-                "Column '{}' renamed to '{}' in table '{}'",
-                old, new, stmt.table
-            ))
+            save_if_not_in_transaction(context, &db)?;
+            Ok(command_result(CommandTag::AlterTable, 0))
         }
         AlterOperation::RenameTable(_) => unreachable!(),
         AlterOperation::AddConstraint(constraint) => {
@@ -300,15 +287,15 @@ pub(crate) fn execute_alter_table(
                 }
             }
             table.constraints.push(constraint.clone());
-            wal::record_wal_entry(
-                ctx,
+            super::record_wal_entry(
+                context,
                 WalEntry::AlterAddConstraint {
                     table: stmt.table.clone(),
                     constraint: constraint.clone(),
                 },
             );
-            save_if_not_in_transaction(ctx, &db)?;
-            Ok(format!("Constraint added to table '{}'", stmt.table))
+            save_if_not_in_transaction(context, &db)?;
+            Ok(command_result(CommandTag::AlterTable, 0))
         }
         AlterOperation::DropConstraint(constraint_name) => {
             let mut removed_constraint = None;
@@ -332,32 +319,29 @@ pub(crate) fn execute_alter_table(
                 )));
             }
             if let Some(removed) = removed_constraint {
-                wal::record_wal_entry(
-                    ctx,
+                super::record_wal_entry(
+                    context,
                     WalEntry::AlterDropConstraint {
                         table: stmt.table.clone(),
                         constraint: removed,
                     },
                 );
             }
-            save_if_not_in_transaction(ctx, &db)?;
-            Ok(format!(
-                "Constraint '{}' dropped from table '{}'",
-                constraint_name, stmt.table
-            ))
+            save_if_not_in_transaction(context, &db)?;
+            Ok(command_result(CommandTag::AlterTable, 0))
         }
     }
 }
 
-pub(crate) fn execute_create_index(
+pub fn execute_create_index(
+    context: &ExecutionContext,
     stmt: CreateIndexStatement,
-    ctx: &ExecutionContext,
-) -> Result<String, RustqlError> {
-    let mut db = get_database_write(ctx);
+) -> Result<QueryResult, RustqlError> {
+    let mut db = get_database_write(context);
 
     if db.indexes.contains_key(&stmt.name) || db.composite_indexes.contains_key(&stmt.name) {
         if stmt.if_not_exists {
-            return Ok(format!("Index '{}' already exists, skipping", stmt.name));
+            return Ok(command_result(CommandTag::CreateIndex, 0));
         }
         return Err(RustqlError::IndexError(format!(
             "Index '{}' already exists",
@@ -370,7 +354,6 @@ pub(crate) fn execute_create_index(
             .tables
             .get(&stmt.table)
             .ok_or_else(|| RustqlError::TableNotFound(stmt.table.clone()))?;
-
         let column_positions = get_column_positions(table, &stmt.columns)?;
 
         if stmt.columns.len() == 1 {
@@ -382,7 +365,7 @@ pub(crate) fn execute_create_index(
                 filter_expr: stmt.where_clause.clone(),
             };
 
-            for (row_idx, row) in table.rows.iter().enumerate() {
+            for (row_id, row) in table.iter_rows_with_ids() {
                 if !row_matches_index_filter(&db, table, index.filter_expr.as_ref(), row) {
                     continue;
                 }
@@ -390,7 +373,7 @@ pub(crate) fn execute_create_index(
                     .get(*column_positions.first().unwrap())
                     .cloned()
                     .unwrap_or(Value::Null);
-                index.entries.entry(value).or_default().push(row_idx);
+                index.entries.entry(value).or_default().push(row_id);
             }
 
             db.indexes.insert(stmt.name.clone(), index);
@@ -403,53 +386,49 @@ pub(crate) fn execute_create_index(
                 filter_expr: stmt.where_clause.clone(),
             };
 
-            for (row_idx, row) in table.rows.iter().enumerate() {
+            for (row_id, row) in table.iter_rows_with_ids() {
                 if !row_matches_index_filter(&db, table, index.filter_expr.as_ref(), row) {
                     continue;
                 }
                 let key = composite_key_for_row(row, &column_positions);
-                index.entries.entry(key).or_default().push(row_idx);
+                index.entries.entry(key).or_default().push(row_id);
             }
 
             db.composite_indexes.insert(stmt.name.clone(), index);
         }
     }
 
-    wal::record_wal_entry(
-        ctx,
+    super::record_wal_entry(
+        context,
         WalEntry::CreateIndex {
             name: stmt.name.clone(),
         },
     );
-    save_if_not_in_transaction(ctx, &db)?;
-    let columns_str = stmt.columns.join(", ");
-    Ok(format!(
-        "Index '{}' created on {}.{}",
-        stmt.name, stmt.table, columns_str
-    ))
+    save_if_not_in_transaction(context, &db)?;
+    Ok(command_result(CommandTag::CreateIndex, 0))
 }
 
-pub(crate) fn execute_drop_index(
+pub fn execute_drop_index(
+    context: &ExecutionContext,
     stmt: DropIndexStatement,
-    ctx: &ExecutionContext,
-) -> Result<String, RustqlError> {
-    let mut db = get_database_write(ctx);
+) -> Result<QueryResult, RustqlError> {
+    let mut db = get_database_write(context);
     let removed_index = db.indexes.remove(&stmt.name);
     let removed_composite_index = db.composite_indexes.remove(&stmt.name);
 
     if removed_index.is_some() || removed_composite_index.is_some() {
-        wal::record_wal_entry(
-            ctx,
+        super::record_wal_entry(
+            context,
             WalEntry::DropIndex {
                 name: stmt.name.clone(),
                 index: removed_index,
                 composite_index: Box::new(removed_composite_index),
             },
         );
-        save_if_not_in_transaction(ctx, &db)?;
-        Ok(format!("Index '{}' dropped", stmt.name))
+        save_if_not_in_transaction(context, &db)?;
+        Ok(command_result(CommandTag::DropIndex, 0))
     } else if stmt.if_exists {
-        Ok(format!("Index '{}' does not exist, skipping", stmt.name))
+        Ok(command_result(CommandTag::DropIndex, 0))
     } else {
         Err(RustqlError::IndexError(format!(
             "Index '{}' does not exist",
@@ -487,20 +466,25 @@ fn remove_indexes_for_table(
     (removed_indexes, removed_composite_indexes)
 }
 
-pub(crate) fn execute_describe(
+pub fn execute_describe(
+    context: &ExecutionContext,
     table_name: String,
-    ctx: &ExecutionContext,
-) -> Result<String, RustqlError> {
-    let db = get_database_read(ctx);
+) -> Result<QueryResult, RustqlError> {
+    let db = get_database_read(context);
     let table = db
         .tables
         .get(&table_name)
         .ok_or_else(|| RustqlError::TableNotFound(table_name.to_string()))?;
 
-    let mut result = String::new();
-    result.push_str("Column\tType\tNullable\tPrimary Key\tUnique\tDefault\n");
-    result.push_str(&"-".repeat(70));
-    result.push('\n');
+    let headers = vec![
+        "Column".to_string(),
+        "Type".to_string(),
+        "Nullable".to_string(),
+        "Primary Key".to_string(),
+        "Unique".to_string(),
+        "Default".to_string(),
+    ];
+    let mut rows = Vec::new();
 
     for col in &table.columns {
         let type_str = match col.data_type {
@@ -522,69 +506,54 @@ pub(crate) fn execute_describe(
             "NULL".to_string()
         };
 
-        result.push_str(&format!(
-            "{}\t{}\t{}\t{}\t{}\t{}\n",
-            col.name, type_str, nullable_str, pk_str, unique_str, default_str
-        ));
+        rows.push(vec![
+            Value::Text(col.name.clone()),
+            Value::Text(type_str.to_string()),
+            Value::Text(nullable_str.to_string()),
+            Value::Text(pk_str.to_string()),
+            Value::Text(unique_str.to_string()),
+            Value::Text(default_str),
+        ]);
     }
 
-    Ok(result)
+    Ok(rows_result(SelectResult { headers, rows }))
 }
 
-pub(crate) fn execute_show_tables(ctx: &ExecutionContext) -> Result<String, RustqlError> {
-    let db = get_database_read(ctx);
-    let mut result = String::new();
-    result.push_str("Tables\n");
-    result.push_str(&"-".repeat(40));
-    result.push('\n');
-
+pub fn execute_show_tables(context: &ExecutionContext) -> Result<QueryResult, RustqlError> {
+    let db = get_database_read(context);
     let mut table_names: Vec<&String> = db.tables.keys().collect();
     table_names.sort();
-
-    for table_name in table_names {
-        result.push_str(table_name);
-        result.push('\n');
-    }
-
-    Ok(result)
+    let rows = table_names
+        .into_iter()
+        .map(|table_name| vec![Value::Text(table_name.clone())])
+        .collect();
+    Ok(rows_result(SelectResult {
+        headers: vec!["table".to_string()],
+        rows,
+    }))
 }
 
-pub(crate) fn execute_analyze(
+pub fn execute_analyze(
+    context: &ExecutionContext,
     table_name: String,
-    ctx: &ExecutionContext,
-) -> Result<String, RustqlError> {
-    let db = get_database_read(ctx);
+) -> Result<QueryResult, RustqlError> {
+    let db = get_database_read(context);
     let table = db
         .tables
         .get(&table_name)
         .ok_or_else(|| RustqlError::TableNotFound(table_name.clone()))?;
 
-    let row_count = table.rows.len();
-    let mut result = format!("Table: {}\nRow count: {}\n", table_name, row_count);
-    result.push_str("Column\tDistinct Count\n");
-    result.push_str(&"-".repeat(40));
-    result.push('\n');
-
-    for (col_idx, col_def) in table.columns.iter().enumerate() {
-        let distinct: std::collections::BTreeSet<&Value> = table
-            .rows
-            .iter()
-            .filter_map(|row| row.get(col_idx))
-            .collect();
-        result.push_str(&format!("{}\t{}\n", col_def.name, distinct.len()));
-    }
-
-    Ok(result)
+    Ok(command_result(CommandTag::Analyze, table.rows.len() as u64))
 }
 
 pub fn update_indexes_on_insert(
     db: &mut Database,
     table_name: &str,
-    row_idx: usize,
+    row_id: RowId,
     row: &[Value],
 ) -> Result<(), RustqlError> {
     let db_snapshot = db.clone();
-    let table = db
+    let table = db_snapshot
         .tables
         .get(table_name)
         .ok_or_else(|| RustqlError::TableNotFound(table_name.to_string()))?;
@@ -602,7 +571,7 @@ pub fn update_indexes_on_insert(
                 .ok_or_else(|| format!("Column '{}' not found", index.column))?;
 
             let value = row.get(col_idx).cloned().unwrap_or(Value::Null);
-            index.entries.entry(value).or_default().push(row_idx);
+            index.entries.entry(value).or_default().push(row_id);
         }
     }
 
@@ -614,7 +583,7 @@ pub fn update_indexes_on_insert(
 
             let column_positions = get_column_positions(table, &index.columns)?;
             let key = composite_key_for_row(row, &column_positions);
-            index.entries.entry(key).or_default().push(row_idx);
+            index.entries.entry(key).or_default().push(row_id);
         }
     }
 
@@ -624,19 +593,12 @@ pub fn update_indexes_on_insert(
 pub fn update_indexes_on_delete(
     db: &mut Database,
     table_name: &str,
-    deleted_row_indices: &[usize],
+    deleted_row_ids: &[RowId],
 ) -> Result<(), RustqlError> {
     for index in db.indexes.values_mut() {
         if index.table == table_name {
             for entry in index.entries.values_mut() {
-                entry.retain(|&idx| !deleted_row_indices.contains(&idx));
-                for deleted_idx in deleted_row_indices.iter().rev() {
-                    for idx in entry.iter_mut() {
-                        if *idx > *deleted_idx {
-                            *idx -= 1;
-                        }
-                    }
-                }
+                entry.retain(|row_id| !deleted_row_ids.contains(row_id));
             }
         }
     }
@@ -644,14 +606,7 @@ pub fn update_indexes_on_delete(
     for index in db.composite_indexes.values_mut() {
         if index.table == table_name {
             for entry in index.entries.values_mut() {
-                entry.retain(|&idx| !deleted_row_indices.contains(&idx));
-                for deleted_idx in deleted_row_indices.iter().rev() {
-                    for idx in entry.iter_mut() {
-                        if *idx > *deleted_idx {
-                            *idx -= 1;
-                        }
-                    }
-                }
+                entry.retain(|row_id| !deleted_row_ids.contains(row_id));
             }
         }
     }
@@ -662,12 +617,12 @@ pub fn update_indexes_on_delete(
 pub fn update_indexes_on_update(
     db: &mut Database,
     table_name: &str,
-    row_idx: usize,
+    row_id: RowId,
     old_row: &[Value],
     new_row: &[Value],
 ) -> Result<(), RustqlError> {
     let db_snapshot = db.clone();
-    let table = db
+    let table = db_snapshot
         .tables
         .get(table_name)
         .ok_or_else(|| RustqlError::TableNotFound(table_name.to_string()))?;
@@ -689,14 +644,14 @@ pub fn update_indexes_on_update(
 
             match (old_matches, new_matches) {
                 (true, true) if old_value != new_value => {
-                    remove_row_from_entries(&mut index.entries, &old_value, row_idx);
-                    index.entries.entry(new_value).or_default().push(row_idx);
+                    remove_row_from_entries(&mut index.entries, &old_value, row_id);
+                    index.entries.entry(new_value).or_default().push(row_id);
                 }
                 (true, false) => {
-                    remove_row_from_entries(&mut index.entries, &old_value, row_idx);
+                    remove_row_from_entries(&mut index.entries, &old_value, row_id);
                 }
                 (false, true) => {
-                    index.entries.entry(new_value).or_default().push(row_idx);
+                    index.entries.entry(new_value).or_default().push(row_id);
                 }
                 _ => {}
             }
@@ -715,14 +670,14 @@ pub fn update_indexes_on_update(
 
             match (old_matches, new_matches) {
                 (true, true) if old_key != new_key => {
-                    remove_row_from_entries(&mut index.entries, &old_key, row_idx);
-                    index.entries.entry(new_key).or_default().push(row_idx);
+                    remove_row_from_entries(&mut index.entries, &old_key, row_id);
+                    index.entries.entry(new_key).or_default().push(row_id);
                 }
                 (true, false) => {
-                    remove_row_from_entries(&mut index.entries, &old_key, row_idx);
+                    remove_row_from_entries(&mut index.entries, &old_key, row_id);
                 }
                 (false, true) => {
-                    index.entries.entry(new_key).or_default().push(row_idx);
+                    index.entries.entry(new_key).or_default().push(row_id);
                 }
                 _ => {}
             }
@@ -1002,7 +957,7 @@ fn find_index_for_column<'a>(
     table_name: &str,
     column_name: &str,
     query_expr: &Expression,
-) -> Option<&'a crate::database::Index> {
+) -> Option<&'a Index> {
     let normalized_col = normalize_column_name(column_name);
 
     db.indexes.values().find(|idx| {
@@ -1047,12 +1002,12 @@ pub(crate) fn row_matches_index_filter(
 }
 
 fn remove_row_from_entries<K: Ord + Clone>(
-    entries: &mut BTreeMap<K, Vec<usize>>,
+    entries: &mut BTreeMap<K, Vec<RowId>>,
     key: &K,
-    row_idx: usize,
+    row_id: RowId,
 ) {
     if let Some(entry) = entries.get_mut(key) {
-        entry.retain(|&idx| idx != row_idx);
+        entry.retain(|candidate| *candidate != row_id);
         if entry.is_empty() {
             entries.remove(key);
         }
@@ -1086,8 +1041,8 @@ pub fn get_indexed_rows(
     db: &Database,
     table: &Table,
     usage: &IndexUsage,
-) -> Result<HashSet<usize>, RustqlError> {
-    let mut row_indices = HashSet::new();
+) -> Result<HashSet<RowId>, RustqlError> {
+    let mut row_ids = HashSet::new();
 
     match usage {
         IndexUsage::Equality { value, .. } => {
@@ -1096,7 +1051,7 @@ pub fn get_indexed_rows(
                 .get(usage.index_name())
                 .ok_or_else(|| "Index not found".to_string())?;
             if let Some(rows) = index.entries.get(value) {
-                row_indices.extend(rows.iter().copied());
+                row_ids.extend(rows.iter().copied());
             }
         }
         IndexUsage::In { values, .. } => {
@@ -1106,7 +1061,7 @@ pub fn get_indexed_rows(
                 .ok_or_else(|| "Index not found".to_string())?;
             for value in values {
                 if let Some(rows) = index.entries.get(value) {
-                    row_indices.extend(rows.iter().copied());
+                    row_ids.extend(rows.iter().copied());
                 }
             }
         }
@@ -1119,7 +1074,7 @@ pub fn get_indexed_rows(
                 .ok_or_else(|| "Index not found".to_string())?;
             if *inclusive {
                 for (_, rows) in index.entries.range(value..) {
-                    row_indices.extend(rows.iter().copied());
+                    row_ids.extend(rows.iter().copied());
                 }
             } else {
                 use std::ops::Bound;
@@ -1127,7 +1082,7 @@ pub fn get_indexed_rows(
                     .entries
                     .range((Bound::Excluded(value), Bound::Unbounded))
                 {
-                    row_indices.extend(rows.iter().copied());
+                    row_ids.extend(rows.iter().copied());
                 }
             }
         }
@@ -1140,11 +1095,11 @@ pub fn get_indexed_rows(
                 .ok_or_else(|| "Index not found".to_string())?;
             if *inclusive {
                 for (_, rows) in index.entries.range(..=value) {
-                    row_indices.extend(rows.iter().copied());
+                    row_ids.extend(rows.iter().copied());
                 }
             } else {
                 for (_, rows) in index.entries.range(..value) {
-                    row_indices.extend(rows.iter().copied());
+                    row_ids.extend(rows.iter().copied());
                 }
             }
         }
@@ -1154,7 +1109,7 @@ pub fn get_indexed_rows(
                 .get(usage.index_name())
                 .ok_or_else(|| "Index not found".to_string())?;
             for (_, rows) in index.entries.range(lower..=upper) {
-                row_indices.extend(rows.iter().copied());
+                row_ids.extend(rows.iter().copied());
             }
         }
         IndexUsage::CompositePrefix { values, .. } => {
@@ -1165,41 +1120,44 @@ pub fn get_indexed_rows(
 
             if values.len() == index.columns.len() {
                 if let Some(rows) = index.entries.get(values) {
-                    row_indices.extend(rows.iter().copied());
+                    row_ids.extend(rows.iter().copied());
                 }
             } else {
                 for (key, rows) in &index.entries {
                     if key.starts_with(values) {
-                        row_indices.extend(rows.iter().copied());
+                        row_ids.extend(rows.iter().copied());
                     }
                 }
             }
         }
     }
 
-    let valid_indices: HashSet<usize> = row_indices
+    Ok(row_ids
         .into_iter()
-        .filter(|&idx| idx < table.rows.len())
-        .collect();
-
-    Ok(valid_indices)
+        .filter(|row_id| table.position_of_row_id(*row_id).is_some())
+        .collect())
 }
 
-pub(crate) fn execute_truncate_table(
+pub fn execute_truncate_table(
+    context: &ExecutionContext,
     table_name: String,
-    ctx: &ExecutionContext,
-) -> Result<String, RustqlError> {
-    let mut db = get_database_write(ctx);
+) -> Result<QueryResult, RustqlError> {
+    let mut db = get_database_write(context);
     let table = db
         .tables
         .get_mut(&table_name)
         .ok_or_else(|| RustqlError::TableNotFound(table_name.clone()))?;
     let old_rows = std::mem::take(&mut table.rows);
-    wal::record_wal_entry(
-        ctx,
+    let old_row_ids = std::mem::take(&mut table.row_ids);
+    let old_next_row_id = table.next_row_id;
+    table.next_row_id = 1;
+    super::record_wal_entry(
+        context,
         WalEntry::TruncateTable {
             name: table_name.clone(),
             old_rows,
+            old_row_ids,
+            old_next_row_id,
         },
     );
     for index in db.indexes.values_mut() {
@@ -1212,16 +1170,16 @@ pub(crate) fn execute_truncate_table(
             index.entries.clear();
         }
     }
-    save_if_not_in_transaction(ctx, &db)?;
-    Ok(format!("Table '{}' truncated", table_name))
+    save_if_not_in_transaction(context, &db)?;
+    Ok(command_result(CommandTag::TruncateTable, 0))
 }
 
-pub(crate) fn execute_create_view(
+pub fn execute_create_view(
+    context: &ExecutionContext,
     name: String,
     query_sql: String,
-    ctx: &ExecutionContext,
-) -> Result<String, RustqlError> {
-    let mut db = get_database_write(ctx);
+) -> Result<QueryResult, RustqlError> {
+    let mut db = get_database_write(context);
     if db.views.contains_key(&name) {
         return Err(RustqlError::Internal(format!(
             "View '{}' already exists",
@@ -1235,29 +1193,29 @@ pub(crate) fn execute_create_view(
             query_sql,
         },
     );
-    wal::record_wal_entry(ctx, WalEntry::CreateView { name: name.clone() });
-    save_if_not_in_transaction(ctx, &db)?;
-    Ok(format!("View '{}' created", name))
+    super::record_wal_entry(context, WalEntry::CreateView { name: name.clone() });
+    save_if_not_in_transaction(context, &db)?;
+    Ok(command_result(CommandTag::CreateView, 0))
 }
 
-pub(crate) fn execute_drop_view(
+pub fn execute_drop_view(
+    context: &ExecutionContext,
     name: String,
     if_exists: bool,
-    ctx: &ExecutionContext,
-) -> Result<String, RustqlError> {
-    let mut db = get_database_write(ctx);
+) -> Result<QueryResult, RustqlError> {
+    let mut db = get_database_write(context);
     if let Some(removed) = db.views.remove(&name) {
-        wal::record_wal_entry(
-            ctx,
+        super::record_wal_entry(
+            context,
             WalEntry::DropView {
                 name: name.clone(),
                 view: removed,
             },
         );
-        save_if_not_in_transaction(ctx, &db)?;
-        Ok(format!("View '{}' dropped", name))
+        save_if_not_in_transaction(context, &db)?;
+        Ok(command_result(CommandTag::DropView, 0))
     } else if if_exists {
-        Ok(format!("View '{}' does not exist (skipped)", name))
+        Ok(command_result(CommandTag::DropView, 0))
     } else {
         Err(RustqlError::Internal(format!(
             "View '{}' does not exist",

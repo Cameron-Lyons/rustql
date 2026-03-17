@@ -1,5 +1,6 @@
 use rustql::ast::{ColumnDefinition, CreateTableStatement, DataType, Statement, Value};
-use rustql::executor::*;
+use rustql::executor::format_value;
+use rustql::testing::{execute, reset_database};
 
 #[test]
 fn test_format_value() {
@@ -9,7 +10,7 @@ fn test_format_value() {
 
 #[test]
 fn test_create_table() {
-    reset_database_state();
+    reset_database();
     let stmt = Statement::CreateTable(CreateTableStatement {
         name: "users".into(),
         columns: vec![

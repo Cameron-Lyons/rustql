@@ -2,6 +2,9 @@ use crate::ast::*;
 use crate::error::RustqlError;
 use crate::lexer::Token;
 
+type ParseOverClauseResult =
+    Result<(Vec<Expression>, Vec<OrderByExpr>, Option<WindowFrame>), RustqlError>;
+
 pub struct Parser {
     tokens: Vec<Token>,
     current: usize,
@@ -1028,10 +1031,7 @@ impl Parser {
         })
     }
 
-    #[allow(clippy::type_complexity)]
-    fn parse_over_clause(
-        &mut self,
-    ) -> Result<(Vec<Expression>, Vec<OrderByExpr>, Option<WindowFrame>), RustqlError> {
+    fn parse_over_clause(&mut self) -> ParseOverClauseResult {
         self.consume(Token::Over)?;
         if let Token::Identifier(ref _name) = *self.current_token() {
             let window_name = match self.advance() {
@@ -4251,4 +4251,24 @@ fn token_to_sql(tok: &Token) -> String {
 pub fn parse(tokens: Vec<Token>) -> Result<Statement, RustqlError> {
     let mut parser = Parser::new(tokens);
     parser.parse_statement()
+}
+
+pub fn parse_script(tokens: Vec<Token>) -> Result<Vec<Statement>, RustqlError> {
+    let mut parser = Parser::new(tokens);
+    let mut statements = Vec::new();
+
+    while *parser.current_token() != Token::Eof {
+        if *parser.current_token() == Token::Semicolon {
+            parser.advance();
+            continue;
+        }
+
+        statements.push(parser.parse_statement()?);
+
+        if *parser.current_token() == Token::Semicolon {
+            parser.advance();
+        }
+    }
+
+    Ok(statements)
 }

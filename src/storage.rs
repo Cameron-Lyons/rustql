@@ -1,113 +1,27 @@
-use crate::ast::Value;
-use crate::database::Database;
+use crate::ast::{ColumnDefinition, TableConstraint, Value};
+use crate::database::{Database, RowId};
 use crate::error::RustqlError;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
-use std::env;
 use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
 pub trait StorageEngine: Send + Sync {
-    fn load(&self) -> Database;
+    fn load(&self) -> Result<Database, RustqlError>;
 
     fn save(&self, db: &Database) -> Result<(), RustqlError>;
-}
 
-pub const DEFAULT_JSON_STORAGE_PATH: &str = "rustql_data.json";
-pub const DEFAULT_BTREE_STORAGE_PATH: &str = "rustql_btree.dat";
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DefaultStorageBackend {
-    Json,
-    BTree,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DefaultStoragePaths {
-    pub json_path: PathBuf,
-    pub btree_path: PathBuf,
-}
-
-pub fn default_storage_backend() -> DefaultStorageBackend {
-    match env::var("RUSTQL_STORAGE") {
-        Ok(value) if value.eq_ignore_ascii_case("btree") => DefaultStorageBackend::BTree,
-        _ => DefaultStorageBackend::Json,
-    }
-}
-
-fn should_use_test_storage_paths() -> bool {
-    env::current_exe()
-        .ok()
-        .and_then(|path| path.parent().map(|parent| parent.to_path_buf()))
-        .and_then(|parent| parent.file_name().map(|name| name.to_os_string()))
-        .is_some_and(|name| name == "deps")
-}
-
-fn implicit_default_storage_paths() -> DefaultStoragePaths {
-    if should_use_test_storage_paths() {
-        let binary_name = env::current_exe()
-            .ok()
-            .and_then(|path| {
-                path.file_stem()
-                    .map(|stem| stem.to_string_lossy().into_owned())
-            })
-            .unwrap_or_else(|| "rustql-tests".to_string());
-        let temp_dir = env::temp_dir();
-        let pid = std::process::id();
-
-        return DefaultStoragePaths {
-            json_path: temp_dir.join(format!("{binary_name}-{pid}.json")),
-            btree_path: temp_dir.join(format!("{binary_name}-{pid}.dat")),
-        };
+    fn begin_transaction(&self) -> Result<(), RustqlError> {
+        Ok(())
     }
 
-    DefaultStoragePaths {
-        json_path: PathBuf::from(DEFAULT_JSON_STORAGE_PATH),
-        btree_path: PathBuf::from(DEFAULT_BTREE_STORAGE_PATH),
-    }
-}
-
-pub fn default_storage_paths() -> DefaultStoragePaths {
-    let defaults = implicit_default_storage_paths();
-
-    DefaultStoragePaths {
-        json_path: env::var_os("RUSTQL_JSON_PATH")
-            .map(PathBuf::from)
-            .unwrap_or(defaults.json_path),
-        btree_path: env::var_os("RUSTQL_BTREE_PATH")
-            .map(PathBuf::from)
-            .unwrap_or(defaults.btree_path),
-    }
-}
-
-pub struct InMemoryStorageEngine {
-    database: RwLock<Database>,
-}
-
-impl InMemoryStorageEngine {
-    pub fn new() -> Self {
-        Self {
-            database: RwLock::new(Database::new()),
-        }
-    }
-}
-
-impl Default for InMemoryStorageEngine {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl StorageEngine for InMemoryStorageEngine {
-    fn load(&self) -> Database {
-        self.database.read().unwrap().clone()
+    fn prepare_commit(&self, _db: &Database) -> Result<(), RustqlError> {
+        Ok(())
     }
 
-    fn save(&self, db: &Database) -> Result<(), RustqlError> {
-        let mut stored = self.database.write().unwrap();
-        *stored = db.clone();
+    fn clear_transaction(&self) -> Result<(), RustqlError> {
         Ok(())
     }
 }
@@ -127,19 +41,23 @@ impl JsonStorageEngine {
 }
 
 impl StorageEngine for JsonStorageEngine {
-    fn load(&self) -> Database {
+    fn load(&self) -> Result<Database, RustqlError> {
         let _guard = self.lock.read().unwrap();
         if Path::new(&self.path).exists() {
             let data = fs::read_to_string(&self.path).unwrap_or_default();
-            serde_json::from_str(&data).unwrap_or_default()
+            let mut db: Database = serde_json::from_str(&data).unwrap_or_default();
+            db.normalize_row_ids();
+            Ok(db)
         } else {
-            Database::new()
+            Ok(Database::new())
         }
     }
 
     fn save(&self, db: &Database) -> Result<(), RustqlError> {
         let _guard = self.lock.write().unwrap();
-        let data = serde_json::to_string_pretty(db).map_err(|e| {
+        let mut db = db.clone();
+        db.normalize_row_ids();
+        let data = serde_json::to_string_pretty(&db).map_err(|e| {
             RustqlError::StorageError(format!("Failed to serialize database: {}", e))
         })?;
         fs::write(&self.path, data).map_err(|e| {
@@ -149,15 +67,117 @@ impl StorageEngine for JsonStorageEngine {
     }
 }
 
-pub fn default_storage_engine() -> Box<dyn StorageEngine> {
-    let paths = default_storage_paths();
-    match default_storage_backend() {
-        DefaultStorageBackend::BTree => Box::new(BTreeStorageEngine::new(paths.btree_path)),
-        DefaultStorageBackend::Json => Box::new(JsonStorageEngine::new(paths.json_path)),
+fn default_engine() -> Box<dyn StorageEngine> {
+    match std::env::var("RUSTQL_STORAGE") {
+        Ok(v) if v.eq_ignore_ascii_case("btree") => {
+            Box::new(BTreeStorageEngine::new("rustql_btree.dat"))
+        }
+        _ => Box::new(JsonStorageEngine::new("rustql_data.json")),
     }
 }
 
+pub fn load_database() -> Database {
+    default_engine().load().unwrap_or_default()
+}
+
+pub fn save_database(db: &Database) -> Result<(), RustqlError> {
+    default_engine().save(db)
+}
+
 const MAX_CACHE_SIZE: usize = 1000;
+const FILE_HEADER_SIZE: usize = 16;
+const HEADER_RESERVED: u32 = 0;
+const JOURNAL_MAGIC: [u8; 8] = *b"RSTQLJW\0";
+const JOURNAL_VERSION: u32 = 1;
+
+#[derive(Serialize, Deserialize)]
+enum TransactionJournal {
+    Pending,
+    Committed { database: Database },
+}
+
+#[derive(Serialize, Deserialize)]
+struct TableStorageRecord {
+    columns: Vec<ColumnDefinition>,
+    constraints: Vec<TableConstraint>,
+    next_row_id: u64,
+}
+
+enum VersionedFileState {
+    Missing,
+    Empty,
+    Valid,
+}
+
+fn read_versioned_header(
+    path: &Path,
+    expected_magic: [u8; 8],
+    expected_version: u32,
+    label: &str,
+) -> Result<VersionedFileState, RustqlError> {
+    if !path.exists() {
+        return Ok(VersionedFileState::Missing);
+    }
+
+    let metadata = fs::metadata(path)
+        .map_err(|e| RustqlError::StorageError(format!("Failed to stat {}: {}", label, e)))?;
+
+    if metadata.len() == 0 {
+        return Ok(VersionedFileState::Empty);
+    }
+
+    if metadata.len() < FILE_HEADER_SIZE as u64 {
+        return Err(RustqlError::StorageError(format!(
+            "{} header is truncated",
+            label
+        )));
+    }
+
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .open(path)
+        .map_err(|e| RustqlError::StorageError(format!("Failed to open {}: {}", label, e)))?;
+
+    let mut header = [0u8; FILE_HEADER_SIZE];
+    file.read_exact(&mut header).map_err(|e| {
+        RustqlError::StorageError(format!("Failed to read {} header: {}", label, e))
+    })?;
+
+    if header[0..8] != expected_magic {
+        return Err(RustqlError::StorageError(format!(
+            "{} has an invalid header",
+            label
+        )));
+    }
+
+    let version = u32::from_le_bytes([header[8], header[9], header[10], header[11]]);
+    if version != expected_version {
+        return Err(RustqlError::StorageError(format!(
+            "Unsupported {} format version: {}",
+            label, version
+        )));
+    }
+
+    Ok(VersionedFileState::Valid)
+}
+
+fn write_versioned_header(
+    file: &mut std::fs::File,
+    magic: [u8; 8],
+    version: u32,
+    label: &str,
+) -> Result<(), RustqlError> {
+    file.seek(SeekFrom::Start(0))
+        .map_err(|e| RustqlError::StorageError(format!("Failed to seek {}: {}", label, e)))?;
+
+    let mut header = Vec::with_capacity(FILE_HEADER_SIZE);
+    header.extend_from_slice(&magic);
+    header.extend_from_slice(&version.to_le_bytes());
+    header.extend_from_slice(&HEADER_RESERVED.to_le_bytes());
+
+    file.write_all(&header)
+        .map_err(|e| RustqlError::StorageError(format!("Failed to write {} header: {}", label, e)))
+}
 
 struct PageCache {
     pages: HashMap<u64, BTreePage>,
@@ -275,24 +295,175 @@ impl BTreeStorageEngine {
             cache.access_order.retain(|&id| id != page_id);
         }
     }
+
+    fn journal_path(&self) -> PathBuf {
+        let mut path = self.data_path.as_os_str().to_os_string();
+        path.push(".wal");
+        PathBuf::from(path)
+    }
+
+    fn write_journal_locked(&self, journal: &TransactionJournal) -> Result<(), RustqlError> {
+        let path = self.journal_path();
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&path)
+            .map_err(|e| {
+                RustqlError::StorageError(format!(
+                    "Failed to create transaction journal '{}': {}",
+                    path.display(),
+                    e
+                ))
+            })?;
+
+        write_versioned_header(
+            &mut file,
+            JOURNAL_MAGIC,
+            JOURNAL_VERSION,
+            "transaction journal",
+        )?;
+        let payload = serde_json::to_vec(journal).map_err(|e| {
+            RustqlError::StorageError(format!(
+                "Failed to serialize transaction journal '{}': {}",
+                path.display(),
+                e
+            ))
+        })?;
+        file.write_all(&payload).map_err(|e| {
+            RustqlError::StorageError(format!(
+                "Failed to write transaction journal '{}': {}",
+                path.display(),
+                e
+            ))
+        })?;
+        file.flush().map_err(|e| {
+            RustqlError::StorageError(format!(
+                "Failed to flush transaction journal '{}': {}",
+                path.display(),
+                e
+            ))
+        })
+    }
+
+    fn read_journal_locked(&self) -> Result<Option<TransactionJournal>, RustqlError> {
+        let path = self.journal_path();
+        match read_versioned_header(&path, JOURNAL_MAGIC, JOURNAL_VERSION, "transaction journal")? {
+            VersionedFileState::Missing | VersionedFileState::Empty => Ok(None),
+            VersionedFileState::Valid => {
+                let mut file = std::fs::OpenOptions::new()
+                    .read(true)
+                    .open(&path)
+                    .map_err(|e| {
+                        RustqlError::StorageError(format!(
+                            "Failed to open transaction journal '{}': {}",
+                            path.display(),
+                            e
+                        ))
+                    })?;
+                file.seek(SeekFrom::Start(FILE_HEADER_SIZE as u64))
+                    .map_err(|e| {
+                        RustqlError::StorageError(format!(
+                            "Failed to seek transaction journal '{}': {}",
+                            path.display(),
+                            e
+                        ))
+                    })?;
+                let mut payload = Vec::new();
+                file.read_to_end(&mut payload).map_err(|e| {
+                    RustqlError::StorageError(format!(
+                        "Failed to read transaction journal '{}': {}",
+                        path.display(),
+                        e
+                    ))
+                })?;
+                if payload.is_empty() {
+                    return Ok(None);
+                }
+                let journal = serde_json::from_slice(&payload).map_err(|e| {
+                    RustqlError::StorageError(format!(
+                        "Failed to decode transaction journal '{}': {}",
+                        path.display(),
+                        e
+                    ))
+                })?;
+                Ok(Some(journal))
+            }
+        }
+    }
+
+    fn clear_journal_locked(&self) -> Result<(), RustqlError> {
+        let path = self.journal_path();
+        if !path.exists() {
+            return Ok(());
+        }
+        fs::remove_file(&path).map_err(|e| {
+            RustqlError::StorageError(format!(
+                "Failed to remove transaction journal '{}': {}",
+                path.display(),
+                e
+            ))
+        })
+    }
+
+    fn recover_if_needed_locked(&self) -> Result<(), RustqlError> {
+        let Some(journal) = self.read_journal_locked()? else {
+            return Ok(());
+        };
+
+        match journal {
+            TransactionJournal::Pending => {
+                self.clear_journal_locked()?;
+            }
+            TransactionJournal::Committed { database } => {
+                self.save_locked(&database)?;
+                self.clear_journal_locked()?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn save_locked(&self, db: &Database) -> Result<(), RustqlError> {
+        let mut db = db.clone();
+        db.normalize_row_ids();
+        let mut file = BTreeFile::create(&self.data_path)?;
+        let result = file.write_database_via_pages(&db);
+        self.clear_cache();
+        result
+    }
 }
 
 impl StorageEngine for BTreeStorageEngine {
-    fn load(&self) -> Database {
-        let _path_guard = self.path_lock.read().unwrap();
+    fn load(&self) -> Result<Database, RustqlError> {
+        let _path_guard = self.path_lock.write().unwrap();
+        self.recover_if_needed_locked()?;
         let mut cached_file = CachedBTreeFile { engine: self };
-        match cached_file.read_database_via_pages() {
-            Ok(db) => db,
-            Err(_) => Database::new(),
-        }
+        let mut db = cached_file.read_database_via_pages()?;
+        db.normalize_row_ids();
+        Ok(db)
     }
 
     fn save(&self, db: &Database) -> Result<(), RustqlError> {
         let _path_guard = self.path_lock.write().unwrap();
-        let mut file = BTreeFile::create(&self.data_path)?;
-        let result = file.write_database_via_pages(db);
-        self.clear_cache();
-        result
+        self.save_locked(db)
+    }
+
+    fn begin_transaction(&self) -> Result<(), RustqlError> {
+        let _path_guard = self.path_lock.write().unwrap();
+        self.write_journal_locked(&TransactionJournal::Pending)
+    }
+
+    fn prepare_commit(&self, db: &Database) -> Result<(), RustqlError> {
+        let _path_guard = self.path_lock.write().unwrap();
+        self.write_journal_locked(&TransactionJournal::Committed {
+            database: db.clone(),
+        })
+    }
+
+    fn clear_transaction(&self) -> Result<(), RustqlError> {
+        let _path_guard = self.path_lock.write().unwrap();
+        self.clear_journal_locked()
     }
 }
 
@@ -306,33 +477,21 @@ impl<'a> CachedBTreeFile<'a> {
     }
 
     fn read_database_via_pages(&mut self) -> Result<Database, RustqlError> {
-        let mut file = BTreeFile::open(&self.engine.data_path)?;
+        match read_versioned_header(
+            &self.engine.data_path,
+            BTreeFile::MAGIC,
+            BTreeFile::VERSION,
+            "BTree storage file",
+        )? {
+            VersionedFileState::Missing | VersionedFileState::Empty => return Ok(Database::new()),
+            VersionedFileState::Valid => {}
+        }
 
-        let file_size = file
-            .file
-            .metadata()
+        let file_size = fs::metadata(&self.engine.data_path)
             .map_err(|e| RustqlError::StorageError(format!("Failed to get file metadata: {}", e)))?
             .len();
 
-        if file_size < 16 {
-            return Ok(Database::new());
-        }
-
-        let mut header = [0u8; 16];
-        file.file
-            .seek(SeekFrom::Start(0))
-            .map_err(|e| RustqlError::StorageError(format!("Failed to seek to start: {}", e)))?;
-        let bytes_read = file.file.read(&mut header).map_err(|e| {
-            RustqlError::StorageError(format!("Failed to read BTree storage header: {}", e))
-        })?;
-
-        if bytes_read < header.len() || header[0..8] != BTreeFile::MAGIC {
-            return file.read_database_legacy().or_else(|_| Ok(Database::new()));
-        }
-
-        let _version = u32::from_le_bytes([header[8], header[9], header[10], header[11]]);
-
-        if file_size < 16 + BTREE_PAGE_SIZE as u64 {
+        if file_size < FILE_HEADER_SIZE as u64 + BTREE_PAGE_SIZE as u64 {
             return Ok(Database::new());
         }
 
@@ -353,22 +512,6 @@ impl<'a> CachedBTreeFile<'a> {
             .map(|e| e.pointer)
             .unwrap_or(1);
 
-        let root_page = self.read_page(root_page_id)?;
-
-        if root_page.entries.len() == 1
-            && let Some(entry) = root_page.entries.first()
-            && let Value::Text(ref json_str) = entry.key
-            && json_str.starts_with('{')
-            && json_str.len() > 100
-        {
-            return serde_json::from_str(json_str).map_err(|e| {
-                RustqlError::StorageError(format!(
-                    "Failed to decode Database from BTree root page: {}",
-                    e
-                ))
-            });
-        }
-
         self.load_database_from_rows(root_page_id)
     }
 
@@ -384,8 +527,8 @@ impl<'a> CachedBTreeFile<'a> {
                 && let Some(table_name) = key_str.strip_prefix("schema:")
             {
                 let schema_json = self.read_data_from_pointer(pointer)?;
-                let columns: Vec<crate::ast::ColumnDefinition> = serde_json::from_str(&schema_json)
-                    .map_err(|e| {
+                let schema: TableStorageRecord =
+                    serde_json::from_str(&schema_json).map_err(|e| {
                         format!(
                             "Failed to deserialize schema for table {}: {}",
                             table_name, e
@@ -395,9 +538,11 @@ impl<'a> CachedBTreeFile<'a> {
                 db.tables.insert(
                     table_name.to_string(),
                     crate::database::Table {
-                        columns,
+                        columns: schema.columns,
                         rows: Vec::new(),
-                        constraints: Vec::new(),
+                        row_ids: Vec::new(),
+                        next_row_id: schema.next_row_id,
+                        constraints: schema.constraints,
                     },
                 );
             }
@@ -408,12 +553,12 @@ impl<'a> CachedBTreeFile<'a> {
             let row_end = Value::Text(format!("row:{};", table_name));
             let rows = self.range_scan(Some(&row_prefix), Some(&row_end), root_page_id)?;
 
-            let mut row_indices: Vec<(usize, Vec<Value>)> = Vec::new();
+            let mut row_indices: Vec<(RowId, Vec<Value>)> = Vec::new();
 
             for (key, pointer) in rows {
                 if let Value::Text(ref key_str) = key
                     && let Some(row_id_str) = key_str.strip_prefix(&format!("row:{}:", table_name))
-                    && let Ok(row_index) = row_id_str.parse::<usize>()
+                    && let Ok(row_id) = row_id_str.parse::<u64>()
                 {
                     let row_json = self.read_data_from_pointer(pointer)?;
                     let row: Vec<Value> = serde_json::from_str(&row_json).map_err(|e| {
@@ -422,16 +567,19 @@ impl<'a> CachedBTreeFile<'a> {
                             row_id_str, table_name, e
                         )
                     })?;
-                    row_indices.push((row_index, row));
+                    row_indices.push((RowId(row_id), row));
                 }
             }
 
-            row_indices.sort_by_key(|(idx, _)| *idx);
+            row_indices.sort_by_key(|(row_id, _)| *row_id);
+            let sorted_row_ids: Vec<RowId> =
+                row_indices.iter().map(|(row_id, _)| *row_id).collect();
             let sorted_rows: Vec<Vec<Value>> =
                 row_indices.into_iter().map(|(_, row)| row).collect();
 
             if let Some(table_ref) = db.tables.get_mut(&table_name) {
                 table_ref.rows = sorted_rows;
+                table_ref.row_ids = sorted_row_ids;
             }
         }
 
@@ -447,6 +595,42 @@ impl<'a> CachedBTreeFile<'a> {
                 let index: crate::database::Index = serde_json::from_str(&index_json)
                     .map_err(|e| format!("Failed to deserialize index {}: {}", index_name, e))?;
                 db.indexes.insert(index_name.to_string(), index);
+            }
+        }
+
+        let cindex_prefix = Value::Text("cindex:".to_string());
+        let cindex_end = Value::Text("cindex;".to_string());
+        let composite_indexes =
+            self.range_scan(Some(&cindex_prefix), Some(&cindex_end), root_page_id)?;
+
+        for (key, pointer) in composite_indexes {
+            if let Value::Text(ref key_str) = key
+                && let Some(index_name) = key_str.strip_prefix("cindex:")
+            {
+                let index_json = self.read_data_from_pointer(pointer)?;
+                let index: crate::database::CompositeIndex = serde_json::from_str(&index_json)
+                    .map_err(|e| {
+                        format!(
+                            "Failed to deserialize composite index {}: {}",
+                            index_name, e
+                        )
+                    })?;
+                db.composite_indexes.insert(index_name.to_string(), index);
+            }
+        }
+
+        let view_prefix = Value::Text("view:".to_string());
+        let view_end = Value::Text("view;".to_string());
+        let views = self.range_scan(Some(&view_prefix), Some(&view_end), root_page_id)?;
+
+        for (key, pointer) in views {
+            if let Value::Text(ref key_str) = key
+                && let Some(view_name) = key_str.strip_prefix("view:")
+            {
+                let view_json = self.read_data_from_pointer(pointer)?;
+                let view: crate::database::View = serde_json::from_str(&view_json)
+                    .map_err(|e| format!("Failed to deserialize view {}: {}", view_name, e))?;
+                db.views.insert(view_name.to_string(), view);
             }
         }
 
@@ -473,73 +657,45 @@ impl<'a> CachedBTreeFile<'a> {
         end_key: Option<&Value>,
         root_page_id: u64,
     ) -> Result<Vec<(Value, u64)>, RustqlError> {
-        let mut results = Vec::new();
+        let mut entries = Vec::new();
+        self.collect_entries(root_page_id, &mut entries)?;
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(entries
+            .into_iter()
+            .filter(|(key, _)| match (start_key, end_key) {
+                (Some(start), Some(end)) => key >= start && key <= end,
+                (Some(start), None) => key >= start,
+                (None, Some(end)) => key <= end,
+                (None, None) => true,
+            })
+            .collect())
+    }
 
-        let current_page_id = self.find_starting_leaf(start_key, root_page_id)?;
-
-        let page = self.read_page(current_page_id)?;
+    fn collect_entries(
+        &self,
+        page_id: u64,
+        entries: &mut Vec<(Value, u64)>,
+    ) -> Result<(), RustqlError> {
+        let page = self.read_page(page_id)?;
 
         match page.header.kind {
             PageKind::Leaf => {
+                entries.extend(
+                    page.entries
+                        .iter()
+                        .map(|entry| (entry.key.clone(), entry.pointer)),
+                );
+                Ok(())
+            }
+            PageKind::Internal => {
                 for entry in &page.entries {
-                    let in_range = match (start_key, end_key) {
-                        (Some(start), Some(end)) => entry.key >= *start && entry.key <= *end,
-                        (Some(start), None) => entry.key >= *start,
-                        (None, Some(end)) => entry.key <= *end,
-                        (None, None) => true,
-                    };
-
-                    if in_range {
-                        results.push((entry.key.clone(), entry.pointer));
-                    } else if end_key.is_some() && &entry.key > end_key.unwrap() {
-                        return Ok(results);
-                    }
+                    self.collect_entries(entry.pointer, entries)?;
                 }
+                Ok(())
             }
-            _ => {
-                return Err(RustqlError::StorageError(
-                    "Expected leaf page in range scan".to_string(),
-                ));
-            }
-        }
-
-        Ok(results)
-    }
-
-    fn find_starting_leaf(
-        &self,
-        start_key: Option<&Value>,
-        root_page_id: u64,
-    ) -> Result<u64, RustqlError> {
-        let mut current_page_id = root_page_id;
-
-        loop {
-            let page = self.read_page(current_page_id)?;
-
-            match page.header.kind {
-                PageKind::Leaf => {
-                    return Ok(current_page_id);
-                }
-                PageKind::Internal => {
-                    let mut next_page_id = None;
-                    if let Some(start) = start_key {
-                        for entry in &page.entries {
-                            if &entry.key > start {
-                                next_page_id = Some(entry.pointer);
-                                break;
-                            }
-                        }
-                    }
-                    current_page_id = next_page_id
-                        .or_else(|| page.entries.first().map(|e| e.pointer))
-                        .ok_or_else(|| "Invalid internal page structure".to_string())?;
-                }
-                PageKind::Meta => {
-                    return Err(RustqlError::StorageError(
-                        "Cannot find leaf in meta page".to_string(),
-                    ));
-                }
-            }
+            PageKind::Meta => Err(RustqlError::StorageError(
+                "Cannot scan entries from meta page".to_string(),
+            )),
         }
     }
 }
@@ -550,7 +706,7 @@ struct BTreeFile {
 
 impl BTreeFile {
     const MAGIC: [u8; 8] = *b"RSTQLBT\0";
-    const VERSION: u32 = 1;
+    const VERSION: u32 = 2;
 
     fn open(path: &Path) -> Result<Self, RustqlError> {
         let file = std::fs::OpenOptions::new()
@@ -578,32 +734,6 @@ impl BTreeFile {
         Ok(BTreeFile { file })
     }
 
-    fn read_database_legacy(&mut self) -> Result<Database, RustqlError> {
-        let mut header = [0u8; 16];
-        let bytes_read = self.file.read(&mut header).map_err(|e| {
-            RustqlError::StorageError(format!("Failed to read BTree storage header: {}", e))
-        })?;
-
-        if bytes_read < header.len() || header[0..8] != Self::MAGIC {
-            return Ok(Database::new());
-        }
-
-        let _version = u32::from_le_bytes([header[8], header[9], header[10], header[11]]);
-
-        let mut buf = Vec::new();
-        self.file.read_to_end(&mut buf).map_err(|e| {
-            RustqlError::StorageError(format!("Failed to read BTree storage payload: {}", e))
-        })?;
-
-        if buf.is_empty() {
-            return Ok(Database::new());
-        }
-
-        serde_json::from_slice(&buf).map_err(|e| {
-            RustqlError::StorageError(format!("Failed to decode BTree storage payload: {}", e))
-        })
-    }
-
     #[allow(dead_code)]
     fn read_database_via_pages(&mut self) -> Result<Database, RustqlError> {
         let file_size = self
@@ -612,25 +742,39 @@ impl BTreeFile {
             .map_err(|e| RustqlError::StorageError(format!("Failed to get file metadata: {}", e)))?
             .len();
 
-        if file_size < 16 {
+        if file_size == 0 {
             return Ok(Database::new());
         }
 
-        let mut header = [0u8; 16];
+        if file_size < FILE_HEADER_SIZE as u64 {
+            return Err(RustqlError::StorageError(
+                "BTree storage file header is truncated".to_string(),
+            ));
+        }
+
+        let mut header = [0u8; FILE_HEADER_SIZE];
         self.file
             .seek(SeekFrom::Start(0))
             .map_err(|e| RustqlError::StorageError(format!("Failed to seek to start: {}", e)))?;
-        let bytes_read = self.file.read(&mut header).map_err(|e| {
+        self.file.read_exact(&mut header).map_err(|e| {
             RustqlError::StorageError(format!("Failed to read BTree storage header: {}", e))
         })?;
 
-        if bytes_read < header.len() || header[0..8] != Self::MAGIC {
-            return self.read_database_legacy().or_else(|_| Ok(Database::new()));
+        if header[0..8] != Self::MAGIC {
+            return Err(RustqlError::StorageError(
+                "BTree storage file has an invalid header".to_string(),
+            ));
         }
 
-        let _version = u32::from_le_bytes([header[8], header[9], header[10], header[11]]);
+        let version = u32::from_le_bytes([header[8], header[9], header[10], header[11]]);
+        if version != Self::VERSION {
+            return Err(RustqlError::StorageError(format!(
+                "Unsupported BTree storage format version: {}",
+                version
+            )));
+        }
 
-        if file_size < 16 + BTREE_PAGE_SIZE as u64 {
+        if file_size < FILE_HEADER_SIZE as u64 + BTREE_PAGE_SIZE as u64 {
             return Ok(Database::new());
         }
 
@@ -651,22 +795,6 @@ impl BTreeFile {
             .map(|e| e.pointer)
             .unwrap_or(1);
 
-        let root_page = self.read_page(root_page_id)?;
-
-        if root_page.entries.len() == 1
-            && let Some(entry) = root_page.entries.first()
-            && let Value::Text(ref json_str) = entry.key
-            && json_str.starts_with('{')
-            && json_str.len() > 100
-        {
-            return serde_json::from_str(json_str).map_err(|e| {
-                RustqlError::StorageError(format!(
-                    "Failed to decode Database from BTree root page: {}",
-                    e
-                ))
-            });
-        }
-
         self.load_database_from_rows(root_page_id)
     }
 
@@ -683,8 +811,8 @@ impl BTreeFile {
                 && let Some(table_name) = key_str.strip_prefix("schema:")
             {
                 let schema_json = self.read_data_from_pointer(pointer)?;
-                let columns: Vec<crate::ast::ColumnDefinition> = serde_json::from_str(&schema_json)
-                    .map_err(|e| {
+                let schema: TableStorageRecord =
+                    serde_json::from_str(&schema_json).map_err(|e| {
                         format!(
                             "Failed to deserialize schema for table {}: {}",
                             table_name, e
@@ -694,9 +822,11 @@ impl BTreeFile {
                 db.tables.insert(
                     table_name.to_string(),
                     crate::database::Table {
-                        columns,
+                        columns: schema.columns,
                         rows: Vec::new(),
-                        constraints: Vec::new(),
+                        row_ids: Vec::new(),
+                        next_row_id: schema.next_row_id,
+                        constraints: schema.constraints,
                     },
                 );
             }
@@ -707,12 +837,12 @@ impl BTreeFile {
             let row_end = Value::Text(format!("row:{};", table_name));
             let rows = self.range_scan(Some(&row_prefix), Some(&row_end), root_page_id)?;
 
-            let mut row_indices: Vec<(usize, Vec<Value>)> = Vec::new();
+            let mut row_indices: Vec<(RowId, Vec<Value>)> = Vec::new();
 
             for (key, pointer) in rows {
                 if let Value::Text(ref key_str) = key
                     && let Some(row_id_str) = key_str.strip_prefix(&format!("row:{}:", table_name))
-                    && let Ok(row_index) = row_id_str.parse::<usize>()
+                    && let Ok(row_id) = row_id_str.parse::<u64>()
                 {
                     let row_json = self.read_data_from_pointer(pointer)?;
                     let row: Vec<Value> = serde_json::from_str(&row_json).map_err(|e| {
@@ -721,16 +851,19 @@ impl BTreeFile {
                             row_id_str, table_name, e
                         )
                     })?;
-                    row_indices.push((row_index, row));
+                    row_indices.push((RowId(row_id), row));
                 }
             }
 
-            row_indices.sort_by_key(|(idx, _)| *idx);
+            row_indices.sort_by_key(|(row_id, _)| *row_id);
+            let sorted_row_ids: Vec<RowId> =
+                row_indices.iter().map(|(row_id, _)| *row_id).collect();
             let sorted_rows: Vec<Vec<Value>> =
                 row_indices.into_iter().map(|(_, row)| row).collect();
 
             if let Some(table_ref) = db.tables.get_mut(&table_name) {
                 table_ref.rows = sorted_rows;
+                table_ref.row_ids = sorted_row_ids;
             }
         }
 
@@ -746,6 +879,42 @@ impl BTreeFile {
                 let index: crate::database::Index = serde_json::from_str(&index_json)
                     .map_err(|e| format!("Failed to deserialize index {}: {}", index_name, e))?;
                 db.indexes.insert(index_name.to_string(), index);
+            }
+        }
+
+        let cindex_prefix = Value::Text("cindex:".to_string());
+        let cindex_end = Value::Text("cindex;".to_string());
+        let composite_indexes =
+            self.range_scan(Some(&cindex_prefix), Some(&cindex_end), root_page_id)?;
+
+        for (key, pointer) in composite_indexes {
+            if let Value::Text(ref key_str) = key
+                && let Some(index_name) = key_str.strip_prefix("cindex:")
+            {
+                let index_json = self.read_data_from_pointer(pointer)?;
+                let index: crate::database::CompositeIndex = serde_json::from_str(&index_json)
+                    .map_err(|e| {
+                        format!(
+                            "Failed to deserialize composite index {}: {}",
+                            index_name, e
+                        )
+                    })?;
+                db.composite_indexes.insert(index_name.to_string(), index);
+            }
+        }
+
+        let view_prefix = Value::Text("view:".to_string());
+        let view_end = Value::Text("view;".to_string());
+        let views = self.range_scan(Some(&view_prefix), Some(&view_end), root_page_id)?;
+
+        for (key, pointer) in views {
+            if let Value::Text(ref key_str) = key
+                && let Some(view_name) = key_str.strip_prefix("view:")
+            {
+                let view_json = self.read_data_from_pointer(pointer)?;
+                let view: crate::database::View = serde_json::from_str(&view_json)
+                    .map_err(|e| format!("Failed to deserialize view {}: {}", view_name, e))?;
+                db.views.insert(view_name.to_string(), view);
             }
         }
 
@@ -781,92 +950,48 @@ impl BTreeFile {
     }
 
     fn write_database_via_pages(&mut self, db: &Database) -> Result<(), RustqlError> {
-        self.file.seek(SeekFrom::Start(0)).map_err(|e| {
-            RustqlError::StorageError(format!("Failed to seek BTree storage file: {}", e))
-        })?;
+        write_versioned_header(
+            &mut self.file,
+            Self::MAGIC,
+            Self::VERSION,
+            "BTree storage file",
+        )?;
 
-        let mut header = Vec::with_capacity(16);
-        header.extend_from_slice(&Self::MAGIC);
-        header.extend_from_slice(&Self::VERSION.to_le_bytes());
-        header.extend_from_slice(&0u32.to_le_bytes());
-
-        self.file.write_all(&header).map_err(|e| {
-            RustqlError::StorageError(format!("Failed to write BTree storage header: {}", e))
-        })?;
-
-        let meta_page = match self.read_page(1) {
-            Ok(page) => page,
-            Err(_) => {
-                let new_meta = BTreePage::new(0, PageKind::Meta);
-                self.write_page(&new_meta)?;
-                new_meta
-            }
-        };
-
-        let root_page_id = meta_page
+        let mut meta_page = BTreePage::new(0, PageKind::Meta);
+        meta_page
             .entries
-            .iter()
-            .find(|e| {
-                if let Value::Text(ref s) = e.key {
-                    s == "root"
-                } else {
-                    false
-                }
-            })
-            .map(|e| e.pointer)
-            .unwrap_or_else(|| {
-                let new_root_id = 1;
-                let mut new_meta = meta_page.clone();
-                new_meta.entries.push(BTreeEntry::new(
-                    Value::Text("root".to_string()),
-                    new_root_id,
-                ));
-                new_meta.header.entry_count = new_meta.entries.len() as u16;
-                self.write_page(&new_meta).ok();
+            .push(BTreeEntry::new(Value::Text("root".to_string()), 1));
+        meta_page
+            .entries
+            .push(BTreeEntry::new(Value::Text("next_page_id".to_string()), 2));
+        meta_page.header.entry_count = meta_page.entries.len() as u16;
+        self.write_page(&meta_page)?;
 
-                let root_page = BTreePage::new(new_root_id, PageKind::Leaf);
-                self.write_page(&root_page).ok();
-                new_root_id
-            });
-
-        let tables_to_delete: Vec<String> = db.tables.keys().cloned().collect();
-        for table_name in &tables_to_delete {
-            let schema_key = Value::Text(format!("schema:{}", table_name));
-            let _ = self.delete(&schema_key, root_page_id);
-
-            let row_prefix = Value::Text(format!("row:{}:", table_name));
-            let row_end = Value::Text(format!("row:{};", table_name));
-            if let Ok(rows) = self.range_scan(Some(&row_prefix), Some(&row_end), root_page_id) {
-                for (key, _) in rows {
-                    let _ = self.delete(&key, root_page_id);
-                }
-            }
-        }
-
-        let indexes_to_delete: Vec<String> = db.indexes.keys().cloned().collect();
-        for index_name in &indexes_to_delete {
-            let index_key = Value::Text(format!("index:{}", index_name));
-            let _ = self.delete(&index_key, root_page_id);
-        }
+        let root_page_id = 1;
+        let root_page = BTreePage::new(root_page_id, PageKind::Leaf);
+        self.write_page(&root_page)?;
 
         let mut current_root_id = root_page_id;
 
         for (table_name, table) in &db.tables {
             let schema_key = Value::Text(format!("schema:{}", table_name));
-            let schema_json = serde_json::to_string(&table.columns).map_err(|e| {
-                format!("Failed to serialize schema for table {}: {}", table_name, e)
-            })?;
+            let schema_json = serde_json::to_string(&TableStorageRecord {
+                columns: table.columns.clone(),
+                constraints: table.constraints.clone(),
+                next_row_id: table.next_row_id,
+            })
+            .map_err(|e| format!("Failed to serialize schema for table {}: {}", table_name, e))?;
             let data_pointer = self.write_data_to_pointer(&schema_json)?;
             current_root_id = self.insert(schema_key, data_pointer, current_root_id)?;
         }
 
         for (table_name, table) in &db.tables {
-            for (row_index, row) in table.rows.iter().enumerate() {
-                let row_key = Value::Text(format!("row:{}:{}", table_name, row_index));
+            for (row_id, row) in table.iter_rows_with_ids() {
+                let row_key = Value::Text(format!("row:{}:{}", table_name, row_id.0));
                 let row_json = serde_json::to_string(row).map_err(|e| {
                     format!(
                         "Failed to serialize row {} for table {}: {}",
-                        row_index, table_name, e
+                        row_id.0, table_name, e
                     )
                 })?;
                 let data_pointer = self.write_data_to_pointer(&row_json)?;
@@ -882,20 +1007,30 @@ impl BTreeFile {
             current_root_id = self.insert(index_key, data_pointer, current_root_id)?;
         }
 
+        for (index_name, index) in &db.composite_indexes {
+            let index_key = Value::Text(format!("cindex:{}", index_name));
+            let index_json = serde_json::to_string(index).map_err(|e| {
+                format!("Failed to serialize composite index {}: {}", index_name, e)
+            })?;
+            let data_pointer = self.write_data_to_pointer(&index_json)?;
+            current_root_id = self.insert(index_key, data_pointer, current_root_id)?;
+        }
+
+        for (view_name, view) in &db.views {
+            let view_key = Value::Text(format!("view:{}", view_name));
+            let view_json = serde_json::to_string(view)
+                .map_err(|e| format!("Failed to serialize view {}: {}", view_name, e))?;
+            let data_pointer = self.write_data_to_pointer(&view_json)?;
+            current_root_id = self.insert(view_key, data_pointer, current_root_id)?;
+        }
+
         let mut meta_page = self.read_page(0)?;
-        if let Some(root_entry) = meta_page.entries.iter_mut().find(|e| {
-            if let Value::Text(ref s) = e.key {
-                s == "root"
-            } else {
-                false
-            }
-        }) {
+        if let Some(root_entry) = meta_page
+            .entries
+            .iter_mut()
+            .find(|e| matches!(&e.key, Value::Text(value) if value == "root"))
+        {
             root_entry.pointer = current_root_id;
-        } else {
-            meta_page.entries.push(BTreeEntry::new(
-                Value::Text("root".to_string()),
-                current_root_id,
-            ));
         }
         meta_page.header.entry_count = meta_page.entries.len() as u16;
         self.write_page(&meta_page)?;
@@ -1289,6 +1424,7 @@ impl BTreeFile {
         Ok(next_id)
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn search(
         &mut self,
         key: &Value,
@@ -1490,6 +1626,7 @@ impl BTreeFile {
         }
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn delete(&mut self, key: &Value, root_page_id: u64) -> Result<bool, RustqlError> {
         match self.search(key, root_page_id)? {
             Some((page_id, entry_idx)) => {
@@ -1509,73 +1646,45 @@ impl BTreeFile {
         end_key: Option<&Value>,
         root_page_id: u64,
     ) -> Result<Vec<(Value, u64)>, RustqlError> {
-        let mut results = Vec::new();
+        let mut entries = Vec::new();
+        self.collect_entries(root_page_id, &mut entries)?;
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(entries
+            .into_iter()
+            .filter(|(key, _)| match (start_key, end_key) {
+                (Some(start), Some(end)) => key >= start && key <= end,
+                (Some(start), None) => key >= start,
+                (None, Some(end)) => key <= end,
+                (None, None) => true,
+            })
+            .collect())
+    }
 
-        let current_page_id = self.find_starting_leaf(start_key, root_page_id)?;
-
-        let page = self.read_page(current_page_id)?;
+    fn collect_entries(
+        &mut self,
+        page_id: u64,
+        entries: &mut Vec<(Value, u64)>,
+    ) -> Result<(), RustqlError> {
+        let page = self.read_page(page_id)?;
 
         match page.header.kind {
             PageKind::Leaf => {
+                entries.extend(
+                    page.entries
+                        .iter()
+                        .map(|entry| (entry.key.clone(), entry.pointer)),
+                );
+                Ok(())
+            }
+            PageKind::Internal => {
                 for entry in &page.entries {
-                    let in_range = match (start_key, end_key) {
-                        (Some(start), Some(end)) => entry.key >= *start && entry.key <= *end,
-                        (Some(start), None) => entry.key >= *start,
-                        (None, Some(end)) => entry.key <= *end,
-                        (None, None) => true,
-                    };
-
-                    if in_range {
-                        results.push((entry.key.clone(), entry.pointer));
-                    } else if end_key.is_some() && &entry.key > end_key.unwrap() {
-                        return Ok(results);
-                    }
+                    self.collect_entries(entry.pointer, entries)?;
                 }
+                Ok(())
             }
-            _ => {
-                return Err(RustqlError::StorageError(
-                    "Expected leaf page in range scan".to_string(),
-                ));
-            }
-        }
-
-        Ok(results)
-    }
-
-    fn find_starting_leaf(
-        &mut self,
-        start_key: Option<&Value>,
-        root_page_id: u64,
-    ) -> Result<u64, RustqlError> {
-        let mut current_page_id = root_page_id;
-
-        loop {
-            let page = self.read_page(current_page_id)?;
-
-            match page.header.kind {
-                PageKind::Leaf => {
-                    return Ok(current_page_id);
-                }
-                PageKind::Internal => {
-                    let mut next_page_id = None;
-                    if let Some(start) = start_key {
-                        for entry in &page.entries {
-                            if &entry.key > start {
-                                next_page_id = Some(entry.pointer);
-                                break;
-                            }
-                        }
-                    }
-                    current_page_id = next_page_id
-                        .or_else(|| page.entries.first().map(|e| e.pointer))
-                        .ok_or_else(|| "Invalid internal page structure".to_string())?;
-                }
-                PageKind::Meta => {
-                    return Err(RustqlError::StorageError(
-                        "Cannot find leaf in meta page".to_string(),
-                    ));
-                }
-            }
+            PageKind::Meta => Err(RustqlError::StorageError(
+                "Cannot scan entries from meta page".to_string(),
+            )),
         }
     }
 }
@@ -1583,36 +1692,23 @@ impl BTreeFile {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::{ColumnDefinition, DataType};
-    use crate::database::Table;
+    use crate::ast::{ColumnDefinition, DataType, TableConstraint};
+    use crate::database::{CompositeIndex, Table, View};
     use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
 
-    #[test]
-    fn default_storage_paths_use_temp_files_in_test_binaries() {
-        let paths = default_storage_paths();
-
-        match std::env::var_os("RUSTQL_JSON_PATH") {
-            Some(path) => assert_eq!(paths.json_path, PathBuf::from(path)),
-            None => {
-                assert!(paths.json_path.starts_with(std::env::temp_dir()));
-                assert_ne!(paths.json_path, PathBuf::from(DEFAULT_JSON_STORAGE_PATH));
-            }
-        }
-
-        match std::env::var_os("RUSTQL_BTREE_PATH") {
-            Some(path) => assert_eq!(paths.btree_path, PathBuf::from(path)),
-            None => {
-                assert!(paths.btree_path.starts_with(std::env::temp_dir()));
-                assert_ne!(paths.btree_path, PathBuf::from(DEFAULT_BTREE_STORAGE_PATH));
-            }
-        }
+    fn remove_storage_artifacts(path: &Path) {
+        let _ = std::fs::remove_file(path);
+        let mut journal = path.as_os_str().to_os_string();
+        journal.push(".wal");
+        let _ = std::fs::remove_file(PathBuf::from(journal));
     }
 
     #[test]
     fn btree_storage_round_trip() {
         let temp_path = std::env::temp_dir().join("rustql_btree_test.dat");
 
-        let _ = std::fs::remove_file(&temp_path);
+        remove_storage_artifacts(&temp_path);
 
         let engine = BTreeStorageEngine::new(&temp_path);
 
@@ -1647,11 +1743,7 @@ mod tests {
 
         let rows = vec![vec![Value::Integer(1), Value::Text("Alice".to_string())]];
 
-        let table = Table {
-            columns,
-            rows,
-            constraints: vec![],
-        };
+        let table = Table::new(columns, rows, vec![]);
 
         let mut tables = HashMap::new();
         tables.insert("users".to_string(), table);
@@ -1661,7 +1753,9 @@ mod tests {
         engine
             .save(&db)
             .expect("failed to save via BTreeStorageEngine");
-        let loaded = engine.load();
+        let loaded = engine
+            .load()
+            .expect("failed to load via BTreeStorageEngine");
 
         let users = loaded
             .tables
@@ -1672,13 +1766,13 @@ mod tests {
         assert_eq!(users.rows[0][0], Value::Integer(1));
         assert_eq!(users.rows[0][1], Value::Text("Alice".to_string()));
 
-        let _ = std::fs::remove_file(&temp_path);
+        remove_storage_artifacts(&temp_path);
     }
 
     #[test]
     fn btree_search_insert_delete() {
         let temp_path = std::env::temp_dir().join("rustql_btree_ops_test.dat");
-        let _ = std::fs::remove_file(&temp_path);
+        remove_storage_artifacts(&temp_path);
 
         let mut file = BTreeFile::create(&temp_path).expect("Failed to create BTree file");
 
@@ -1739,13 +1833,13 @@ mod tests {
             "Second key should still exist"
         );
 
-        let _ = std::fs::remove_file(&temp_path);
+        remove_storage_artifacts(&temp_path);
     }
 
     #[test]
     fn btree_range_scan() {
         let temp_path = std::env::temp_dir().join("rustql_btree_range_test.dat");
-        let _ = std::fs::remove_file(&temp_path);
+        remove_storage_artifacts(&temp_path);
 
         let mut file = BTreeFile::create(&temp_path).expect("Failed to create BTree file");
 
@@ -1781,13 +1875,13 @@ mod tests {
 
         assert!(results.len() >= 5, "Range scan should find multiple keys");
 
-        let _ = std::fs::remove_file(&temp_path);
+        remove_storage_artifacts(&temp_path);
     }
 
     #[test]
     fn btree_concurrent_loads() {
         let temp_path = std::env::temp_dir().join("rustql_btree_concurrent_test.dat");
-        let _ = std::fs::remove_file(&temp_path);
+        remove_storage_artifacts(&temp_path);
 
         let engine = Arc::new(BTreeStorageEngine::new(&temp_path));
 
@@ -1804,16 +1898,12 @@ mod tests {
             auto_increment: false,
             generated: None,
         }];
-        let table = Table {
-            columns,
-            rows: vec![vec![Value::Integer(1)]],
-            constraints: vec![],
-        };
+        let table = Table::new(columns, vec![vec![Value::Integer(1)]], vec![]);
         db.tables.insert("test".to_string(), table);
 
         engine.save(&db).expect("Failed to save");
 
-        let loaded_before = engine.load();
+        let loaded_before = engine.load().expect("initial load failed");
         assert_eq!(loaded_before.tables.len(), 1, "Initial load should work");
 
         use std::thread;
@@ -1821,7 +1911,7 @@ mod tests {
             .map(|_| {
                 let engine = Arc::clone(&engine);
                 thread::spawn(move || {
-                    let loaded = engine.load();
+                    let loaded = engine.load().expect("concurrent load failed");
                     assert_eq!(loaded.tables.len(), 1, "Expected 1 table");
                     assert!(loaded.tables.contains_key("test"), "Expected 'test' table");
                 })
@@ -1837,13 +1927,13 @@ mod tests {
         let (hits, misses, _size) = engine.cache_stats();
         assert!(hits + misses > 0, "Cache should have activity");
 
-        let _ = std::fs::remove_file(&temp_path);
+        remove_storage_artifacts(&temp_path);
     }
 
     #[test]
     fn btree_cache_lru_eviction() {
         let temp_path = std::env::temp_dir().join("rustql_btree_cache_test.dat");
-        let _ = std::fs::remove_file(&temp_path);
+        remove_storage_artifacts(&temp_path);
 
         let engine = BTreeStorageEngine::new(&temp_path);
 
@@ -1860,16 +1950,12 @@ mod tests {
             auto_increment: false,
             generated: None,
         }];
-        let table = Table {
-            columns,
-            rows: vec![vec![Value::Integer(1)]],
-            constraints: vec![],
-        };
+        let table = Table::new(columns, vec![vec![Value::Integer(1)]], vec![]);
         db.tables.insert("test".to_string(), table);
 
         engine.save(&db).expect("Failed to save");
 
-        engine.load();
+        let _ = engine.load();
         let (_, _, size1) = engine.cache_stats();
         assert!(size1 > 0, "Cache should have pages after load");
 
@@ -1877,6 +1963,224 @@ mod tests {
         let (_, _, size2) = engine.cache_stats();
         assert_eq!(size2, 0, "Cache should be empty after clear");
 
-        let _ = std::fs::remove_file(&temp_path);
+        remove_storage_artifacts(&temp_path);
+    }
+
+    #[test]
+    fn btree_storage_rejects_invalid_header() {
+        let temp_path = std::env::temp_dir().join("rustql_btree_invalid_header.dat");
+        remove_storage_artifacts(&temp_path);
+
+        std::fs::write(&temp_path, [0u8; FILE_HEADER_SIZE]).expect("failed to write invalid file");
+
+        let engine = BTreeStorageEngine::new(&temp_path);
+        let error = match engine.load() {
+            Ok(_) => panic!("expected invalid header error"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("invalid header"));
+
+        remove_storage_artifacts(&temp_path);
+    }
+
+    #[test]
+    fn btree_storage_rejects_unsupported_version() {
+        let temp_path = std::env::temp_dir().join("rustql_btree_unsupported_version.dat");
+        remove_storage_artifacts(&temp_path);
+
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&temp_path)
+            .expect("failed to create version test file");
+        write_versioned_header(&mut file, BTreeFile::MAGIC, 999, "BTree storage file")
+            .expect("failed to write test header");
+
+        let engine = BTreeStorageEngine::new(&temp_path);
+        let error = match engine.load() {
+            Ok(_) => panic!("expected unsupported version error"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("Unsupported BTree storage file format version")
+        );
+
+        remove_storage_artifacts(&temp_path);
+    }
+
+    #[test]
+    fn btree_recovers_committed_journal_on_load() {
+        let temp_path = std::env::temp_dir().join("rustql_btree_committed_journal.dat");
+        remove_storage_artifacts(&temp_path);
+
+        let engine = BTreeStorageEngine::new(&temp_path);
+
+        let mut db = Database::new();
+        db.tables.insert(
+            "test".to_string(),
+            Table::new(
+                vec![ColumnDefinition {
+                    name: "id".to_string(),
+                    data_type: DataType::Integer,
+                    nullable: false,
+                    primary_key: true,
+                    unique: false,
+                    default_value: None,
+                    foreign_key: None,
+                    check: None,
+                    auto_increment: false,
+                    generated: None,
+                }],
+                vec![vec![Value::Integer(1)]],
+                vec![],
+            ),
+        );
+        engine.save(&db).expect("failed to save base database");
+
+        let mut committed = db.clone();
+        committed.tables.get_mut("test").unwrap().rows = vec![vec![Value::Integer(2)]];
+        engine
+            .write_journal_locked(&TransactionJournal::Committed {
+                database: committed.clone(),
+            })
+            .expect("failed to write committed journal");
+
+        let loaded = engine.load().expect("failed to recover committed journal");
+        assert_eq!(loaded.tables["test"].rows, committed.tables["test"].rows);
+        assert!(
+            !engine.journal_path().exists(),
+            "journal should be cleared after recovery"
+        );
+
+        let loaded_again = engine.load().expect("failed to reload recovered database");
+        assert_eq!(
+            loaded_again.tables["test"].rows,
+            committed.tables["test"].rows
+        );
+
+        remove_storage_artifacts(&temp_path);
+    }
+
+    #[test]
+    fn btree_discards_pending_journal_on_load() {
+        let temp_path = std::env::temp_dir().join("rustql_btree_pending_journal.dat");
+        remove_storage_artifacts(&temp_path);
+
+        let engine = BTreeStorageEngine::new(&temp_path);
+
+        let mut db = Database::new();
+        db.tables.insert(
+            "test".to_string(),
+            Table::new(
+                vec![ColumnDefinition {
+                    name: "id".to_string(),
+                    data_type: DataType::Integer,
+                    nullable: false,
+                    primary_key: true,
+                    unique: false,
+                    default_value: None,
+                    foreign_key: None,
+                    check: None,
+                    auto_increment: false,
+                    generated: None,
+                }],
+                vec![vec![Value::Integer(1)]],
+                vec![],
+            ),
+        );
+        engine.save(&db).expect("failed to save base database");
+        engine
+            .write_journal_locked(&TransactionJournal::Pending)
+            .expect("failed to write pending journal");
+
+        let loaded = engine.load().expect("failed to load database");
+        assert_eq!(loaded.tables["test"].rows, db.tables["test"].rows);
+        assert!(
+            !engine.journal_path().exists(),
+            "pending journal should be cleared during load"
+        );
+
+        remove_storage_artifacts(&temp_path);
+    }
+
+    #[test]
+    fn btree_persists_views_constraints_and_composite_indexes() {
+        let temp_path = std::env::temp_dir().join("rustql_btree_metadata_roundtrip.dat");
+        remove_storage_artifacts(&temp_path);
+
+        let engine = BTreeStorageEngine::new(&temp_path);
+
+        let mut db = Database::new();
+        db.tables.insert(
+            "orders".to_string(),
+            Table::new(
+                vec![
+                    ColumnDefinition {
+                        name: "id".to_string(),
+                        data_type: DataType::Integer,
+                        nullable: false,
+                        primary_key: true,
+                        unique: false,
+                        default_value: None,
+                        foreign_key: None,
+                        check: None,
+                        auto_increment: false,
+                        generated: None,
+                    },
+                    ColumnDefinition {
+                        name: "customer_id".to_string(),
+                        data_type: DataType::Integer,
+                        nullable: false,
+                        primary_key: false,
+                        unique: false,
+                        default_value: None,
+                        foreign_key: None,
+                        check: None,
+                        auto_increment: false,
+                        generated: None,
+                    },
+                ],
+                vec![vec![Value::Integer(1), Value::Integer(10)]],
+                vec![TableConstraint::Unique {
+                    name: Some("orders_customer_unique".to_string()),
+                    columns: vec!["customer_id".to_string()],
+                }],
+            ),
+        );
+        db.views.insert(
+            "order_ids".to_string(),
+            View {
+                name: "order_ids".to_string(),
+                query_sql: "SELECT id FROM orders".to_string(),
+            },
+        );
+        db.composite_indexes.insert(
+            "orders_customer_idx".to_string(),
+            CompositeIndex {
+                name: "orders_customer_idx".to_string(),
+                table: "orders".to_string(),
+                columns: vec!["id".to_string(), "customer_id".to_string()],
+                entries: std::collections::BTreeMap::from([(
+                    vec![Value::Integer(1), Value::Integer(10)],
+                    vec![RowId(1)],
+                )]),
+                filter_expr: None,
+            },
+        );
+
+        engine.save(&db).expect("failed to save metadata database");
+        let loaded = engine.load().expect("failed to load metadata database");
+
+        assert_eq!(
+            loaded.tables["orders"].constraints,
+            db.tables["orders"].constraints
+        );
+        assert_eq!(loaded.views["order_ids"].query_sql, "SELECT id FROM orders");
+        assert!(loaded.composite_indexes.contains_key("orders_customer_idx"));
+
+        remove_storage_artifacts(&temp_path);
     }
 }
