@@ -7,11 +7,16 @@ pub mod select;
 
 use crate::ast::*;
 use crate::database::Database;
-use crate::engine::{ColumnMeta, CommandResult, CommandTag, QueryResult, RowBatch};
+use crate::engine::{
+    ColumnMeta, CommandResult, CommandTag, ExplainAnalyzeResult, QueryResult, RowBatch,
+};
 use crate::error::RustqlError;
+use crate::plan_executor::PlanExecutor;
+use crate::planner::QueryPlanner;
 use crate::storage::StorageEngine;
 use crate::wal::{self, WalState};
 use std::sync::{Arc, Mutex, RwLock};
+use std::time::Instant;
 
 pub struct ExecutionContext {
     database: RwLock<Database>,
@@ -167,6 +172,7 @@ pub fn execute(
         Statement::CommitTransaction => execute_commit_transaction(context),
         Statement::RollbackTransaction => execute_rollback_transaction(context),
         Statement::Explain(stmt) => execute_explain(context, stmt),
+        Statement::ExplainAnalyze(stmt) => execute_explain_analyze(context, stmt),
         Statement::Describe(table_name) => ddl::execute_describe(context, table_name),
         Statement::ShowTables => ddl::execute_show_tables(context),
         Statement::Savepoint(name) => execute_savepoint(context, name),
@@ -252,6 +258,30 @@ fn execute_explain(
 ) -> Result<QueryResult, RustqlError> {
     let plan = select::explain_select(context, stmt)?;
     Ok(QueryResult::Explain(plan))
+}
+
+fn execute_explain_analyze(
+    context: &ExecutionContext,
+    stmt: SelectStatement,
+) -> Result<QueryResult, RustqlError> {
+    let db = get_database_read(context);
+    let planner = QueryPlanner::new(&db);
+
+    let planning_start = Instant::now();
+    let plan = planner.plan_select(&stmt)?;
+    let planning_ms = planning_start.elapsed().as_secs_f64() * 1000.0;
+
+    let executor = PlanExecutor::new(&db);
+    let execution_start = Instant::now();
+    let result = executor.execute(&plan, &stmt)?;
+    let execution_ms = execution_start.elapsed().as_secs_f64() * 1000.0;
+
+    Ok(QueryResult::ExplainAnalyze(ExplainAnalyzeResult {
+        plan,
+        planning_ms,
+        execution_ms,
+        actual_rows: result.rows.len(),
+    }))
 }
 
 fn execute_savepoint(context: &ExecutionContext, name: String) -> Result<QueryResult, RustqlError> {

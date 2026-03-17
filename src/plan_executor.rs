@@ -1,5 +1,5 @@
 use crate::ast::*;
-use crate::database::{Database, Table};
+use crate::database::{Database, RowId, Table};
 use crate::error::RustqlError;
 use crate::executor::select::execute_select_internal;
 use crate::planner::PlanNode;
@@ -192,43 +192,22 @@ impl<'a> PlanExecutor<'a> {
             .get(table_name)
             .ok_or_else(|| format!("Table '{}' does not exist", table_name))?;
 
-        let index = self
-            .db
-            .indexes
-            .get(index_name)
-            .ok_or_else(|| format!("Index '{}' does not exist", index_name))?;
-
-        let _col_idx = table
-            .columns
-            .iter()
-            .position(|c| c.name == index.column)
-            .ok_or_else(|| format!("Column '{}' not found in table", index.column))?;
-
-        let filter_value = if let Some(filter_expr) = filter {
-            self.extract_filter_value(filter_expr, &index.column)
+        let row_ids = if let Some(filter_expr) = filter {
+            if let Some(index_usage) =
+                crate::executor::ddl::find_index_usage(self.db, table_name, filter_expr)
+                    .filter(|usage| usage.index_name() == index_name)
+            {
+                crate::executor::ddl::get_indexed_rows(self.db, table, &index_usage)?
+            } else {
+                self.all_row_ids_for_index(index_name)?
+            }
         } else {
-            None
+            self.all_row_ids_for_index(index_name)?
         };
 
-        let mut row_indices = HashSet::new();
-
-        if let Some(value) = filter_value {
-            if let Some(indices) = index.entries.get(&value) {
-                for &idx in indices {
-                    row_indices.insert(idx);
-                }
-            }
-        } else {
-            for indices in index.entries.values() {
-                for &idx in indices {
-                    row_indices.insert(idx);
-                }
-            }
-        }
-
         let mut rows = Vec::new();
-        for &row_idx in &row_indices {
-            if let Some(row) = table.row_by_id(row_idx) {
+        for row_id in row_ids {
+            if let Some(row) = table.row_by_id(row_id) {
                 let include = if let Some(filter_expr) = filter {
                     self.evaluate_expression(filter_expr, &table.columns, row)?
                 } else {
@@ -244,6 +223,29 @@ impl<'a> PlanExecutor<'a> {
         let columns = qualify_column_names(&table.columns, output_label);
 
         Ok(ExecutionResult { columns, rows })
+    }
+
+    fn all_row_ids_for_index(&self, index_name: &str) -> Result<HashSet<RowId>, RustqlError> {
+        if let Some(index) = self.db.indexes.get(index_name) {
+            let mut row_ids = HashSet::new();
+            for rows in index.entries.values() {
+                row_ids.extend(rows.iter().copied());
+            }
+            return Ok(row_ids);
+        }
+
+        if let Some(index) = self.db.composite_indexes.get(index_name) {
+            let mut row_ids = HashSet::new();
+            for rows in index.entries.values() {
+                row_ids.extend(rows.iter().copied());
+            }
+            return Ok(row_ids);
+        }
+
+        Err(RustqlError::Internal(format!(
+            "Index '{}' does not exist",
+            index_name
+        )))
     }
 
     fn execute_function_scan(
@@ -1236,21 +1238,6 @@ impl<'a> PlanExecutor<'a> {
             (Value::Text(v), Value::Text(l), Value::Text(u)) => v >= l && v <= u,
             _ => false,
         }
-    }
-
-    fn extract_filter_value(&self, expr: &Expression, column: &str) -> Option<Value> {
-        if let Expression::BinaryOp {
-            left,
-            op: BinaryOperator::Equal,
-            right,
-        } = expr
-            && let Expression::Column(col) = left.as_ref()
-            && column_names_match(col, column)
-            && let Expression::Value(v) = right.as_ref()
-        {
-            return Some(v.clone());
-        }
-        None
     }
 
     fn evaluate_join_condition(

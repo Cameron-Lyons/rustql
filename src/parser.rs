@@ -3685,13 +3685,23 @@ impl Parser {
 
     fn parse_explain(&mut self) -> Result<Statement, RustqlError> {
         self.consume(Token::Explain)?;
+        let analyze = if *self.current_token() == Token::Analyze {
+            self.advance();
+            true
+        } else {
+            false
+        };
         let select_stmt = if *self.current_token() == Token::With {
             self.parse_with_select()?
         } else {
             self.parse_select_statement(Vec::new())?
         };
         if let Statement::Select(select_stmt) = select_stmt {
-            Ok(Statement::Explain(select_stmt))
+            if analyze {
+                Ok(Statement::ExplainAnalyze(select_stmt))
+            } else {
+                Ok(Statement::Explain(select_stmt))
+            }
         } else {
             Err(RustqlError::ParseError(
                 "EXPLAIN must be followed by a SELECT statement".to_string(),

@@ -13,7 +13,7 @@ use super::aggregate::{
 };
 use super::expr::{
     compare_values_for_sort, evaluate_expression, evaluate_select_order_expression,
-    evaluate_value_expression,
+    evaluate_value_expression, evaluate_value_expression_with_db,
 };
 use super::join::perform_multiple_joins;
 use super::{ExecutionContext, SelectResult, get_database_read, get_database_write, rows_result};
@@ -240,7 +240,7 @@ pub fn execute_select(
                     }
                 }
                 Column::Expression { expr, .. } => {
-                    evaluate_value_expression(expr, &table.columns, row)?
+                    evaluate_value_expression_with_db(expr, &table.columns, row, Some(db_ref))?
                 }
                 Column::Function(_) => {
                     return Err(RustqlError::Internal(
@@ -296,8 +296,13 @@ pub fn execute_select(
                             }
                         }
                     }
-                    evaluate_value_expression(expr, &table.columns, &projected)
-                        .unwrap_or(Value::Null)
+                    evaluate_value_expression_with_db(
+                        expr,
+                        &table.columns,
+                        &projected,
+                        Some(db_ref),
+                    )
+                    .unwrap_or(Value::Null)
                 })
                 .collect();
             if seen_keys.insert(key) {
@@ -1537,7 +1542,8 @@ pub(crate) fn execute_select_internal(
                             }
                         }
                     }
-                    evaluate_value_expression(expr, &all_columns, &projected).unwrap_or(Value::Null)
+                    evaluate_value_expression_with_db(expr, &all_columns, &projected, Some(db))
+                        .unwrap_or(Value::Null)
                 })
                 .collect();
             if seen_keys.insert(key) {
@@ -1687,6 +1693,14 @@ pub fn eval_subquery_values(
                         .iter()
                         .map(|expr| {
                             evaluate_value_expression(expr, &table.columns, row)
+                                .or_else(|_| {
+                                    evaluate_value_expression_with_db(
+                                        expr,
+                                        &table.columns,
+                                        row,
+                                        Some(db),
+                                    )
+                                })
                                 .unwrap_or(Value::Null)
                         })
                         .collect();
@@ -1725,6 +1739,14 @@ pub fn eval_subquery_values(
                         .iter()
                         .map(|expr| {
                             evaluate_value_expression(expr, &table.columns, row)
+                                .or_else(|_| {
+                                    evaluate_value_expression_with_db(
+                                        expr,
+                                        &table.columns,
+                                        row,
+                                        Some(db),
+                                    )
+                                })
                                 .unwrap_or(Value::Null)
                         })
                         .collect();

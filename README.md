@@ -39,6 +39,7 @@ A SQL database engine written in Rust with an interactive REPL. RustQL supports 
 
 **Other**
 - `EXPLAIN` &mdash; display query execution plan
+- `EXPLAIN ANALYZE` &mdash; plan + measured execution metrics
 - `DESCRIBE` *table* &mdash; show table schema
 - `SHOW TABLES`
 - Backtick-quoted identifiers
@@ -55,15 +56,15 @@ An interactive REPL session:
 
 ```
 rustql> CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL, email TEXT UNIQUE);
-Table created: users
+CREATE TABLE
 
 rustql> INSERT INTO users VALUES (1, 'Alice', 'alice@example.com'), (2, 'Bob', 'bob@example.com');
-Inserted 2 row(s)
+INSERT 2
 
 rustql> SELECT * FROM users WHERE name LIKE 'A%';
-id | name | email
----+------+-----------------
-1  | Alice | alice@example.com
+id	name	email
+----------------------------------------
+1	Alice	alice@example.com
 
 rustql> exit
 ```
@@ -74,27 +75,36 @@ You can also pipe queries through stdin:
 echo "SHOW TABLES" | cargo run --release
 ```
 
-## Storage backends
+For embedding, open an engine and execute SQL through a session:
 
-| Backend | File | Activation |
-|---------|------|------------|
-| JSON (default) | `rustql_data.json` | default |
-| B-tree | `rustql_btree.dat` | `RUSTQL_STORAGE=btree` |
+```rust
+use rustql::{Engine, EngineOptions, StorageMode};
 
-The **JSON** backend serializes the entire database to a single JSON file on every write. It is human-readable and simple to debug.
+let engine = Engine::open(EngineOptions {
+    storage: StorageMode::Memory,
+})
+    .unwrap();
+let mut session = engine.session();
 
-The **B-tree** backend stores data in a page-based binary format (4 KB pages) with an LRU page cache, making it more efficient for larger datasets.
-
-```sh
-RUSTQL_STORAGE=btree cargo run --release
+session.execute_one("CREATE TABLE users (id INTEGER)").unwrap();
 ```
+
+## Storage modes
+
+| Mode | Description | Default |
+|------|-------------|---------|
+| `StorageMode::Memory` | In-memory engine state with no persistence | no |
+| `StorageMode::Disk { path }` | B-tree-backed on-disk storage with WAL recovery | `rustql.db` |
+
+Use `EngineOptions::default()` to open the default disk-backed engine at `rustql.db`.
 
 ## Project structure
 
 | File | Purpose |
 |------|---------|
-| `main.rs` | Interactive REPL |
-| `lib.rs` | Library entry point; tokenize &rarr; parse &rarr; execute pipeline |
+| `main.rs` | Interactive REPL and result renderer |
+| `lib.rs` | Library entry point exporting the typed engine/session API |
+| `engine.rs` | `Engine`, `Session`, and typed result types |
 | `lexer.rs` | Tokenizer |
 | `parser.rs` | Recursive-descent SQL parser |
 | `ast.rs` | Abstract syntax tree types |
@@ -102,7 +112,8 @@ RUSTQL_STORAGE=btree cargo run --release
 | `executor.rs` | Statement executor (DDL, DML, constraints, foreign keys) |
 | `planner.rs` | Cost-based query planner |
 | `plan_executor.rs` | Executes optimized query plans |
-| `storage.rs` | Pluggable storage engines (JSON and B-tree) |
+| `storage.rs` | Disk storage engine, file format, and recovery journal |
+| `testing.rs` | Hidden compatibility helpers used by the test suite |
 | `wal.rs` | Write-ahead log for transaction rollback |
 | `error.rs` | Error types |
 
@@ -112,14 +123,32 @@ RUSTQL_STORAGE=btree cargo run --release
 
 ## Testing
 
-Run the full test suite with the default JSON backend:
+Run the full test suite:
 
 ```sh
 cargo test
 ```
 
-Run tests against the B-tree backend:
+Run SQL logic regression corpus:
 
 ```sh
-RUSTQL_STORAGE=btree cargo test
+cargo test sql_logic_corpus
 ```
+
+Run microbenchmarks:
+
+```sh
+cargo bench --bench engine
+```
+
+## Commit checks
+
+Enable the repo-managed git hooks so every commit runs formatting and lints:
+
+```sh
+git config core.hooksPath .githooks
+```
+
+The pre-commit hook enforces:
+- `cargo fmt --all -- --check`
+- `cargo clippy --workspace --all-targets --all-features -- -D warnings`

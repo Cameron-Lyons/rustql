@@ -1,6 +1,8 @@
 use crate::ast::{Statement, Value};
 use crate::database::Database;
-use crate::{CommandTag, Engine, EngineOptions, QueryResult, RowBatch, StorageMode};
+use crate::{
+    CommandTag, Engine, EngineOptions, ExplainAnalyzeResult, QueryResult, RowBatch, StorageMode,
+};
 use crate::{lexer, parser};
 use std::sync::{Mutex, OnceLock};
 
@@ -74,6 +76,7 @@ pub fn render_result(result: &QueryResult) -> String {
         QueryResult::Rows(rows) => render_rows(rows),
         QueryResult::Command(command) => render_command(command.tag, command.affected),
         QueryResult::Explain(plan) => format!("Query Plan:\n{}", plan),
+        QueryResult::ExplainAnalyze(result) => render_explain_analyze(result),
     }
 }
 
@@ -84,7 +87,15 @@ fn render_result_for_statement(statement: &Statement, result: &QueryResult) -> S
             render_command_for_statement(statement, command.tag, command.affected)
         }
         QueryResult::Explain(plan) => format!("Query Plan:\n{}", plan),
+        QueryResult::ExplainAnalyze(result) => render_explain_analyze(result),
     }
+}
+
+fn render_explain_analyze(result: &ExplainAnalyzeResult) -> String {
+    format!(
+        "Query Plan:\n{}\nPlanning Time: {:.3} ms\nExecution Time: {:.3} ms\nActual Rows: {}",
+        result.plan, result.planning_ms, result.execution_ms, result.actual_rows
+    )
 }
 
 fn render_command_for_statement(statement: &Statement, tag: CommandTag, affected: u64) -> String {
@@ -141,7 +152,8 @@ fn render_command_for_statement(statement: &Statement, tag: CommandTag, affected
         Statement::Describe(_)
         | Statement::ShowTables
         | Statement::Select(_)
-        | Statement::Explain(_) => render_command(tag, affected),
+        | Statement::Explain(_)
+        | Statement::ExplainAnalyze(_) => render_command(tag, affected),
     }
 }
 

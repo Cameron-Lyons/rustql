@@ -1,5 +1,5 @@
 use rustql::ast::Value;
-use rustql::{CommandTag, Engine, EngineOptions, QueryResult, RowBatch};
+use rustql::{CommandTag, Engine, EngineOptions, ExplainAnalyzeResult, QueryResult, RowBatch};
 use std::io::{self, IsTerminal, Read, Write};
 
 fn main() {
@@ -65,7 +65,15 @@ fn render_result(result: &QueryResult) -> String {
         QueryResult::Rows(rows) => render_rows(rows),
         QueryResult::Command(command) => render_command(command.tag, command.affected),
         QueryResult::Explain(plan) => format!("Query Plan:\n{}", plan),
+        QueryResult::ExplainAnalyze(result) => render_explain_analyze(result),
     }
+}
+
+fn render_explain_analyze(result: &ExplainAnalyzeResult) -> String {
+    format!(
+        "Query Plan:\n{}\nPlanning Time: {:.3} ms\nExecution Time: {:.3} ms\nActual Rows: {}",
+        result.plan, result.planning_ms, result.execution_ms, result.actual_rows
+    )
 }
 
 fn render_command(tag: CommandTag, affected: u64) -> String {

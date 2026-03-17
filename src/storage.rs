@@ -2167,6 +2167,7 @@ mod tests {
                     vec![Value::Integer(1), Value::Integer(10)],
                     vec![RowId(1)],
                 )]),
+                filter_expr: None,
             },
         );
 

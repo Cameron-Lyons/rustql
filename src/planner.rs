@@ -1,7 +1,8 @@
 use crate::ast::*;
-use crate::database::{Database, Index, Table};
+use crate::database::{Database, Table};
 use crate::error::RustqlError;
 use crate::executor::aggregate::format_aggregate_header;
+use crate::executor::ddl::{IndexUsage, find_index_usage};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt;
 
@@ -250,13 +251,12 @@ impl<'a> QueryPlanner<'a> {
         if let Some(where_expr) = where_clause
             && let Some(index_usage) = self.find_best_index(table_name, where_expr, db)
         {
-            let index = db.indexes.get(&index_usage.index_name).unwrap();
-            let estimated_rows = self.estimate_index_selectivity(&index_usage, index, stats);
+            let estimated_rows = self.estimate_index_selectivity(&index_usage, db, stats);
             let cost = self.estimate_index_scan_cost(stats.row_count, estimated_rows);
 
             return Ok(PlanNode::IndexScan {
                 table: table_name.to_string(),
-                index: index_usage.index_name,
+                index: index_usage.index_name().to_string(),
                 output_label: output_label.clone(),
                 filter: Some((*where_expr).clone()),
                 cost,
@@ -843,20 +843,49 @@ impl<'a> QueryPlanner<'a> {
     fn estimate_index_selectivity(
         &self,
         index_usage: &IndexUsage,
-        index: &Index,
+        db: &Database,
         stats: &TableStats,
     ) -> usize {
-        match &index_usage.operation {
-            IndexOperation::Equality(_) => index
-                .entries
-                .get(&index_usage.value.clone().unwrap())
-                .map(|v| v.len())
+        match index_usage {
+            IndexUsage::Equality { index_name, value } => db
+                .indexes
+                .get(index_name)
+                .and_then(|index| index.entries.get(value))
+                .map(|rows| rows.len())
                 .unwrap_or(0),
-            IndexOperation::Range { .. } => (stats.row_count as f64 * 0.1) as usize,
-            IndexOperation::In(values) => values
-                .iter()
-                .map(|v| index.entries.get(v).map(|rows| rows.len()).unwrap_or(0))
-                .sum(),
+            IndexUsage::In { index_name, values } => db
+                .indexes
+                .get(index_name)
+                .map(|index| {
+                    values
+                        .iter()
+                        .map(|value| index.entries.get(value).map(|rows| rows.len()).unwrap_or(0))
+                        .sum()
+                })
+                .unwrap_or(0),
+            IndexUsage::RangeGreater { .. }
+            | IndexUsage::RangeLess { .. }
+            | IndexUsage::RangeBetween { .. } => (stats.row_count as f64 * 0.1) as usize,
+            IndexUsage::CompositePrefix { index_name, values } => db
+                .composite_indexes
+                .get(index_name)
+                .map(|index| {
+                    if values.len() == index.columns.len() {
+                        index
+                            .entries
+                            .get(values)
+                            .map(|rows| rows.len())
+                            .unwrap_or(0)
+                    } else {
+                        index
+                            .entries
+                            .iter()
+                            .filter(|(key, _)| key.starts_with(values))
+                            .map(|(_, rows)| rows.len())
+                            .sum()
+                    }
+                })
+                .unwrap_or(0),
         }
     }
 
@@ -872,7 +901,11 @@ impl<'a> QueryPlanner<'a> {
         let row_count = table.rows.len();
         let mut column_stats = HashMap::new();
 
-        let has_index = db.indexes.values().any(|idx| idx.table == table_name);
+        let has_index = db.indexes.values().any(|idx| idx.table == table_name)
+            || db
+                .composite_indexes
+                .values()
+                .any(|idx| idx.table == table_name);
 
         for (col_idx, col_def) in table.columns.iter().enumerate() {
             if !table.rows.is_empty() {
@@ -939,88 +972,7 @@ impl<'a> QueryPlanner<'a> {
         where_expr: &Expression,
         db: &Database,
     ) -> Option<IndexUsage> {
-        self.find_index_usage_in_expression(table_name, where_expr, db)
-    }
-
-    fn find_index_usage_in_expression(
-        &self,
-        table_name: &str,
-        expr: &Expression,
-        db: &Database,
-    ) -> Option<IndexUsage> {
-        match expr {
-            Expression::BinaryOp { left, op, right } => {
-                if let Expression::Column(col_name) = left.as_ref() {
-                    let normalized_col = if col_name.contains('.') {
-                        col_name.split('.').next_back().unwrap_or(col_name)
-                    } else {
-                        col_name
-                    };
-
-                    if let Some(value) = self.extract_value(right) {
-                        for (idx_name, idx) in db.indexes.iter() {
-                            if idx.table == table_name && idx.column == normalized_col {
-                                return Some(IndexUsage {
-                                    index_name: idx_name.clone(),
-                                    column: normalized_col.to_string(),
-                                    operation: match op {
-                                        BinaryOperator::Equal => {
-                                            IndexOperation::Equality(value.clone())
-                                        }
-                                        BinaryOperator::LessThan
-                                        | BinaryOperator::LessThanOrEqual => {
-                                            IndexOperation::Range {
-                                                min: None,
-                                                max: Some(value.clone()),
-                                            }
-                                        }
-                                        BinaryOperator::GreaterThan
-                                        | BinaryOperator::GreaterThanOrEqual => {
-                                            IndexOperation::Range {
-                                                min: Some(value.clone()),
-                                                max: None,
-                                            }
-                                        }
-                                        _ => continue,
-                                    },
-                                    value: Some(value),
-                                });
-                            }
-                        }
-                    }
-                }
-                None
-            }
-            Expression::In { left, values } => {
-                if let Expression::Column(col_name) = left.as_ref() {
-                    let normalized_col = if col_name.contains('.') {
-                        col_name.split('.').next_back().unwrap_or(col_name)
-                    } else {
-                        col_name
-                    };
-
-                    for (idx_name, idx) in db.indexes.iter() {
-                        if idx.table == table_name && idx.column == normalized_col {
-                            return Some(IndexUsage {
-                                index_name: idx_name.clone(),
-                                column: normalized_col.to_string(),
-                                operation: IndexOperation::In(values.clone()),
-                                value: None,
-                            });
-                        }
-                    }
-                }
-                None
-            }
-            _ => None,
-        }
-    }
-
-    fn extract_value(&self, expr: &Expression) -> Option<Value> {
-        match expr {
-            Expression::Value(v) => Some(v.clone()),
-            _ => None,
-        }
+        find_index_usage(db, table_name, where_expr)
     }
 
     fn extract_conjuncts(&self, expr: &Expression) -> Vec<Expression> {
@@ -1571,27 +1523,4 @@ pub(crate) fn infer_select_output_columns(
     stmt: &SelectStatement,
 ) -> Result<Vec<ColumnDefinition>, RustqlError> {
     QueryPlanner::new(db).infer_select_output_columns(stmt)
-}
-
-#[derive(Debug, Clone)]
-struct IndexUsage {
-    index_name: String,
-    #[allow(dead_code)]
-    column: String,
-    operation: IndexOperation,
-    #[allow(dead_code)]
-    value: Option<Value>,
-}
-
-#[derive(Debug, Clone)]
-enum IndexOperation {
-    #[allow(dead_code)]
-    Equality(Value),
-    Range {
-        #[allow(dead_code)]
-        min: Option<Value>,
-        #[allow(dead_code)]
-        max: Option<Value>,
-    },
-    In(Vec<Value>),
 }

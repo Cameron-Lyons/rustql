@@ -1,0 +1,30 @@
+# explain analyze and join coverage
+statement ok
+CREATE TABLE slt_ea_users (id INTEGER, name TEXT);
+
+statement ok
+CREATE TABLE slt_ea_orders (id INTEGER, user_id INTEGER, amount FLOAT);
+
+statement ok
+INSERT INTO slt_ea_users VALUES (1, 'Alice'), (2, 'Bob'), (3, 'Cara');
+
+statement ok
+INSERT INTO slt_ea_orders VALUES (1, 1, 12.0), (2, 1, 8.0), (3, 2, 15.0);
+
+query ok
+EXPLAIN ANALYZE SELECT * FROM slt_ea_users WHERE id >= 2;
+----
+Query Plan
+Planning Time
+Execution Time
+Actual Rows: 2
+
+query ok
+SELECT slt_ea_users.name, slt_ea_orders.amount
+FROM slt_ea_users
+JOIN slt_ea_orders ON slt_ea_users.id = slt_ea_orders.user_id
+WHERE slt_ea_orders.amount >= 10.0
+ORDER BY slt_ea_orders.id;
+----
+Alice
+Bob
