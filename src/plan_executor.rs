@@ -401,22 +401,21 @@ impl<'a> PlanExecutor<'a> {
         let mut joined_columns = left.columns.clone();
         joined_columns.extend(right.columns.clone());
         let mut matched_right = vec![false; right.rows.len()];
+        let combined_columns = (!matches!(join_type, JoinType::Cross))
+            .then(|| combined_column_definitions(&left.columns, &right.columns));
 
         for left_row in &left.rows {
             let mut has_match = false;
             for (right_idx, right_row) in right.rows.iter().enumerate() {
-                let combined_row: Vec<Value> =
-                    left_row.iter().chain(right_row.iter()).cloned().collect();
+                let combined_row = combine_rows(left_row, right_row);
 
                 let include = if matches!(join_type, JoinType::Cross) {
                     true
                 } else {
-                    self.evaluate_join_condition(
+                    self.evaluate_expression(
                         condition,
-                        &left.columns,
-                        &right.columns,
-                        left_row,
-                        right_row,
+                        combined_columns.as_ref().unwrap(),
+                        &combined_row,
                     )?
                 };
 
@@ -467,6 +466,7 @@ impl<'a> PlanExecutor<'a> {
         let rewritten_subquery = lateral_subquery_with_outer_scope(subquery, &temp_table_name);
         let mut scoped_db =
             ScopedDatabase::new(self.db, temp_table_name, outer_scope_columns.clone());
+        let combined_columns = combined_column_definitions(&left.columns, right_columns);
 
         for left_row in &left.rows {
             scoped_db.update_temp_row(left_row);
@@ -492,16 +492,12 @@ impl<'a> PlanExecutor<'a> {
 
             let mut has_match = false;
             for right_row in &subquery_result.rows {
-                let include = self.evaluate_join_condition(
-                    condition,
-                    &left.columns,
-                    right_columns,
-                    left_row,
-                    right_row,
-                )?;
+                let combined_row = combine_rows(left_row, right_row);
+                let include =
+                    self.evaluate_expression(condition, &combined_columns, &combined_row)?;
 
                 if include {
-                    joined_rows.push(combine_rows(left_row, right_row));
+                    joined_rows.push(combined_row);
                     has_match = true;
                 }
             }
@@ -532,11 +528,11 @@ impl<'a> PlanExecutor<'a> {
         let (build_key_idx, probe_key_idx) =
             self.extract_join_keys(condition, build_cols, probe_cols)?;
 
-        let mut hash_table: BTreeMap<Value, Vec<Vec<Value>>> = BTreeMap::new();
-        for row in &build.rows {
+        let mut hash_table: BTreeMap<Value, Vec<usize>> = BTreeMap::new();
+        for (row_idx, row) in build.rows.iter().enumerate() {
             if build_key_idx < row.len() {
                 let key = row[build_key_idx].clone();
-                hash_table.entry(key).or_default().push(row.clone());
+                hash_table.entry(key).or_default().push(row_idx);
             }
         }
 
@@ -547,12 +543,13 @@ impl<'a> PlanExecutor<'a> {
         for probe_row in &probe.rows {
             if probe_key_idx < probe_row.len() {
                 let key = probe_row[probe_key_idx].clone();
-                if let Some(build_rows) = hash_table.get(&key) {
-                    for build_row in build_rows {
-                        let combined_row: Vec<Value> = if left.rows.len() <= right.rows.len() {
-                            build_row.iter().chain(probe_row.iter()).cloned().collect()
+                if let Some(build_row_indices) = hash_table.get(&key) {
+                    for &build_row_idx in build_row_indices {
+                        let build_row = &build.rows[build_row_idx];
+                        let combined_row = if left.rows.len() <= right.rows.len() {
+                            combine_rows(build_row, probe_row)
                         } else {
-                            probe_row.iter().chain(build_row.iter()).cloned().collect()
+                            combine_rows(probe_row, build_row)
                         };
                         joined_rows.push(combined_row);
                     }
@@ -735,23 +732,29 @@ impl<'a> PlanExecutor<'a> {
             .collect();
 
         let mut result_rows = Vec::new();
+        let build_groups = |exprs: &[Expression]| -> BTreeMap<Vec<Value>, Vec<&[Value]>> {
+            let mut groups: BTreeMap<Vec<Value>, Vec<&[Value]>> = BTreeMap::new();
+            for row in &input.rows {
+                let key: Vec<Value> = exprs
+                    .iter()
+                    .map(|expr| {
+                        self.evaluate_value_expression(expr, &column_defs, row)
+                            .unwrap_or(Value::Null)
+                    })
+                    .collect();
+                groups.entry(key).or_default().push(row.as_slice());
+            }
+
+            if groups.is_empty() && exprs.is_empty() {
+                groups.insert(Vec::new(), Vec::new());
+            }
+
+            groups
+        };
+
         if let Some(grouping_sets) = grouping_sets {
             for set in grouping_sets {
-                let mut groups: BTreeMap<Vec<Value>, Vec<Vec<Value>>> = BTreeMap::new();
-                for row in &input.rows {
-                    let key: Vec<Value> = set
-                        .iter()
-                        .map(|expr| {
-                            self.evaluate_value_expression(expr, &column_defs, row)
-                                .unwrap_or(Value::Null)
-                        })
-                        .collect();
-                    groups.entry(key).or_default().push(row.clone());
-                }
-
-                if groups.is_empty() && set.is_empty() {
-                    groups.insert(Vec::new(), Vec::new());
-                }
+                let groups = build_groups(set);
 
                 for group_rows in groups.into_values() {
                     let mut result_row = Vec::with_capacity(group_by.len() + aggregates.len());
@@ -771,19 +774,20 @@ impl<'a> PlanExecutor<'a> {
                         }
                     }
 
-                    for agg in aggregates {
-                        let agg_value = self.compute_aggregate(agg, &group_rows, &input.columns)?;
-                        result_row.push(agg_value);
-                    }
+                    let aggregate_values =
+                        self.compute_group_aggregate_values(aggregates, &group_rows, &column_defs)?;
+                    result_row.extend(aggregate_values.iter().cloned());
 
                     if let Some(having_expr) = having {
-                        let include = self.evaluate_having(
-                            having_expr,
-                            &result_column_defs,
-                            &result_row,
-                            &column_defs,
-                            &group_rows,
-                        )?;
+                        let having_context = HavingContext {
+                            result_columns: &result_column_defs,
+                            result_row: &result_row,
+                            input_columns: &column_defs,
+                            selected_aggregates: aggregates,
+                            aggregate_values: &aggregate_values,
+                            group_rows: &group_rows,
+                        };
+                        let include = self.evaluate_having(having_expr, &having_context)?;
 
                         if !include {
                             continue;
@@ -794,38 +798,24 @@ impl<'a> PlanExecutor<'a> {
                 }
             }
         } else {
-            let mut groups: BTreeMap<Vec<Value>, Vec<Vec<Value>>> = BTreeMap::new();
-            for row in &input.rows {
-                let key: Vec<Value> = group_by
-                    .iter()
-                    .map(|expr| {
-                        self.evaluate_value_expression(expr, &column_defs, row)
-                            .unwrap_or(Value::Null)
-                    })
-                    .collect();
-                groups.entry(key).or_default().push(row.clone());
-            }
-
-            if groups.is_empty() && group_by.is_empty() {
-                groups.insert(Vec::new(), Vec::new());
-            }
+            let groups = build_groups(group_by);
 
             for (group_key, group_rows) in groups {
                 let mut result_row = group_key.clone();
-
-                for agg in aggregates {
-                    let agg_value = self.compute_aggregate(agg, &group_rows, &input.columns)?;
-                    result_row.push(agg_value);
-                }
+                let aggregate_values =
+                    self.compute_group_aggregate_values(aggregates, &group_rows, &column_defs)?;
+                result_row.extend(aggregate_values.iter().cloned());
 
                 if let Some(having_expr) = having {
-                    let include = self.evaluate_having(
-                        having_expr,
-                        &result_column_defs,
-                        &result_row,
-                        &column_defs,
-                        &group_rows,
-                    )?;
+                    let having_context = HavingContext {
+                        result_columns: &result_column_defs,
+                        result_row: &result_row,
+                        input_columns: &column_defs,
+                        selected_aggregates: aggregates,
+                        aggregate_values: &aggregate_values,
+                        group_rows: &group_rows,
+                    };
+                    let include = self.evaluate_having(having_expr, &having_context)?;
 
                     if !include {
                         continue;
@@ -858,26 +848,6 @@ impl<'a> PlanExecutor<'a> {
         row: &[Value],
     ) -> Result<Value, RustqlError> {
         evaluate_value_expression_with_db(expr, columns, row, Some(self.db))
-    }
-
-    fn evaluate_join_condition(
-        &self,
-        condition: &Expression,
-        left_columns: &[String],
-        right_columns: &[String],
-        left_row: &[Value],
-        right_row: &[Value],
-    ) -> Result<bool, RustqlError> {
-        if let Expression::Value(Value::Boolean(value)) = condition {
-            return Ok(*value);
-        }
-
-        let mut combined_columns = column_definitions_from_names(left_columns);
-        combined_columns.extend(column_definitions_from_names(right_columns));
-
-        let combined_row: Vec<Value> = left_row.iter().chain(right_row.iter()).cloned().collect();
-
-        self.evaluate_expression(condition, &combined_columns, &combined_row)
     }
 
     fn extract_join_keys(
@@ -966,91 +936,119 @@ impl<'a> PlanExecutor<'a> {
             .collect()
     }
 
-    fn compute_aggregate(
+    fn compute_group_aggregate_values(
+        &self,
+        aggregates: &[AggregateFunction],
+        rows: &[&[Value]],
+        columns: &[ColumnDefinition],
+    ) -> Result<Vec<Value>, RustqlError> {
+        let mut shared_inputs = vec![0usize; aggregates.len()];
+        for (idx, aggregate) in aggregates.iter().enumerate() {
+            shared_inputs[idx] = aggregates[..idx]
+                .iter()
+                .position(|candidate| aggregate_input_signature_matches(candidate, aggregate))
+                .unwrap_or(idx);
+        }
+
+        let mut prepared_inputs: Vec<Option<PreparedAggregateInput>> = Vec::new();
+        prepared_inputs.resize_with(aggregates.len(), || None);
+
+        let mut values = Vec::with_capacity(aggregates.len());
+        for (idx, aggregate) in aggregates.iter().enumerate() {
+            let input_idx = shared_inputs[idx];
+            if prepared_inputs[input_idx].is_none() {
+                prepared_inputs[input_idx] =
+                    Some(self.prepare_aggregate_input(&aggregates[input_idx], rows, columns)?);
+            }
+            values.push(self.compute_aggregate_from_input(
+                aggregate,
+                prepared_inputs[input_idx].as_ref().unwrap(),
+            )?);
+        }
+
+        Ok(values)
+    }
+
+    fn prepare_aggregate_input(
         &self,
         agg: &AggregateFunction,
-        rows: &[Vec<Value>],
-        columns: &[String],
-    ) -> Result<Value, RustqlError> {
+        rows: &[&[Value]],
+        columns: &[ColumnDefinition],
+    ) -> Result<PreparedAggregateInput, RustqlError> {
         use std::collections::BTreeSet;
 
-        let column_defs: Vec<ColumnDefinition> = columns
-            .iter()
-            .map(|name| ColumnDefinition {
-                name: name.clone(),
-                data_type: DataType::Text,
-                nullable: true,
-                primary_key: false,
-                unique: false,
-                default_value: None,
-                foreign_key: None,
-                check: None,
-                auto_increment: false,
-                generated: None,
-            })
-            .collect();
+        let count_star = matches!(agg.expr.as_ref(), Expression::Column(name) if name == "*")
+            && matches!(agg.function, AggregateFunctionType::Count);
 
-        let eval_expr_for_row = |row: &Vec<Value>| -> Result<Value, RustqlError> {
-            self.evaluate_value_expression(&agg.expr, &column_defs, row)
-        };
+        if count_star && agg.distinct {
+            return Err(RustqlError::AggregateError(
+                "COUNT(DISTINCT *) is not supported".to_string(),
+            ));
+        }
 
-        let filtered_rows: Vec<&Vec<Value>> = rows
-            .iter()
-            .filter(|row| {
-                agg.filter.as_deref().is_none_or(|filter_expr| {
-                    self.evaluate_expression(filter_expr, &column_defs, row)
-                        .unwrap_or(false)
-                })
-            })
-            .collect();
+        let mut filtered_row_count = 0usize;
+        let mut values = Vec::new();
+        let mut seen = agg.distinct.then(BTreeSet::new);
 
-        let mut seen: BTreeSet<Value> = BTreeSet::new();
+        for row in rows {
+            if agg.filter.as_deref().is_some_and(|filter_expr| {
+                !self
+                    .evaluate_expression(filter_expr, columns, row)
+                    .unwrap_or(false)
+            }) {
+                continue;
+            }
 
+            filtered_row_count += 1;
+            if count_star {
+                continue;
+            }
+
+            let value = self.evaluate_value_expression(&agg.expr, columns, row)?;
+            if matches!(value, Value::Null) {
+                continue;
+            }
+
+            if let Some(seen) = seen.as_mut()
+                && !seen.insert(value.clone())
+            {
+                continue;
+            }
+
+            values.push(value);
+        }
+
+        Ok(PreparedAggregateInput {
+            count_star,
+            filtered_row_count,
+            values,
+        })
+    }
+
+    fn compute_aggregate_from_input(
+        &self,
+        agg: &AggregateFunction,
+        input: &PreparedAggregateInput,
+    ) -> Result<Value, RustqlError> {
         match agg.function {
             AggregateFunctionType::Count => {
-                if let Expression::Column(name) = agg.expr.as_ref()
-                    && name == "*"
-                {
-                    if agg.distinct {
-                        return Err(RustqlError::AggregateError(
-                            "COUNT(DISTINCT *) is not supported".to_string(),
-                        ));
-                    }
-                    return Ok(Value::Integer(filtered_rows.len() as i64));
+                if input.count_star {
+                    Ok(Value::Integer(input.filtered_row_count as i64))
+                } else {
+                    Ok(Value::Integer(input.values.len() as i64))
                 }
-
-                let mut count = 0i64;
-                for row in &filtered_rows {
-                    let val = eval_expr_for_row(row)?;
-                    if matches!(val, Value::Null) {
-                        continue;
-                    }
-                    if agg.distinct && !seen.insert(val) {
-                        continue;
-                    }
-                    count += 1;
-                }
-                Ok(Value::Integer(count))
             }
             AggregateFunctionType::Sum => {
                 let mut sum = 0.0f64;
                 let mut has_value = false;
-
-                for row in &filtered_rows {
-                    let val = eval_expr_for_row(row)?;
-                    if matches!(val, Value::Null) {
-                        continue;
-                    }
-                    if agg.distinct && !seen.insert(val.clone()) {
-                        continue;
-                    }
-                    match val {
+                for value in &input.values {
+                    match value {
                         Value::Integer(i) => {
-                            sum += i as f64;
+                            sum += *i as f64;
                             has_value = true;
                         }
                         Value::Float(f) => {
-                            sum += f;
+                            sum += *f;
                             has_value = true;
                         }
                         _ => {
@@ -1060,7 +1058,6 @@ impl<'a> PlanExecutor<'a> {
                         }
                     }
                 }
-
                 if has_value {
                     Ok(Value::Float(sum))
                 } else {
@@ -1070,22 +1067,14 @@ impl<'a> PlanExecutor<'a> {
             AggregateFunctionType::Avg => {
                 let mut sum = 0.0f64;
                 let mut count = 0i64;
-
-                for row in &filtered_rows {
-                    let val = eval_expr_for_row(row)?;
-                    if matches!(val, Value::Null) {
-                        continue;
-                    }
-                    if agg.distinct && !seen.insert(val.clone()) {
-                        continue;
-                    }
-                    match val {
+                for value in &input.values {
+                    match value {
                         Value::Integer(i) => {
-                            sum += i as f64;
+                            sum += *i as f64;
                             count += 1;
                         }
                         Value::Float(f) => {
-                            sum += f;
+                            sum += *f;
                             count += 1;
                         }
                         _ => {
@@ -1095,7 +1084,6 @@ impl<'a> PlanExecutor<'a> {
                         }
                     }
                 }
-
                 if count > 0 {
                     Ok(Value::Float(sum / count as f64))
                 } else {
@@ -1104,111 +1092,51 @@ impl<'a> PlanExecutor<'a> {
             }
             AggregateFunctionType::Min => {
                 let mut min_val: Option<Value> = None;
-
-                for row in &filtered_rows {
-                    let val = eval_expr_for_row(row)?;
-                    if matches!(val, Value::Null) {
-                        continue;
-                    }
-                    if agg.distinct && !seen.insert(val.clone()) {
-                        continue;
-                    }
+                for value in &input.values {
                     min_val = Some(match min_val {
-                        None => val,
+                        None => value.clone(),
                         Some(current) => {
-                            if compare_values_same_type(&val, &current) == Ordering::Less {
-                                val
+                            if compare_values_same_type(value, &current) == Ordering::Less {
+                                value.clone()
                             } else {
                                 current
                             }
                         }
                     });
                 }
-
                 Ok(min_val.unwrap_or(Value::Null))
             }
             AggregateFunctionType::Max => {
                 let mut max_val: Option<Value> = None;
-
-                for row in &filtered_rows {
-                    let val = eval_expr_for_row(row)?;
-                    if matches!(val, Value::Null) {
-                        continue;
-                    }
-                    if agg.distinct && !seen.insert(val.clone()) {
-                        continue;
-                    }
+                for value in &input.values {
                     max_val = Some(match max_val {
-                        None => val,
+                        None => value.clone(),
                         Some(current) => {
-                            if compare_values_same_type(&val, &current) == Ordering::Greater {
-                                val
+                            if compare_values_same_type(value, &current) == Ordering::Greater {
+                                value.clone()
                             } else {
                                 current
                             }
                         }
                     });
                 }
-
                 Ok(max_val.unwrap_or(Value::Null))
             }
             AggregateFunctionType::Variance => {
-                let mut values = Vec::new();
-
-                for row in &filtered_rows {
-                    let val = eval_expr_for_row(row)?;
-                    if matches!(val, Value::Null) {
-                        continue;
-                    }
-                    if agg.distinct && !seen.insert(val.clone()) {
-                        continue;
-                    }
-                    match val {
-                        Value::Integer(i) => values.push(i as f64),
-                        Value::Float(f) => values.push(f),
-                        _ => {
-                            return Err(RustqlError::AggregateError(
-                                "VARIANCE requires numeric values".to_string(),
-                            ));
-                        }
-                    }
-                }
-
+                let values = numeric_values(&input.values, "VARIANCE requires numeric values")?;
                 if values.is_empty() {
                     return Ok(Value::Null);
                 }
-
                 let mean = values.iter().sum::<f64>() / values.len() as f64;
                 let variance =
                     values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / values.len() as f64;
                 Ok(Value::Float(variance))
             }
             AggregateFunctionType::Stddev => {
-                let mut values = Vec::new();
-
-                for row in &filtered_rows {
-                    let val = eval_expr_for_row(row)?;
-                    if matches!(val, Value::Null) {
-                        continue;
-                    }
-                    if agg.distinct && !seen.insert(val.clone()) {
-                        continue;
-                    }
-                    match val {
-                        Value::Integer(i) => values.push(i as f64),
-                        Value::Float(f) => values.push(f),
-                        _ => {
-                            return Err(RustqlError::AggregateError(
-                                "STDDEV requires numeric values".to_string(),
-                            ));
-                        }
-                    }
-                }
-
+                let values = numeric_values(&input.values, "STDDEV requires numeric values")?;
                 if values.is_empty() {
                     return Ok(Value::Null);
                 }
-
                 let mean = values.iter().sum::<f64>() / values.len() as f64;
                 let variance =
                     values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / values.len() as f64;
@@ -1216,26 +1144,7 @@ impl<'a> PlanExecutor<'a> {
             }
             AggregateFunctionType::GroupConcat => {
                 let sep = agg.separator.as_deref().unwrap_or(",");
-                let mut parts: Vec<String> = Vec::new();
-                for row in &filtered_rows {
-                    let val = eval_expr_for_row(row)?;
-                    if matches!(val, Value::Null) {
-                        continue;
-                    }
-                    if agg.distinct && !seen.insert(val.clone()) {
-                        continue;
-                    }
-                    parts.push(match &val {
-                        Value::Integer(n) => n.to_string(),
-                        Value::Float(f) => format!("{}", f),
-                        Value::Text(s) => s.clone(),
-                        Value::Boolean(b) => b.to_string(),
-                        Value::Date(d) => d.clone(),
-                        Value::Time(t) => t.clone(),
-                        Value::DateTime(dt) => dt.clone(),
-                        Value::Null => "NULL".to_string(),
-                    });
-                }
+                let parts: Vec<String> = input.values.iter().map(format_value_string).collect();
                 if parts.is_empty() {
                     Ok(Value::Null)
                 } else {
@@ -1245,20 +1154,16 @@ impl<'a> PlanExecutor<'a> {
             AggregateFunctionType::BoolAnd => {
                 let mut result = true;
                 let mut has_value = false;
-                for row in &filtered_rows {
-                    let val = eval_expr_for_row(row)?;
-                    if matches!(val, Value::Null) {
-                        continue;
-                    }
+                for value in &input.values {
                     has_value = true;
-                    match val {
+                    match value {
                         Value::Boolean(b) => {
                             if !b {
                                 result = false;
                             }
                         }
                         Value::Integer(n) => {
-                            if n == 0 {
+                            if *n == 0 {
                                 result = false;
                             }
                         }
@@ -1278,20 +1183,16 @@ impl<'a> PlanExecutor<'a> {
             AggregateFunctionType::BoolOr => {
                 let mut result = false;
                 let mut has_value = false;
-                for row in &filtered_rows {
-                    let val = eval_expr_for_row(row)?;
-                    if matches!(val, Value::Null) {
-                        continue;
-                    }
+                for value in &input.values {
                     has_value = true;
-                    match val {
+                    match value {
                         Value::Boolean(b) => {
-                            if b {
+                            if *b {
                                 result = true;
                             }
                         }
                         Value::Integer(n) => {
-                            if n != 0 {
+                            if *n != 0 {
                                 result = true;
                             }
                         }
@@ -1309,25 +1210,7 @@ impl<'a> PlanExecutor<'a> {
                 }
             }
             AggregateFunctionType::Median => {
-                let mut values: Vec<f64> = Vec::new();
-                for row in &filtered_rows {
-                    let val = eval_expr_for_row(row)?;
-                    if matches!(val, Value::Null) {
-                        continue;
-                    }
-                    if agg.distinct && !seen.insert(val.clone()) {
-                        continue;
-                    }
-                    match val {
-                        Value::Integer(i) => values.push(i as f64),
-                        Value::Float(f) => values.push(f),
-                        _ => {
-                            return Err(RustqlError::AggregateError(
-                                "MEDIAN requires numeric values".to_string(),
-                            ));
-                        }
-                    }
-                }
+                let mut values = numeric_values(&input.values, "MEDIAN requires numeric values")?;
                 if values.is_empty() {
                     return Ok(Value::Null);
                 }
@@ -1341,20 +1224,8 @@ impl<'a> PlanExecutor<'a> {
             }
             AggregateFunctionType::Mode => {
                 let mut counts: BTreeMap<Value, (usize, usize)> = BTreeMap::new();
-                let mut next_position = 0usize;
-                for row in &filtered_rows {
-                    let val = eval_expr_for_row(row)?;
-                    if matches!(val, Value::Null) {
-                        continue;
-                    }
-                    if agg.distinct && !seen.insert(val.clone()) {
-                        continue;
-                    }
-                    let entry = counts.entry(val).or_insert_with(|| {
-                        let position = next_position;
-                        next_position += 1;
-                        (0, position)
-                    });
+                for (position, value) in input.values.iter().cloned().enumerate() {
+                    let entry = counts.entry(value).or_insert((0, position));
                     entry.0 += 1;
                 }
                 if counts.is_empty() {
@@ -1369,25 +1240,8 @@ impl<'a> PlanExecutor<'a> {
             }
             AggregateFunctionType::PercentileCont => {
                 let frac = agg.percentile.unwrap_or(0.5);
-                let mut values: Vec<f64> = Vec::new();
-                for row in &filtered_rows {
-                    let val = eval_expr_for_row(row)?;
-                    if matches!(val, Value::Null) {
-                        continue;
-                    }
-                    if agg.distinct && !seen.insert(val.clone()) {
-                        continue;
-                    }
-                    match val {
-                        Value::Integer(i) => values.push(i as f64),
-                        Value::Float(f) => values.push(f),
-                        _ => {
-                            return Err(RustqlError::AggregateError(
-                                "PERCENTILE_CONT requires numeric values".to_string(),
-                            ));
-                        }
-                    }
-                }
+                let mut values =
+                    numeric_values(&input.values, "PERCENTILE_CONT requires numeric values")?;
                 if values.is_empty() {
                     return Ok(Value::Null);
                 }
@@ -1408,101 +1262,53 @@ impl<'a> PlanExecutor<'a> {
             }
             AggregateFunctionType::PercentileDisc => {
                 let frac = agg.percentile.unwrap_or(0.5);
-                let mut values: Vec<Value> = Vec::new();
-                for row in &filtered_rows {
-                    let val = eval_expr_for_row(row)?;
-                    if matches!(val, Value::Null) {
-                        continue;
-                    }
-                    if agg.distinct && !seen.insert(val.clone()) {
-                        continue;
-                    }
-                    values.push(val);
-                }
+                let mut values = input.values.clone();
                 if values.is_empty() {
                     return Ok(Value::Null);
                 }
                 values.sort();
                 let idx = ((frac * values.len() as f64).ceil() as usize).saturating_sub(1);
-                let idx = idx.min(values.len() - 1);
-                Ok(values[idx].clone())
+                Ok(values[idx.min(values.len() - 1)].clone())
             }
         }
+    }
+
+    fn compute_aggregate(
+        &self,
+        agg: &AggregateFunction,
+        rows: &[&[Value]],
+        columns: &[ColumnDefinition],
+    ) -> Result<Value, RustqlError> {
+        let prepared = self.prepare_aggregate_input(agg, rows, columns)?;
+        self.compute_aggregate_from_input(agg, &prepared)
     }
 
     fn evaluate_having(
         &self,
         expr: &Expression,
-        result_columns: &[ColumnDefinition],
-        result_row: &[Value],
-        input_columns: &[ColumnDefinition],
-        group_rows: &[Vec<Value>],
+        context: &HavingContext<'_>,
     ) -> Result<bool, RustqlError> {
         match expr {
-            Expression::BinaryOp { left, op, right } => match op {
-                BinaryOperator::And => Ok(self.evaluate_having(
-                    left,
-                    result_columns,
-                    result_row,
-                    input_columns,
-                    group_rows,
-                )? && self.evaluate_having(
-                    right,
-                    result_columns,
-                    result_row,
-                    input_columns,
-                    group_rows,
-                )?),
-                BinaryOperator::Or => Ok(self.evaluate_having(
-                    left,
-                    result_columns,
-                    result_row,
-                    input_columns,
-                    group_rows,
-                )? || self.evaluate_having(
-                    right,
-                    result_columns,
-                    result_row,
-                    input_columns,
-                    group_rows,
-                )?),
-                _ => {
-                    let left_val = self.evaluate_having_value(
-                        left,
-                        result_columns,
-                        result_row,
-                        input_columns,
-                        group_rows,
-                    )?;
-                    let right_val = self.evaluate_having_value(
-                        right,
-                        result_columns,
-                        result_row,
-                        input_columns,
-                        group_rows,
-                    )?;
-                    compare_values(&left_val, op, &right_val)
+            Expression::BinaryOp { left, op, right } => {
+                match op {
+                    BinaryOperator::And => Ok(self.evaluate_having(left, context)?
+                        && self.evaluate_having(right, context)?),
+                    BinaryOperator::Or => Ok(self.evaluate_having(left, context)?
+                        || self.evaluate_having(right, context)?),
+                    _ => {
+                        let left_val = self.evaluate_having_value(left, context)?;
+                        let right_val = self.evaluate_having_value(right, context)?;
+                        compare_values(&left_val, op, &right_val)
+                    }
                 }
-            },
+            }
             Expression::IsNull { expr, not } => {
-                let value = self.evaluate_having_value(
-                    expr,
-                    result_columns,
-                    result_row,
-                    input_columns,
-                    group_rows,
-                )?;
+                let value = self.evaluate_having_value(expr, context)?;
                 let is_null = matches!(value, Value::Null);
                 Ok(if *not { !is_null } else { is_null })
             }
             Expression::UnaryOp { op, expr } => match op {
-                UnaryOperator::Not => Ok(!self.evaluate_having(
-                    expr,
-                    result_columns,
-                    result_row,
-                    input_columns,
-                    group_rows,
-                )?),
+                UnaryOperator::Not => Ok(!self.evaluate_having(expr, context)?),
                 _ => Err(RustqlError::Internal(
                     "Unsupported unary operation in HAVING clause".to_string(),
                 )),
@@ -1516,17 +1322,23 @@ impl<'a> PlanExecutor<'a> {
     fn evaluate_having_value(
         &self,
         expr: &Expression,
-        result_columns: &[ColumnDefinition],
-        result_row: &[Value],
-        input_columns: &[ColumnDefinition],
-        group_rows: &[Vec<Value>],
+        context: &HavingContext<'_>,
     ) -> Result<Value, RustqlError> {
         match expr {
             Expression::Function(agg) => {
-                let group_rows_vec: Vec<Vec<Value>> = group_rows.to_vec();
-
-                let col_names: Vec<String> = input_columns.iter().map(|c| c.name.clone()).collect();
-                self.compute_aggregate(agg, &group_rows_vec, &col_names)
+                if let Some(idx) = context
+                    .selected_aggregates
+                    .iter()
+                    .position(|candidate| candidate == agg)
+                {
+                    Ok(context
+                        .aggregate_values
+                        .get(idx)
+                        .cloned()
+                        .unwrap_or(Value::Null))
+                } else {
+                    self.compute_aggregate(agg, context.group_rows, context.input_columns)
+                }
             }
             Expression::Value(val) => Ok(val.clone()),
             Expression::Column(name) => {
@@ -1535,27 +1347,16 @@ impl<'a> PlanExecutor<'a> {
                 } else {
                     name.as_str()
                 };
-                let idx = result_columns
+                let idx = context
+                    .result_columns
                     .iter()
                     .position(|c| column_names_match(&c.name, col_name))
                     .ok_or_else(|| format!("Column '{}' not found in HAVING clause", name))?;
-                Ok(result_row.get(idx).cloned().unwrap_or(Value::Null))
+                Ok(context.result_row.get(idx).cloned().unwrap_or(Value::Null))
             }
             Expression::BinaryOp { left, op, right } => {
-                let left_val = self.evaluate_having_value(
-                    left,
-                    result_columns,
-                    result_row,
-                    input_columns,
-                    group_rows,
-                )?;
-                let right_val = self.evaluate_having_value(
-                    right,
-                    result_columns,
-                    result_row,
-                    input_columns,
-                    group_rows,
-                )?;
+                let left_val = self.evaluate_having_value(left, context)?;
+                let right_val = self.evaluate_having_value(right, context)?;
                 match op {
                     BinaryOperator::Plus
                     | BinaryOperator::Minus
@@ -1785,6 +1586,21 @@ impl Clone for ExecutionResult {
     }
 }
 
+struct PreparedAggregateInput {
+    count_star: bool,
+    filtered_row_count: usize,
+    values: Vec<Value>,
+}
+
+struct HavingContext<'a> {
+    result_columns: &'a [ColumnDefinition],
+    result_row: &'a [Value],
+    input_columns: &'a [ColumnDefinition],
+    selected_aggregates: &'a [AggregateFunction],
+    aggregate_values: &'a [Value],
+    group_rows: &'a [&'a [Value]],
+}
+
 fn column_definitions_from_names(columns: &[String]) -> Vec<ColumnDefinition> {
     columns
         .iter()
@@ -1801,6 +1617,40 @@ fn column_definitions_from_names(columns: &[String]) -> Vec<ColumnDefinition> {
             generated: None,
         })
         .collect()
+}
+
+fn combined_column_definitions(left: &[String], right: &[String]) -> Vec<ColumnDefinition> {
+    let mut combined = column_definitions_from_names(left);
+    combined.extend(column_definitions_from_names(right));
+    combined
+}
+
+fn aggregate_input_signature_matches(left: &AggregateFunction, right: &AggregateFunction) -> bool {
+    left.expr == right.expr && left.distinct == right.distinct && left.filter == right.filter
+}
+
+fn numeric_values(values: &[Value], error: &str) -> Result<Vec<f64>, RustqlError> {
+    values
+        .iter()
+        .map(|value| match value {
+            Value::Integer(i) => Ok(*i as f64),
+            Value::Float(f) => Ok(*f),
+            _ => Err(RustqlError::AggregateError(error.to_string())),
+        })
+        .collect()
+}
+
+fn format_value_string(value: &Value) -> String {
+    match value {
+        Value::Integer(n) => n.to_string(),
+        Value::Float(f) => format!("{}", f),
+        Value::Text(s) => s.clone(),
+        Value::Boolean(b) => b.to_string(),
+        Value::Date(d) => d.clone(),
+        Value::Time(t) => t.clone(),
+        Value::DateTime(dt) => dt.clone(),
+        Value::Null => "NULL".to_string(),
+    }
 }
 
 fn combine_rows(left: &[Value], right: &[Value]) -> Vec<Value> {
