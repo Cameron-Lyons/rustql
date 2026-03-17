@@ -1,16 +1,18 @@
 use crate::ast::*;
 use crate::database::{Database, Table};
+use crate::engine::ExecutionContext;
 use crate::error::RustqlError;
 use std::collections::HashSet;
 
 use super::expr::evaluate_expression;
 use super::select::execute_select_internal;
 
-pub fn perform_multiple_joins(
+pub(crate) fn perform_multiple_joins(
     db: &Database,
     from_table: &Table,
     from_table_name: &str,
     joins: &[Join],
+    ctx: Option<&ExecutionContext>,
 ) -> Result<(Vec<Vec<Value>>, Vec<ColumnDefinition>), RustqlError> {
     let mut current_rows: Vec<Vec<Value>> = from_table.rows.clone();
     let mut all_columns = from_table.columns.clone();
@@ -26,8 +28,11 @@ pub fn perform_multiple_joins(
 
             for current_row in &current_rows {
                 let temp_table_name = format!("__lateral_outer_{}", alias);
+                let ctx = ctx.ok_or_else(|| {
+                    RustqlError::Internal("LATERAL joins require an execution context".to_string())
+                })?;
                 {
-                    let mut db_write = super::get_database_write();
+                    let mut db_write = super::get_database_write(ctx);
                     db_write.tables.insert(
                         temp_table_name.clone(),
                         Table {
@@ -39,12 +44,12 @@ pub fn perform_multiple_joins(
                 }
 
                 let sub_result = {
-                    let db_read = super::get_database_read();
-                    execute_select_internal(*subquery.clone(), &db_read)
+                    let db_read = super::get_database_read(ctx);
+                    execute_select_internal(*subquery.clone(), &db_read, Some(ctx))
                 };
 
                 {
-                    let mut db_write = super::get_database_write();
+                    let mut db_write = super::get_database_write(ctx);
                     db_write.tables.remove(&temp_table_name);
                 }
 
@@ -106,7 +111,7 @@ pub fn perform_multiple_joins(
         }
 
         if let Some((ref subquery, ref alias)) = join.subquery {
-            let sub_result = execute_select_internal(*subquery.clone(), db)?;
+            let sub_result = execute_select_internal(*subquery.clone(), db, ctx)?;
             let sub_columns: Vec<ColumnDefinition> = sub_result
                 .headers
                 .iter()

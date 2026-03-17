@@ -3,15 +3,113 @@ use crate::database::Database;
 use crate::error::RustqlError;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
+use std::env;
 use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{Arc, RwLock};
 
 pub trait StorageEngine: Send + Sync {
     fn load(&self) -> Database;
 
     fn save(&self, db: &Database) -> Result<(), RustqlError>;
+}
+
+pub const DEFAULT_JSON_STORAGE_PATH: &str = "rustql_data.json";
+pub const DEFAULT_BTREE_STORAGE_PATH: &str = "rustql_btree.dat";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DefaultStorageBackend {
+    Json,
+    BTree,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DefaultStoragePaths {
+    pub json_path: PathBuf,
+    pub btree_path: PathBuf,
+}
+
+pub fn default_storage_backend() -> DefaultStorageBackend {
+    match env::var("RUSTQL_STORAGE") {
+        Ok(value) if value.eq_ignore_ascii_case("btree") => DefaultStorageBackend::BTree,
+        _ => DefaultStorageBackend::Json,
+    }
+}
+
+fn should_use_test_storage_paths() -> bool {
+    env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(|parent| parent.to_path_buf()))
+        .and_then(|parent| parent.file_name().map(|name| name.to_os_string()))
+        .is_some_and(|name| name == "deps")
+}
+
+fn implicit_default_storage_paths() -> DefaultStoragePaths {
+    if should_use_test_storage_paths() {
+        let binary_name = env::current_exe()
+            .ok()
+            .and_then(|path| {
+                path.file_stem()
+                    .map(|stem| stem.to_string_lossy().into_owned())
+            })
+            .unwrap_or_else(|| "rustql-tests".to_string());
+        let temp_dir = env::temp_dir();
+        let pid = std::process::id();
+
+        return DefaultStoragePaths {
+            json_path: temp_dir.join(format!("{binary_name}-{pid}.json")),
+            btree_path: temp_dir.join(format!("{binary_name}-{pid}.dat")),
+        };
+    }
+
+    DefaultStoragePaths {
+        json_path: PathBuf::from(DEFAULT_JSON_STORAGE_PATH),
+        btree_path: PathBuf::from(DEFAULT_BTREE_STORAGE_PATH),
+    }
+}
+
+pub fn default_storage_paths() -> DefaultStoragePaths {
+    let defaults = implicit_default_storage_paths();
+
+    DefaultStoragePaths {
+        json_path: env::var_os("RUSTQL_JSON_PATH")
+            .map(PathBuf::from)
+            .unwrap_or(defaults.json_path),
+        btree_path: env::var_os("RUSTQL_BTREE_PATH")
+            .map(PathBuf::from)
+            .unwrap_or(defaults.btree_path),
+    }
+}
+
+pub struct InMemoryStorageEngine {
+    database: RwLock<Database>,
+}
+
+impl InMemoryStorageEngine {
+    pub fn new() -> Self {
+        Self {
+            database: RwLock::new(Database::new()),
+        }
+    }
+}
+
+impl Default for InMemoryStorageEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl StorageEngine for InMemoryStorageEngine {
+    fn load(&self) -> Database {
+        self.database.read().unwrap().clone()
+    }
+
+    fn save(&self, db: &Database) -> Result<(), RustqlError> {
+        let mut stored = self.database.write().unwrap();
+        *stored = db.clone();
+        Ok(())
+    }
 }
 
 pub struct JsonStorageEngine {
@@ -51,21 +149,12 @@ impl StorageEngine for JsonStorageEngine {
     }
 }
 
-static STORAGE_ENGINE: OnceLock<Box<dyn StorageEngine>> = OnceLock::new();
-
-fn default_engine() -> Box<dyn StorageEngine> {
-    match std::env::var("RUSTQL_STORAGE") {
-        Ok(v) if v.eq_ignore_ascii_case("btree") => {
-            Box::new(BTreeStorageEngine::new("rustql_btree.dat"))
-        }
-        _ => Box::new(JsonStorageEngine::new("rustql_data.json")),
+pub fn default_storage_engine() -> Box<dyn StorageEngine> {
+    let paths = default_storage_paths();
+    match default_storage_backend() {
+        DefaultStorageBackend::BTree => Box::new(BTreeStorageEngine::new(paths.btree_path)),
+        DefaultStorageBackend::Json => Box::new(JsonStorageEngine::new(paths.json_path)),
     }
-}
-
-pub fn storage_engine() -> &'static dyn StorageEngine {
-    let _ = STORAGE_ENGINE.get_or_init(default_engine);
-
-    &**STORAGE_ENGINE.get().unwrap()
 }
 
 const MAX_CACHE_SIZE: usize = 1000;
@@ -1497,6 +1586,27 @@ mod tests {
     use crate::ast::{ColumnDefinition, DataType};
     use crate::database::Table;
     use std::collections::HashMap;
+
+    #[test]
+    fn default_storage_paths_use_temp_files_in_test_binaries() {
+        let paths = default_storage_paths();
+
+        match std::env::var_os("RUSTQL_JSON_PATH") {
+            Some(path) => assert_eq!(paths.json_path, PathBuf::from(path)),
+            None => {
+                assert!(paths.json_path.starts_with(std::env::temp_dir()));
+                assert_ne!(paths.json_path, PathBuf::from(DEFAULT_JSON_STORAGE_PATH));
+            }
+        }
+
+        match std::env::var_os("RUSTQL_BTREE_PATH") {
+            Some(path) => assert_eq!(paths.btree_path, PathBuf::from(path)),
+            None => {
+                assert!(paths.btree_path.starts_with(std::env::temp_dir()));
+                assert_ne!(paths.btree_path, PathBuf::from(DEFAULT_BTREE_STORAGE_PATH));
+            }
+        }
+    }
 
     #[test]
     fn btree_storage_round_trip() {

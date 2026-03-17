@@ -1,5 +1,4 @@
 use crate::ast::*;
-use crate::error::RustqlError;
 #[allow(unused_imports)]
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -28,8 +27,8 @@ pub struct Index {
     pub column: String,
     #[serde(with = "index_entries")]
     pub entries: BTreeMap<Value, Vec<usize>>,
-    #[serde(default)]
-    pub filter_expr: Option<String>,
+    #[serde(default, with = "optional_filter_expression")]
+    pub filter_expr: Option<Expression>,
 }
 
 mod index_entries {
@@ -129,6 +128,37 @@ pub struct CompositeIndex {
     pub columns: Vec<String>,
     #[serde(with = "composite_index_entries")]
     pub entries: BTreeMap<Vec<Value>, Vec<usize>>,
+    #[serde(default, with = "optional_filter_expression")]
+    pub filter_expr: Option<Expression>,
+}
+
+mod optional_filter_expression {
+    use super::*;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    #[derive(Serialize, Deserialize)]
+    #[serde(untagged)]
+    enum StoredFilter {
+        Expression(Expression),
+        LegacyDebugString(String),
+    }
+
+    pub fn serialize<S>(filter: &Option<Expression>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        filter.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<Expression>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Ok(match Option::<StoredFilter>::deserialize(deserializer)? {
+            Some(StoredFilter::Expression(expr)) => Some(expr),
+            Some(StoredFilter::LegacyDebugString(_)) | None => None,
+        })
+    }
 }
 
 mod composite_index_entries {
@@ -163,13 +193,5 @@ mod composite_index_entries {
 impl Database {
     pub fn new() -> Self {
         Self::default()
-    }
-
-    pub fn load() -> Self {
-        crate::storage::storage_engine().load()
-    }
-
-    pub fn save(&self) -> Result<(), RustqlError> {
-        crate::storage::storage_engine().save(self)
     }
 }

@@ -75,6 +75,28 @@ You can also pipe queries through stdin:
 echo "SHOW TABLES" | cargo run --release
 ```
 
+For explicit backend selection from the CLI:
+
+```sh
+cargo run --release -- --storage memory
+cargo run --release -- --storage json --json-path /tmp/rustql.json
+cargo run --release -- --storage btree --btree-path /tmp/rustql.dat
+```
+
+For embedding, build an engine instance directly:
+
+```rust
+use rustql::Engine;
+
+let engine = Engine::builder()
+    .json_file("/tmp/rustql.json")
+    .build();
+
+engine
+    .process_query("CREATE TABLE users (id INTEGER)")
+    .unwrap();
+```
+
 ## Storage backends
 
 | Backend | File | Activation |
@@ -88,6 +110,13 @@ The **B-tree** backend stores data in a page-based binary format (4 KB pages) wi
 
 ```sh
 RUSTQL_STORAGE=btree cargo run --release
+```
+
+Override the default file locations with:
+
+```sh
+RUSTQL_JSON_PATH=/tmp/rustql.json cargo test
+RUSTQL_BTREE_PATH=/tmp/rustql.dat RUSTQL_STORAGE=btree cargo run --release
 ```
 
 ## Project structure

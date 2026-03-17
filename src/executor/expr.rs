@@ -16,8 +16,8 @@ pub fn evaluate_expression(
             BinaryOperator::Or => Ok(evaluate_expression(db, left, columns, row)?
                 || evaluate_expression(db, right, columns, row)?),
             BinaryOperator::Like => {
-                let left_val = evaluate_value_expression(left, columns, row)?;
-                let right_val = evaluate_value_expression(right, columns, row)?;
+                let left_val = evaluate_value_expression_with_db(left, columns, row, db)?;
+                let right_val = evaluate_value_expression_with_db(right, columns, row, db)?;
                 match (left_val, right_val) {
                     (Value::Text(text), Value::Text(pattern)) => Ok(match_like(&text, &pattern)),
                     _ => Err(RustqlError::TypeMismatch(
@@ -26,8 +26,8 @@ pub fn evaluate_expression(
                 }
             }
             BinaryOperator::ILike => {
-                let left_val = evaluate_value_expression(left, columns, row)?;
-                let right_val = evaluate_value_expression(right, columns, row)?;
+                let left_val = evaluate_value_expression_with_db(left, columns, row, db)?;
+                let right_val = evaluate_value_expression_with_db(right, columns, row, db)?;
                 match (left_val, right_val) {
                     (Value::Text(text), Value::Text(pattern)) => {
                         Ok(match_like(&text.to_lowercase(), &pattern.to_lowercase()))
@@ -38,15 +38,15 @@ pub fn evaluate_expression(
                 }
             }
             BinaryOperator::Between => {
-                let left_val = evaluate_value_expression(left, columns, row)?;
+                let left_val = evaluate_value_expression_with_db(left, columns, row, db)?;
                 match &**right {
                     Expression::BinaryOp {
                         left: lb,
                         op: lb_op,
                         right: rb,
                     } if *lb_op == BinaryOperator::And => {
-                        let lower = evaluate_value_expression(lb, columns, row)?;
-                        let upper = evaluate_value_expression(rb, columns, row)?;
+                        let lower = evaluate_value_expression_with_db(lb, columns, row, db)?;
+                        let upper = evaluate_value_expression_with_db(rb, columns, row, db)?;
                         Ok(is_between(&left_val, &lower, &upper))
                     }
                     _ => Err(RustqlError::TypeMismatch(
@@ -55,7 +55,7 @@ pub fn evaluate_expression(
                 }
             }
             BinaryOperator::In => {
-                let left_val = evaluate_value_expression(left, columns, row)?;
+                let left_val = evaluate_value_expression_with_db(left, columns, row, db)?;
                 match &**right {
                     Expression::Subquery(subquery_stmt) => {
                         let db_ref =
@@ -64,19 +64,19 @@ pub fn evaluate_expression(
                         Ok(sub_vals.contains(&left_val))
                     }
                     _ => {
-                        let right_val = evaluate_value_expression(right, columns, row)?;
+                        let right_val = evaluate_value_expression_with_db(right, columns, row, db)?;
                         compare_values(&left_val, op, &right_val)
                     }
                 }
             }
             _ => {
-                let left_val = evaluate_value_expression(left, columns, row)?;
-                let right_val = evaluate_value_expression(right, columns, row)?;
+                let left_val = evaluate_value_expression_with_db(left, columns, row, db)?;
+                let right_val = evaluate_value_expression_with_db(right, columns, row, db)?;
                 compare_values(&left_val, op, &right_val)
             }
         },
         Expression::In { left, values } => {
-            let left_val = evaluate_value_expression(left, columns, row)?;
+            let left_val = evaluate_value_expression_with_db(left, columns, row, db)?;
             Ok(values.contains(&left_val))
         }
         Expression::Exists(subquery_stmt) => {
@@ -104,13 +104,13 @@ pub fn evaluate_expression(
                     .all(|v| compare_values(&left_val, op, v).unwrap_or(false)))
         }
         Expression::IsNull { expr, not } => {
-            let value = evaluate_value_expression(expr, columns, row)?;
+            let value = evaluate_value_expression_with_db(expr, columns, row, db)?;
             let is_null = matches!(value, Value::Null);
             Ok(if *not { !is_null } else { is_null })
         }
         Expression::IsDistinctFrom { left, right, not } => {
-            let left_val = evaluate_value_expression(left, columns, row)?;
-            let right_val = evaluate_value_expression(right, columns, row)?;
+            let left_val = evaluate_value_expression_with_db(left, columns, row, db)?;
+            let right_val = evaluate_value_expression_with_db(right, columns, row, db)?;
             let is_distinct = match (&left_val, &right_val) {
                 (Value::Null, Value::Null) => false,
                 (Value::Null, _) | (_, Value::Null) => true,
@@ -1472,11 +1472,11 @@ pub fn evaluate_value_expression_with_db(
             "Window functions must be evaluated in a separate pass".to_string(),
         )),
         Expression::Subquery(subquery) => {
-            let db_ref = match db {
-                Some(d) => std::borrow::Cow::Borrowed(d),
-                None => std::borrow::Cow::Owned(super::get_database_read().clone()),
-            };
-            let result = super::select::execute_select_internal((**subquery).clone(), &db_ref)?;
+            let db_ref = db.ok_or_else(|| {
+                RustqlError::Internal("Scalar subquery not allowed in this context".to_string())
+            })?;
+            let result =
+                super::select::execute_select_internal((**subquery).clone(), db_ref, None)?;
             if result.rows.is_empty() {
                 Ok(Value::Null)
             } else if result.rows.len() > 1 {

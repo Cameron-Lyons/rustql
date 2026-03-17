@@ -410,6 +410,56 @@ fn test_partial_index_if_not_exists() {
 }
 
 #[test]
+fn test_partial_index_not_used_without_matching_filter() {
+    let _g = setup();
+    process_query("CREATE TABLE pidx_guard (id INTEGER, active INTEGER, val INTEGER)").unwrap();
+    process_query("INSERT INTO pidx_guard VALUES (1, 1, 10)").unwrap();
+    process_query("INSERT INTO pidx_guard VALUES (2, 0, 10)").unwrap();
+    process_query("CREATE INDEX idx_guard ON pidx_guard(val) WHERE active = 1").unwrap();
+
+    let explain = process_query("EXPLAIN SELECT id FROM pidx_guard WHERE val = 10").unwrap();
+    assert!(
+        !explain.contains("Index Scan using idx_guard"),
+        "unexpected partial-index use: {explain}"
+    );
+
+    let result = process_query("SELECT id FROM pidx_guard WHERE val = 10 ORDER BY id").unwrap();
+    assert!(result.contains("1"), "got: {result}");
+    assert!(result.contains("2"), "got: {result}");
+}
+
+#[test]
+fn test_partial_index_tracks_insert_and_update_membership() {
+    let _g = setup();
+    process_query("CREATE TABLE pidx_membership (id INTEGER, active INTEGER, val INTEGER)")
+        .unwrap();
+    process_query("CREATE INDEX idx_membership ON pidx_membership(val) WHERE active = 1").unwrap();
+
+    process_query("INSERT INTO pidx_membership VALUES (1, 1, 30)").unwrap();
+    process_query("INSERT INTO pidx_membership VALUES (2, 0, 30)").unwrap();
+
+    let active_only =
+        process_query("SELECT id FROM pidx_membership WHERE val = 30 AND active = 1 ORDER BY id")
+            .unwrap();
+    assert!(active_only.contains("1"), "got: {active_only}");
+    assert!(!active_only.contains("2"), "got: {active_only}");
+
+    process_query("UPDATE pidx_membership SET active = 1 WHERE id = 2").unwrap();
+    let promoted =
+        process_query("SELECT id FROM pidx_membership WHERE val = 30 AND active = 1 ORDER BY id")
+            .unwrap();
+    assert!(promoted.contains("1"), "got: {promoted}");
+    assert!(promoted.contains("2"), "got: {promoted}");
+
+    process_query("UPDATE pidx_membership SET active = 0 WHERE id = 1").unwrap();
+    let demoted =
+        process_query("SELECT id FROM pidx_membership WHERE val = 30 AND active = 1 ORDER BY id")
+            .unwrap();
+    assert!(!demoted.contains("1"), "got: {demoted}");
+    assert!(demoted.contains("2"), "got: {demoted}");
+}
+
+#[test]
 fn test_scalar_pi() {
     let _g = setup();
     let result = process_query("SELECT PI() AS val").unwrap();

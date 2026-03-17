@@ -144,39 +144,16 @@ impl<'a> PlanExecutor<'a> {
             .get(table_name)
             .ok_or_else(|| format!("Table '{}' does not exist", table_name))?;
 
-        let index = self
-            .db
-            .indexes
-            .get(index_name)
-            .ok_or_else(|| format!("Index '{}' does not exist", index_name))?;
-
-        let _col_idx = table
-            .columns
-            .iter()
-            .position(|c| c.name == index.column)
-            .ok_or_else(|| format!("Column '{}' not found in table", index.column))?;
-
-        let filter_value = if let Some(filter_expr) = filter {
-            self.extract_filter_value(filter_expr, &index.column)
+        let row_indices = if let Some(filter_expr) = filter
+            && let Some(index_usage) =
+                crate::executor::ddl::find_index_usage(self.db, table_name, filter_expr)
+            && index_usage.index_name() == index_name
+        {
+            crate::executor::ddl::get_indexed_rows(self.db, table, &index_usage)?
         } else {
-            None
+            collect_index_rows(self.db, index_name)
+                .ok_or_else(|| format!("Index '{}' does not exist", index_name))?
         };
-
-        let mut row_indices = HashSet::new();
-
-        if let Some(value) = filter_value {
-            if let Some(indices) = index.entries.get(&value) {
-                for &idx in indices {
-                    row_indices.insert(idx);
-                }
-            }
-        } else {
-            for indices in index.entries.values() {
-                for &idx in indices {
-                    row_indices.insert(idx);
-                }
-            }
-        }
 
         let mut rows = Vec::new();
         for &row_idx in &row_indices {
@@ -865,21 +842,6 @@ impl<'a> PlanExecutor<'a> {
             (Value::Text(v), Value::Text(l), Value::Text(u)) => v >= l && v <= u,
             _ => false,
         }
-    }
-
-    fn extract_filter_value(&self, expr: &Expression, column: &str) -> Option<Value> {
-        if let Expression::BinaryOp {
-            left,
-            op: BinaryOperator::Equal,
-            right,
-        } = expr
-            && let Expression::Column(col) = left.as_ref()
-            && (col.ends_with(column) || col == column)
-            && let Expression::Value(v) = right.as_ref()
-        {
-            return Some(v.clone());
-        }
-        None
     }
 
     fn evaluate_join_condition(
@@ -1714,6 +1676,26 @@ impl<'a> PlanExecutor<'a> {
             rows: unique_rows,
         })
     }
+}
+
+fn collect_index_rows(db: &Database, index_name: &str) -> Option<HashSet<usize>> {
+    if let Some(index) = db.indexes.get(index_name) {
+        let mut rows = HashSet::new();
+        for indices in index.entries.values() {
+            rows.extend(indices.iter().copied());
+        }
+        return Some(rows);
+    }
+
+    if let Some(index) = db.composite_indexes.get(index_name) {
+        let mut rows = HashSet::new();
+        for indices in index.entries.values() {
+            rows.extend(indices.iter().copied());
+        }
+        return Some(rows);
+    }
+
+    None
 }
 
 impl ExecutionResult {

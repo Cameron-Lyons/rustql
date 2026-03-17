@@ -1,8 +1,8 @@
 use crate::ast::{ColumnDefinition, TableConstraint, Value};
-use crate::database::{Database, Index, Table};
+use crate::database::{CompositeIndex, Database, Index, Table};
+use crate::engine::{ExecutionContext, WalGuard};
 use crate::error::RustqlError;
 use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
 
 #[derive(Debug, Clone)]
 pub enum WalEntry {
@@ -27,13 +27,17 @@ pub enum WalEntry {
         name: String,
         columns: Vec<ColumnDefinition>,
         rows: Vec<Vec<Value>>,
+        constraints: Vec<TableConstraint>,
+        indexes: Vec<Index>,
+        composite_indexes: Vec<CompositeIndex>,
     },
     CreateIndex {
         name: String,
     },
     DropIndex {
         name: String,
-        index: Index,
+        index: Option<Index>,
+        composite_index: Box<Option<CompositeIndex>>,
     },
     AlterAddColumn {
         table: String,
@@ -156,21 +160,40 @@ impl WalLog {
                     name,
                     columns,
                     rows,
+                    constraints,
+                    indexes,
+                    composite_indexes,
                 } => {
                     db.tables.insert(
                         name,
                         Table {
                             columns,
                             rows,
-                            constraints: vec![],
+                            constraints,
                         },
                     );
+                    for index in indexes {
+                        db.indexes.insert(index.name.clone(), index);
+                    }
+                    for index in composite_indexes {
+                        db.composite_indexes.insert(index.name.clone(), index);
+                    }
                 }
                 WalEntry::CreateIndex { name } => {
                     db.indexes.remove(&name);
+                    db.composite_indexes.remove(&name);
                 }
-                WalEntry::DropIndex { name, index } => {
-                    db.indexes.insert(name, index);
+                WalEntry::DropIndex {
+                    name,
+                    index,
+                    composite_index,
+                } => {
+                    if let Some(index) = index {
+                        db.indexes.insert(name.clone(), index);
+                    }
+                    if let Some(index) = *composite_index {
+                        db.composite_indexes.insert(name, index);
+                    }
                 }
                 WalEntry::AlterAddColumn {
                     table,
@@ -294,21 +317,40 @@ fn rollback_single_entry(entry: WalEntry, db: &mut Database) {
             name,
             columns,
             rows,
+            constraints,
+            indexes,
+            composite_indexes,
         } => {
             db.tables.insert(
                 name,
                 Table {
                     columns,
                     rows,
-                    constraints: vec![],
+                    constraints,
                 },
             );
+            for index in indexes {
+                db.indexes.insert(index.name.clone(), index);
+            }
+            for index in composite_indexes {
+                db.composite_indexes.insert(index.name.clone(), index);
+            }
         }
         WalEntry::CreateIndex { name } => {
             db.indexes.remove(&name);
+            db.composite_indexes.remove(&name);
         }
-        WalEntry::DropIndex { name, index } => {
-            db.indexes.insert(name, index);
+        WalEntry::DropIndex {
+            name,
+            index,
+            composite_index,
+        } => {
+            if let Some(index) = index {
+                db.indexes.insert(name.clone(), index);
+            }
+            if let Some(index) = *composite_index {
+                db.composite_indexes.insert(name, index);
+            }
         }
         WalEntry::AlterAddColumn {
             table,
@@ -390,27 +432,63 @@ fn rollback_single_entry(entry: WalEntry, db: &mut Database) {
 }
 
 fn rebuild_all_indexes(db: &mut Database) {
+    let db_snapshot = db.clone();
     for index in db.indexes.values_mut() {
         index.entries.clear();
         if let Some(table) = db.tables.get(&index.table)
             && let Some(col_idx) = table.columns.iter().position(|c| c.name == index.column)
         {
             for (row_idx, row) in table.rows.iter().enumerate() {
+                if !crate::executor::ddl::row_matches_index_filter(
+                    &db_snapshot,
+                    table,
+                    index.filter_expr.as_ref(),
+                    row,
+                ) {
+                    continue;
+                }
                 let value = row.get(col_idx).cloned().unwrap_or(Value::Null);
                 index.entries.entry(value).or_default().push(row_idx);
             }
         }
     }
+
+    for index in db.composite_indexes.values_mut() {
+        index.entries.clear();
+        if let Some(table) = db.tables.get(&index.table) {
+            let column_positions: Option<Vec<usize>> = index
+                .columns
+                .iter()
+                .map(|column| table.columns.iter().position(|c| c.name == *column))
+                .collect();
+
+            if let Some(column_positions) = column_positions {
+                for (row_idx, row) in table.rows.iter().enumerate() {
+                    if !crate::executor::ddl::row_matches_index_filter(
+                        &db_snapshot,
+                        table,
+                        index.filter_expr.as_ref(),
+                        row,
+                    ) {
+                        continue;
+                    }
+                    let key = column_positions
+                        .iter()
+                        .map(|&col_idx| row.get(col_idx).cloned().unwrap_or(Value::Null))
+                        .collect();
+                    index.entries.entry(key).or_default().push(row_idx);
+                }
+            }
+        }
+    }
 }
 
-static TRANSACTION_WAL: OnceLock<Mutex<Option<WalLog>>> = OnceLock::new();
-
-fn get_wal_lock() -> &'static Mutex<Option<WalLog>> {
-    TRANSACTION_WAL.get_or_init(|| Mutex::new(None))
+fn get_wal_lock(ctx: &ExecutionContext) -> WalGuard {
+    ctx.lock_wal()
 }
 
-pub fn begin_transaction() -> Result<(), RustqlError> {
-    let mut wal = get_wal_lock().lock().unwrap();
+pub(crate) fn begin_transaction(ctx: &ExecutionContext) -> Result<(), RustqlError> {
+    let mut wal = get_wal_lock(ctx);
     if wal.is_some() {
         return Err(RustqlError::TransactionError(
             "Transaction already in progress".to_string(),
@@ -420,8 +498,8 @@ pub fn begin_transaction() -> Result<(), RustqlError> {
     Ok(())
 }
 
-pub fn commit_transaction() -> Result<(), RustqlError> {
-    let mut wal = get_wal_lock().lock().unwrap();
+pub(crate) fn commit_transaction(ctx: &ExecutionContext) -> Result<(), RustqlError> {
+    let mut wal = get_wal_lock(ctx);
     if wal.is_none() {
         return Err(RustqlError::TransactionError(
             "No transaction in progress".to_string(),
@@ -431,8 +509,11 @@ pub fn commit_transaction() -> Result<(), RustqlError> {
     Ok(())
 }
 
-pub fn rollback_transaction(db: &mut Database) -> Result<(), RustqlError> {
-    let mut wal_guard = get_wal_lock().lock().unwrap();
+pub(crate) fn rollback_transaction(
+    ctx: &ExecutionContext,
+    db: &mut Database,
+) -> Result<(), RustqlError> {
+    let mut wal_guard = get_wal_lock(ctx);
     match wal_guard.take() {
         Some(wal_log) => wal_log.rollback(db),
         None => Err(RustqlError::TransactionError(
@@ -441,24 +522,19 @@ pub fn rollback_transaction(db: &mut Database) -> Result<(), RustqlError> {
     }
 }
 
-pub fn is_in_transaction() -> bool {
-    get_wal_lock().lock().unwrap().is_some()
+pub(crate) fn is_in_transaction(ctx: &ExecutionContext) -> bool {
+    get_wal_lock(ctx).is_some()
 }
 
-pub fn record_wal_entry(entry: WalEntry) {
-    let mut wal = get_wal_lock().lock().unwrap();
+pub(crate) fn record_wal_entry(ctx: &ExecutionContext, entry: WalEntry) {
+    let mut wal = get_wal_lock(ctx);
     if let Some(ref mut log) = *wal {
         log.record(entry);
     }
 }
 
-pub fn reset_wal_state() {
-    let mut wal = get_wal_lock().lock().unwrap();
-    *wal = None;
-}
-
-pub fn savepoint(name: &str) -> Result<(), RustqlError> {
-    let mut wal = get_wal_lock().lock().unwrap();
+pub(crate) fn savepoint(ctx: &ExecutionContext, name: &str) -> Result<(), RustqlError> {
+    let mut wal = get_wal_lock(ctx);
     if wal.is_none() {
         *wal = Some(WalLog::new());
     }
@@ -468,8 +544,8 @@ pub fn savepoint(name: &str) -> Result<(), RustqlError> {
     Ok(())
 }
 
-pub fn release_savepoint(name: &str) -> Result<(), RustqlError> {
-    let mut wal = get_wal_lock().lock().unwrap();
+pub(crate) fn release_savepoint(ctx: &ExecutionContext, name: &str) -> Result<(), RustqlError> {
+    let mut wal = get_wal_lock(ctx);
     match wal.as_mut() {
         Some(log) => log.release_savepoint(name),
         None => Err(RustqlError::TransactionError(
@@ -478,8 +554,12 @@ pub fn release_savepoint(name: &str) -> Result<(), RustqlError> {
     }
 }
 
-pub fn rollback_to_savepoint(name: &str, db: &mut Database) -> Result<(), RustqlError> {
-    let mut wal = get_wal_lock().lock().unwrap();
+pub(crate) fn rollback_to_savepoint(
+    ctx: &ExecutionContext,
+    name: &str,
+    db: &mut Database,
+) -> Result<(), RustqlError> {
+    let mut wal = get_wal_lock(ctx);
     match wal.as_mut() {
         Some(log) => log.rollback_to_savepoint(name, db),
         None => Err(RustqlError::TransactionError(
