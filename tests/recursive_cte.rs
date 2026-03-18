@@ -84,3 +84,19 @@ fn test_recursive_cte_with_limit() {
     let lines: Vec<&str> = result.lines().filter(|l| !l.starts_with('-')).collect();
     assert!(lines.len() <= 7);
 }
+
+#[test]
+fn test_recursive_cte_iteration_limit_errors() {
+    setup();
+    let err = process_query(
+        "WITH RECURSIVE nums AS (
+            SELECT 1 AS n
+            UNION ALL
+            SELECT n + 1 FROM nums
+        )
+        SELECT n FROM nums",
+    )
+    .unwrap_err();
+
+    assert!(err.contains("iteration limit"), "unexpected error: {}", err);
+}

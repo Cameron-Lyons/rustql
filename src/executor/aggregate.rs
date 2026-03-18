@@ -9,6 +9,8 @@ use super::expr::{
     apply_arithmetic, compare_values_for_sort, evaluate_value_expression, format_value,
 };
 
+pub(crate) const DEFAULT_PERCENTILE_FRACTION: f64 = 0.5;
+
 fn remember_distinct(seen: &mut BTreeSet<Value>, val: &Value) -> bool {
     seen.insert(val.clone())
 }
@@ -465,7 +467,7 @@ fn compute_aggregate_inner(
             Ok(best.map(|(val, _, _)| val).unwrap_or(Value::Null))
         }
         AggregateFunctionType::PercentileCont => {
-            let frac = percentile.unwrap_or(0.5);
+            let frac = percentile.unwrap_or(DEFAULT_PERCENTILE_FRACTION);
             let mut values: Vec<f64> = Vec::new();
             let mut seen_vals: BTreeSet<Value> = BTreeSet::new();
             for row in rows {
@@ -507,7 +509,7 @@ fn compute_aggregate_inner(
             }
         }
         AggregateFunctionType::PercentileDisc => {
-            let frac = percentile.unwrap_or(0.5);
+            let frac = percentile.unwrap_or(DEFAULT_PERCENTILE_FRACTION);
             let mut values: Vec<Value> = Vec::new();
             let mut seen_vals: BTreeSet<Value> = BTreeSet::new();
             for row in rows {
@@ -1257,7 +1259,7 @@ fn compute_windowed_aggregate(
                 return Value::Null;
             }
             nums.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
-            let frac = 0.5;
+            let frac = DEFAULT_PERCENTILE_FRACTION;
             let n = nums.len();
             if n == 1 {
                 return Value::Float(nums[0]);
@@ -1281,7 +1283,7 @@ fn compute_windowed_aggregate(
                 return Value::Null;
             }
             sorted_vals.sort();
-            let frac = 0.5;
+            let frac = DEFAULT_PERCENTILE_FRACTION;
             let idx = ((frac * sorted_vals.len() as f64).ceil() as usize).saturating_sub(1);
             let idx = idx.min(sorted_vals.len() - 1);
             sorted_vals[idx].clone()

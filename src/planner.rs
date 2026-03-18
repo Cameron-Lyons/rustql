@@ -8,6 +8,35 @@ use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt;
 
+const DEFAULT_GENERATE_SERIES_ROWS: usize = 100;
+const DEFAULT_LATERAL_ROWS: usize = 10;
+const FUNCTION_SCAN_ROW_COST: f64 = 0.2;
+const FILTER_ROW_COST: f64 = 0.1;
+const LIMIT_ROW_COST: f64 = 0.01;
+const DISTINCT_ON_ROW_COST: f64 = 0.05;
+const DISTINCT_ON_ROW_REDUCTION_DIVISOR: usize = 2;
+const AGGREGATE_GROUP_OUTPUT_SELECTIVITY: f64 = 0.1;
+const AGGREGATE_PER_STATE_COST: f64 = 0.1;
+const INDEX_SCAN_SEEK_COST_MULTIPLIER: f64 = 2.0;
+const INDEX_SCAN_ROW_COST: f64 = 0.5;
+const HASH_JOIN_BUILD_ROW_COST: f64 = 1.5;
+const HASH_JOIN_PROBE_ROW_COST: f64 = 0.5;
+const SORT_COMPLEXITY_COST: f64 = 0.5;
+const LATERAL_ROW_COST: f64 = 0.5;
+const LATERAL_FIXED_COST: f64 = 0.5;
+const SELECTIVITY_EQUAL: f64 = 0.1;
+const SELECTIVITY_NOT_EQUAL: f64 = 0.9;
+const SELECTIVITY_ORDERED_COMPARISON: f64 = 0.5;
+const SELECTIVITY_AND: f64 = 0.3;
+const SELECTIVITY_OR: f64 = 0.7;
+const SELECTIVITY_LIKE: f64 = 0.2;
+const SELECTIVITY_BETWEEN: f64 = 0.3;
+const SELECTIVITY_IS_NULL: f64 = 0.1;
+const SELECTIVITY_DEFAULT: f64 = 0.5;
+const SELECTIVITY_EQUAL_JOIN: f64 = 0.1;
+const SELECTIVITY_NON_EQUAL_JOIN: f64 = 0.01;
+const INDEX_RANGE_SELECTIVITY: f64 = 0.1;
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum PlanNode {
     SeqScan {
@@ -285,13 +314,15 @@ impl<'a> QueryPlanner<'a> {
     ) -> Result<PlanNode, RustqlError> {
         match function.name.as_str() {
             "generate_series" => {
-                let input_rows = self.estimate_generate_series_rows(function).unwrap_or(100);
+                let input_rows = self
+                    .estimate_generate_series_rows(function)
+                    .unwrap_or(DEFAULT_GENERATE_SERIES_ROWS);
                 let rows = if let Some(condition) = where_clause {
                     (input_rows as f64 * self.estimate_selectivity(condition, input_rows)) as usize
                 } else {
                     input_rows
                 };
-                let cost = input_rows as f64 * 0.2;
+                let cost = input_rows as f64 * FUNCTION_SCAN_ROW_COST;
 
                 Ok(PlanNode::FunctionScan {
                     function: function.clone(),
@@ -569,8 +600,8 @@ impl<'a> QueryPlanner<'a> {
         } else {
             joined_rows
         };
-        let cost =
-            self.estimate_cost(&left) + left_rows as f64 * (per_left_rows as f64 * 0.5 + 0.5);
+        let cost = self.estimate_cost(&left)
+            + left_rows as f64 * (per_left_rows as f64 * LATERAL_ROW_COST + LATERAL_FIXED_COST);
 
         PlanNode::LateralJoin {
             left: Box::new(left),
@@ -589,7 +620,7 @@ impl<'a> QueryPlanner<'a> {
         let input_cost = self.estimate_cost(&input);
         let selectivity = self.estimate_selectivity(&condition, input_rows);
         let filtered_rows = (input_rows as f64 * selectivity) as usize;
-        let cost = input_rows as f64 * 0.1; // Filter is relatively cheap
+        let cost = input_rows as f64 * FILTER_ROW_COST;
 
         PlanNode::Filter {
             input: Box::new(input),
@@ -627,7 +658,7 @@ impl<'a> QueryPlanner<'a> {
         } else {
             offset.saturating_add(limit).min(input_rows)
         };
-        let cost = self.estimate_cost(&input) + visited_rows as f64 * 0.01;
+        let cost = self.estimate_cost(&input) + visited_rows as f64 * LIMIT_ROW_COST;
 
         PlanNode::Limit {
             input: Box::new(input),
@@ -645,9 +676,9 @@ impl<'a> QueryPlanner<'a> {
         let output_rows = if input_rows == 0 {
             0
         } else {
-            (input_rows / 2).max(1)
+            (input_rows / DISTINCT_ON_ROW_REDUCTION_DIVISOR).max(1)
         };
-        let cost = self.estimate_cost(&input) + input_rows as f64 * 0.05;
+        let cost = self.estimate_cost(&input) + input_rows as f64 * DISTINCT_ON_ROW_COST;
 
         PlanNode::DistinctOn {
             input: Box::new(input),
@@ -672,7 +703,9 @@ impl<'a> QueryPlanner<'a> {
             .as_ref()
             .map(|sets| sets.len().max(1))
             .unwrap_or(1);
-        let output_rows = ((input_rows as f64 * 0.1).max(1.0) as usize) * grouping_multiplier;
+        let output_rows = ((input_rows as f64 * AGGREGATE_GROUP_OUTPUT_SELECTIVITY).max(1.0)
+            as usize)
+            * grouping_multiplier;
         let cost = self.estimate_aggregate_cost(input_rows, group_by.len(), aggregates.len());
 
         PlanNode::Aggregate {
@@ -719,11 +752,12 @@ impl<'a> QueryPlanner<'a> {
     }
 
     fn estimate_seq_scan_cost(&self, row_count: usize) -> f64 {
-        row_count as f64 * 1.0
+        row_count as f64
     }
 
     fn estimate_index_scan_cost(&self, total_rows: usize, selected_rows: usize) -> f64 {
-        (total_rows as f64).ln() * 2.0 + selected_rows as f64 * 0.5
+        (total_rows as f64).ln() * INDEX_SCAN_SEEK_COST_MULTIPLIER
+            + selected_rows as f64 * INDEX_SCAN_ROW_COST
     }
 
     fn estimate_hash_join_cost(&self, left: &PlanNode, right: &PlanNode) -> f64 {
@@ -732,8 +766,8 @@ impl<'a> QueryPlanner<'a> {
         let left_cost = self.estimate_cost(left);
         let right_cost = self.estimate_cost(right);
 
-        let build_cost = left_rows.min(right_rows) as f64 * 1.5;
-        let probe_cost = left_rows.max(right_rows) as f64 * 0.5;
+        let build_cost = left_rows.min(right_rows) as f64 * HASH_JOIN_BUILD_ROW_COST;
+        let probe_cost = left_rows.max(right_rows) as f64 * HASH_JOIN_PROBE_ROW_COST;
 
         left_cost + right_cost + build_cost + probe_cost
     }
@@ -748,7 +782,7 @@ impl<'a> QueryPlanner<'a> {
     }
 
     fn estimate_sort_cost(&self, row_count: usize) -> f64 {
-        row_count as f64 * (row_count as f64).ln() * 0.5
+        row_count as f64 * (row_count as f64).ln() * SORT_COMPLEXITY_COST
     }
 
     fn estimate_generate_series_rows(&self, function: &TableFunction) -> Option<usize> {
@@ -800,29 +834,31 @@ impl<'a> QueryPlanner<'a> {
         group_by_cols: usize,
         agg_count: usize,
     ) -> f64 {
-        input_rows as f64 * (1.0 + (group_by_cols + agg_count) as f64 * 0.1)
+        input_rows as f64 * (1.0 + (group_by_cols + agg_count) as f64 * AGGREGATE_PER_STATE_COST)
     }
 
     fn estimate_selectivity(&self, condition: &Expression, total_rows: usize) -> f64 {
         match condition {
-            Expression::BinaryOp { op, .. } => {
-                match op {
-                    BinaryOperator::Equal => 0.1, // Assume 10% selectivity for equality
-                    BinaryOperator::NotEqual => 0.9,
-                    BinaryOperator::LessThan | BinaryOperator::LessThanOrEqual => 0.5,
-                    BinaryOperator::GreaterThan | BinaryOperator::GreaterThanOrEqual => 0.5,
-                    BinaryOperator::And => 0.3, // AND reduces selectivity
-                    BinaryOperator::Or => 0.7,  // OR increases selectivity
-                    BinaryOperator::Like | BinaryOperator::ILike => 0.2,
-                    BinaryOperator::Between => 0.3,
-                    _ => 0.5,
+            Expression::BinaryOp { op, .. } => match op {
+                BinaryOperator::Equal => SELECTIVITY_EQUAL,
+                BinaryOperator::NotEqual => SELECTIVITY_NOT_EQUAL,
+                BinaryOperator::LessThan | BinaryOperator::LessThanOrEqual => {
+                    SELECTIVITY_ORDERED_COMPARISON
                 }
-            }
+                BinaryOperator::GreaterThan | BinaryOperator::GreaterThanOrEqual => {
+                    SELECTIVITY_ORDERED_COMPARISON
+                }
+                BinaryOperator::And => SELECTIVITY_AND,
+                BinaryOperator::Or => SELECTIVITY_OR,
+                BinaryOperator::Like | BinaryOperator::ILike => SELECTIVITY_LIKE,
+                BinaryOperator::Between => SELECTIVITY_BETWEEN,
+                _ => SELECTIVITY_DEFAULT,
+            },
             Expression::In { values, .. } => {
                 (values.len() as f64 / total_rows.max(1) as f64).min(1.0)
             }
-            Expression::IsNull { .. } => 0.1,
-            _ => 0.5,
+            Expression::IsNull { .. } => SELECTIVITY_IS_NULL,
+            _ => SELECTIVITY_DEFAULT,
         }
     }
 
@@ -833,9 +869,9 @@ impl<'a> QueryPlanner<'a> {
         condition: &Expression,
     ) -> usize {
         if self.is_equality_join(condition) {
-            ((left_rows * right_rows) as f64 * 0.1) as usize
+            ((left_rows * right_rows) as f64 * SELECTIVITY_EQUAL_JOIN) as usize
         } else {
-            ((left_rows * right_rows) as f64 * 0.01) as usize
+            ((left_rows * right_rows) as f64 * SELECTIVITY_NON_EQUAL_JOIN) as usize
         }
     }
 
@@ -862,7 +898,9 @@ impl<'a> QueryPlanner<'a> {
                 .unwrap_or(0),
             IndexUsage::RangeGreater { .. }
             | IndexUsage::RangeLess { .. }
-            | IndexUsage::RangeBetween { .. } => (stats.row_count as f64 * 0.1) as usize,
+            | IndexUsage::RangeBetween { .. } => {
+                (stats.row_count as f64 * INDEX_RANGE_SELECTIVITY) as usize
+            }
             IndexUsage::CompositePrefix { index_name, values } => db
                 .get_composite_index(index_name)
                 .map(|index| {
@@ -1131,7 +1169,7 @@ impl<'a> QueryPlanner<'a> {
             .as_ref()
             .map(|fetch| fetch.count.max(1))
             .or(stmt.limit.map(|limit| limit.max(1)))
-            .unwrap_or(10)
+            .unwrap_or(DEFAULT_LATERAL_ROWS)
     }
 
     fn infer_select_output_columns(

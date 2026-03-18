@@ -18,6 +18,8 @@ use super::expr::{
 use super::join::perform_multiple_joins;
 use super::{ExecutionContext, SelectResult, get_database_read, get_database_write, rows_result};
 
+const MAX_RECURSIVE_CTE_ITERATIONS: usize = 1000;
+
 pub fn execute_select(
     context: &ExecutionContext,
     mut stmt: SelectStatement,
@@ -568,6 +570,12 @@ fn execute_generate_series_result(
     Ok(SelectResult { headers, rows })
 }
 
+fn generate_series_function(stmt: &SelectStatement) -> Option<&TableFunction> {
+    stmt.from_function
+        .as_ref()
+        .filter(|tf| tf.name == "generate_series")
+}
+
 #[derive(Default)]
 struct TempTableScope {
     originals: HashMap<String, Option<Table>>,
@@ -648,12 +656,6 @@ fn execute_select_in_db(
             headers: execution.columns,
             rows: execution.rows,
         });
-    }
-
-    if let Some(ref tf) = stmt.from_function
-        && tf.name == "generate_series"
-    {
-        return execute_generate_series_result(stmt.clone(), tf);
     }
 
     let mut temp_scope = TempTableScope::default();
@@ -824,9 +826,10 @@ fn materialize_recursive_cte_for_scope(
             Some(set)
         };
 
-        const MAX_ITERATIONS: usize = 1000;
-        for _ in 0..MAX_ITERATIONS {
+        let mut converged = false;
+        for _ in 0..MAX_RECURSIVE_CTE_ITERATIONS {
             if working_rows.is_empty() {
+                converged = true;
                 break;
             }
 
@@ -850,11 +853,19 @@ fn materialize_recursive_cte_for_scope(
             }
 
             if new_rows.is_empty() {
+                converged = true;
                 break;
             }
 
             all_rows.extend(new_rows.clone());
             working_rows = new_rows;
+        }
+
+        if !converged {
+            return Err(RustqlError::Internal(format!(
+                "Recursive CTE '{}' exceeded the iteration limit of {}",
+                cte.name, MAX_RECURSIVE_CTE_ITERATIONS
+            )));
         }
 
         temp_scope.insert_or_replace(db, cte.name.clone(), Table::new(columns, all_rows, vec![]));
@@ -989,9 +1000,7 @@ pub(crate) fn execute_select_internal(
         );
     }
 
-    if let Some(ref tf) = stmt.from_function
-        && tf.name == "generate_series"
-    {
+    if let Some(tf) = generate_series_function(&stmt) {
         return execute_generate_series_result(stmt.clone(), tf);
     }
 

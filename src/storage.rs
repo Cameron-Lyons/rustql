@@ -746,7 +746,7 @@ impl BTreeFile {
         Ok(BTreeFile { file })
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     fn write_data_to_pointer(&mut self, data: &str) -> Result<u64, RustqlError> {
         let page_id = self.get_next_page_id()?;
         let mut data_page = BTreePage::new(page_id, PageKind::Leaf);
@@ -1314,7 +1314,7 @@ impl BTreeFile {
         Ok(next_id)
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub fn search(
         &mut self,
         key: &Value,
@@ -1397,7 +1397,7 @@ impl BTreeFile {
         }
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub fn insert(
         &mut self,
         key: Value,
@@ -1524,7 +1524,7 @@ impl BTreeFile {
         }
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub fn delete(&mut self, key: &Value, root_page_id: u64) -> Result<bool, RustqlError> {
         match self.search(key, root_page_id)? {
             Some((page_id, entry_idx)) => {
@@ -1538,7 +1538,7 @@ impl BTreeFile {
         }
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub fn range_scan(
         &mut self,
         start_key: Option<&Value>,

@@ -1,6 +1,7 @@
 use crate::ast::*;
 use crate::database::{DatabaseCatalog, RowId, ScopedDatabase};
 use crate::error::RustqlError;
+use crate::executor::aggregate::DEFAULT_PERCENTILE_FRACTION;
 use crate::executor::expr::{
     apply_arithmetic, compare_values, compare_values_same_type, evaluate_expression,
     evaluate_value_expression_with_db,
@@ -1239,7 +1240,7 @@ impl<'a> PlanExecutor<'a> {
                 Ok(mode)
             }
             AggregateFunctionType::PercentileCont => {
-                let frac = agg.percentile.unwrap_or(0.5);
+                let frac = agg.percentile.unwrap_or(DEFAULT_PERCENTILE_FRACTION);
                 let mut values =
                     numeric_values(&input.values, "PERCENTILE_CONT requires numeric values")?;
                 if values.is_empty() {
@@ -1261,7 +1262,7 @@ impl<'a> PlanExecutor<'a> {
                 }
             }
             AggregateFunctionType::PercentileDisc => {
-                let frac = agg.percentile.unwrap_or(0.5);
+                let frac = agg.percentile.unwrap_or(DEFAULT_PERCENTILE_FRACTION);
                 let mut values = input.values.clone();
                 if values.is_empty() {
                     return Ok(Value::Null);
