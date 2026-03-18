@@ -161,6 +161,15 @@ fn read_versioned_header(
     expected_version: u32,
     label: &str,
 ) -> Result<VersionedFileState, RustqlError> {
+    read_versioned_header_with_versions(path, expected_magic, &[expected_version], label)
+}
+
+fn read_versioned_header_with_versions(
+    path: &Path,
+    expected_magic: [u8; 8],
+    supported_versions: &[u32],
+    label: &str,
+) -> Result<VersionedFileState, RustqlError> {
     if !path.exists() {
         return Ok(VersionedFileState::Missing);
     }
@@ -197,7 +206,7 @@ fn read_versioned_header(
     }
 
     let version = u32::from_le_bytes([header[8], header[9], header[10], header[11]]);
-    if version != expected_version {
+    if !supported_versions.contains(&version) {
         return Err(RustqlError::StorageError(format!(
             "Unsupported {} format version: {}",
             label, version
@@ -523,10 +532,10 @@ impl<'a> CachedBTreeFile<'a> {
     }
 
     fn read_database_via_pages(&mut self) -> Result<Database, RustqlError> {
-        match read_versioned_header(
+        match read_versioned_header_with_versions(
             &self.engine.data_path,
             BTreeFile::MAGIC,
-            BTreeFile::VERSION,
+            &[2, BTreeFile::VERSION],
             "BTree storage file",
         )? {
             VersionedFileState::Missing | VersionedFileState::Empty => return Ok(Database::new()),
@@ -565,24 +574,24 @@ impl<'a> CachedBTreeFile<'a> {
         let mut db = Database::new();
         let mut pending_rows: HashMap<String, Vec<(RowId, Vec<Value>)>> = HashMap::new();
 
-        for (key, pointer) in self.range_scan(None, None, root_page_id)? {
-            let Value::Text(key_str) = key else {
+        for entry in self.range_scan_entries(None, None, root_page_id)? {
+            let Value::Text(key_str) = &entry.key else {
                 continue;
             };
 
             if let Some(table_name) = key_str.strip_prefix("schema:") {
-                let schema: TableStorageRecord = self
-                    .read_data_from_pointer(pointer, format!("schema for table {}", table_name))?;
+                let schema: TableStorageRecord =
+                    self.read_data_from_entry(&entry, format!("schema for table {}", table_name))?;
 
                 db.tables.insert(
                     table_name.to_string(),
-                    crate::database::Table {
-                        columns: schema.columns,
-                        rows: Vec::new(),
-                        row_ids: Vec::new(),
-                        next_row_id: schema.next_row_id,
-                        constraints: schema.constraints,
-                    },
+                    crate::database::Table::with_rows_and_ids(
+                        schema.columns,
+                        Vec::new(),
+                        Vec::new(),
+                        schema.next_row_id,
+                        schema.constraints,
+                    ),
                 );
                 if let Some(mut rows) = pending_rows.remove(table_name) {
                     rows.sort_by_key(|(row_id, _)| *row_id);
@@ -597,29 +606,29 @@ impl<'a> CachedBTreeFile<'a> {
 
             if let Some(index_name) = key_str.strip_prefix("index:") {
                 let index: crate::database::Index =
-                    self.read_data_from_pointer(pointer, format!("index {}", index_name))?;
+                    self.read_data_from_entry(&entry, format!("index {}", index_name))?;
                 db.indexes.insert(index_name.to_string(), index);
                 continue;
             }
 
             if let Some(index_name) = key_str.strip_prefix("cindex:") {
-                let index: crate::database::CompositeIndex = self
-                    .read_data_from_pointer(pointer, format!("composite index {}", index_name))?;
+                let index: crate::database::CompositeIndex =
+                    self.read_data_from_entry(&entry, format!("composite index {}", index_name))?;
                 db.composite_indexes.insert(index_name.to_string(), index);
                 continue;
             }
 
             if let Some(view_name) = key_str.strip_prefix("view:") {
                 let view: crate::database::View =
-                    self.read_data_from_pointer(pointer, format!("view {}", view_name))?;
+                    self.read_data_from_entry(&entry, format!("view {}", view_name))?;
                 db.views.insert(view_name.to_string(), view);
                 continue;
             }
 
-            if let Some((table_name, row_id, can_insert_in_order)) = parse_row_storage_key(&key_str)
+            if let Some((table_name, row_id, can_insert_in_order)) = parse_row_storage_key(key_str)
             {
-                let row: Vec<Value> = self.read_data_from_pointer(
-                    pointer,
+                let row: Vec<Value> = self.read_data_from_entry(
+                    &entry,
                     format!("row {} for table {}", row_id.0, table_name),
                 )?;
                 if can_insert_in_order && let Some(table_ref) = db.tables.get_mut(table_name) {
@@ -642,7 +651,25 @@ impl<'a> CachedBTreeFile<'a> {
             }
         }
 
+        db.normalize_row_ids();
         Ok(db)
+    }
+
+    fn read_data_from_entry<T>(
+        &self,
+        entry: &BTreeEntry,
+        label: impl Into<String>,
+    ) -> Result<T, RustqlError>
+    where
+        T: DeserializeOwned,
+    {
+        let label = label.into();
+        if let Some(inline_data) = entry.inline_data.as_deref() {
+            return serde_json::from_str(inline_data).map_err(|e| {
+                RustqlError::StorageError(format!("Failed to deserialize {}: {}", label, e))
+            });
+        }
+        self.read_data_from_pointer(entry.pointer, label)
     }
 
     fn read_data_from_pointer<T>(
@@ -670,13 +697,13 @@ impl<'a> CachedBTreeFile<'a> {
         )))
     }
 
-    fn range_scan(
+    fn range_scan_entries(
         &self,
         start_key: Option<&Value>,
         end_key: Option<&Value>,
         root_page_id: u64,
-    ) -> Result<Vec<(Value, u64)>, RustqlError> {
-        scan_pages_in_order(
+    ) -> Result<Vec<BTreeEntry>, RustqlError> {
+        scan_pages_in_order_entries(
             |page_id| self.read_page(page_id),
             start_key,
             end_key,
@@ -691,7 +718,7 @@ struct BTreeFile {
 
 impl BTreeFile {
     const MAGIC: [u8; 8] = *b"RSTQLBT\0";
-    const VERSION: u32 = 2;
+    const VERSION: u32 = 3;
 
     fn open(path: &Path) -> Result<Self, RustqlError> {
         let file = std::fs::OpenOptions::new()
@@ -719,6 +746,7 @@ impl BTreeFile {
         Ok(BTreeFile { file })
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     fn write_data_to_pointer(&mut self, data: &str) -> Result<u64, RustqlError> {
         let page_id = self.get_next_page_id()?;
         let mut data_page = BTreePage::new(page_id, PageKind::Leaf);
@@ -751,7 +779,8 @@ impl BTreeFile {
         self.write_page(&meta_page)?;
 
         let root_page_id = 1;
-        let root_page = BTreePage::new(root_page_id, PageKind::Leaf);
+        let mut root_page = BTreePage::new(root_page_id, PageKind::Leaf);
+        root_page.header.reserved = LEAF_INLINE_DATA_FLAG;
         self.write_page(&root_page)?;
 
         let mut current_root_id = root_page_id;
@@ -764,8 +793,10 @@ impl BTreeFile {
                 next_row_id: table.next_row_id,
             })
             .map_err(|e| format!("Failed to serialize schema for table {}: {}", table_name, e))?;
-            let data_pointer = self.write_data_to_pointer(&schema_json)?;
-            current_root_id = self.insert(schema_key, data_pointer, current_root_id)?;
+            current_root_id = self.insert_entry(
+                BTreeEntry::with_inline_data(schema_key, schema_json),
+                current_root_id,
+            )?;
         }
 
         for (table_name, table) in &db.tables {
@@ -777,8 +808,10 @@ impl BTreeFile {
                         row_id.0, table_name, e
                     )
                 })?;
-                let data_pointer = self.write_data_to_pointer(&row_json)?;
-                current_root_id = self.insert(row_key, data_pointer, current_root_id)?;
+                current_root_id = self.insert_entry(
+                    BTreeEntry::with_inline_data(row_key, row_json),
+                    current_root_id,
+                )?;
             }
         }
 
@@ -786,8 +819,10 @@ impl BTreeFile {
             let index_key = Value::Text(format!("index:{}", index_name));
             let index_json = serde_json::to_string(index)
                 .map_err(|e| format!("Failed to serialize index {}: {}", index_name, e))?;
-            let data_pointer = self.write_data_to_pointer(&index_json)?;
-            current_root_id = self.insert(index_key, data_pointer, current_root_id)?;
+            current_root_id = self.insert_entry(
+                BTreeEntry::with_inline_data(index_key, index_json),
+                current_root_id,
+            )?;
         }
 
         for (index_name, index) in &db.composite_indexes {
@@ -795,16 +830,20 @@ impl BTreeFile {
             let index_json = serde_json::to_string(index).map_err(|e| {
                 format!("Failed to serialize composite index {}: {}", index_name, e)
             })?;
-            let data_pointer = self.write_data_to_pointer(&index_json)?;
-            current_root_id = self.insert(index_key, data_pointer, current_root_id)?;
+            current_root_id = self.insert_entry(
+                BTreeEntry::with_inline_data(index_key, index_json),
+                current_root_id,
+            )?;
         }
 
         for (view_name, view) in &db.views {
             let view_key = Value::Text(format!("view:{}", view_name));
             let view_json = serde_json::to_string(view)
                 .map_err(|e| format!("Failed to serialize view {}: {}", view_name, e))?;
-            let data_pointer = self.write_data_to_pointer(&view_json)?;
-            current_root_id = self.insert(view_key, data_pointer, current_root_id)?;
+            current_root_id = self.insert_entry(
+                BTreeEntry::with_inline_data(view_key, view_json),
+                current_root_id,
+            )?;
         }
 
         let mut meta_page = self.read_page(0)?;
@@ -870,15 +909,23 @@ impl BTreePage {
         }
     }
 
+    fn stores_inline_leaf_data(&self) -> bool {
+        self.header.kind == PageKind::Leaf && self.header.reserved & LEAF_INLINE_DATA_FLAG != 0
+    }
+
     pub fn can_accept_entry(&self, entry: &BTreeEntry) -> bool {
         let current_size = self.estimated_size();
-        let added = entry.estimated_size();
+        let added = entry.estimated_size(self.header.kind, self.header.reserved);
         current_size + added <= BTREE_PAGE_SIZE
     }
 
     fn estimated_size(&self) -> usize {
         let header_size = 16usize;
-        let entries_size: usize = self.entries.iter().map(|e| e.estimated_size()).sum();
+        let entries_size: usize = self
+            .entries
+            .iter()
+            .map(|e| e.estimated_size(self.header.kind, self.header.reserved))
+            .sum();
         header_size + entries_size
     }
 }
@@ -888,15 +935,29 @@ pub struct BTreeEntry {
     pub key: Value,
 
     pub pointer: u64,
+
+    #[serde(default)]
+    pub inline_data: Option<String>,
 }
 
 impl BTreeEntry {
     pub fn new(key: Value, pointer: u64) -> Self {
-        BTreeEntry { key, pointer }
+        BTreeEntry {
+            key,
+            pointer,
+            inline_data: None,
+        }
     }
 
-    fn estimated_size(&self) -> usize {
-        let pointer_size = 8usize;
+    pub fn with_inline_data(key: Value, inline_data: String) -> Self {
+        BTreeEntry {
+            key,
+            pointer: 0,
+            inline_data: Some(inline_data),
+        }
+    }
+
+    fn estimated_size(&self, kind: PageKind, reserved: u16) -> usize {
         let key_size = match &self.key {
             Value::Null => 1,
             Value::Integer(_) => 9,
@@ -904,7 +965,15 @@ impl BTreeEntry {
             Value::Boolean(_) => 2,
             Value::Text(s) | Value::Date(s) | Value::Time(s) | Value::DateTime(s) => 1 + s.len(),
         };
-        pointer_size + key_size
+        let value_size = if kind == PageKind::Leaf && reserved & LEAF_INLINE_DATA_FLAG != 0 {
+            4 + self
+                .inline_data
+                .as_ref()
+                .map_or(0, |inline_data| inline_data.len())
+        } else {
+            8
+        };
+        key_size + value_size
     }
 }
 
@@ -916,6 +985,7 @@ const TAG_BOOLEAN: u8 = 0x04;
 const TAG_DATE: u8 = 0x05;
 const TAG_TIME: u8 = 0x06;
 const TAG_DATETIME: u8 = 0x07;
+const LEAF_INLINE_DATA_FLAG: u16 = 0x0001;
 
 fn encode_value(buf: &mut Vec<u8>, value: &Value) {
     match value {
@@ -998,9 +1068,11 @@ fn decode_value(data: &[u8], offset: &mut usize) -> Result<Value, RustqlError> {
                     "Truncated string data in binary entry".to_string(),
                 ));
             }
-            let s = String::from_utf8(data[*offset..*offset + len].to_vec()).map_err(|e| {
-                RustqlError::StorageError(format!("Invalid UTF-8 in binary entry: {}", e))
-            })?;
+            let s = std::str::from_utf8(&data[*offset..*offset + len])
+                .map_err(|e| {
+                    RustqlError::StorageError(format!("Invalid UTF-8 in binary entry: {}", e))
+                })?
+                .to_owned();
             *offset += len;
             match tag {
                 TAG_TEXT => Ok(Value::Text(s)),
@@ -1045,7 +1117,17 @@ impl BTreePage {
         let mut payload = Vec::new();
         for entry in &self.entries {
             encode_value(&mut payload, &entry.key);
-            payload.extend_from_slice(&entry.pointer.to_le_bytes());
+            if self.stores_inline_leaf_data() {
+                let inline_data = entry.inline_data.as_ref().ok_or_else(|| {
+                    RustqlError::StorageError(
+                        "Leaf entry is missing inline data for inline leaf page".to_string(),
+                    )
+                })?;
+                payload.extend_from_slice(&(inline_data.len() as u32).to_le_bytes());
+                payload.extend_from_slice(inline_data.as_bytes());
+            } else {
+                payload.extend_from_slice(&entry.pointer.to_le_bytes());
+            }
         }
 
         let header_size = 16usize;
@@ -1117,6 +1199,31 @@ impl BTreePage {
         let mut offset = header_size;
         for _ in 0..entry_count {
             let key = decode_value(buf, &mut offset)?;
+            if kind == PageKind::Leaf && reserved & LEAF_INLINE_DATA_FLAG != 0 {
+                if offset + 4 > buf.len() {
+                    return Err(RustqlError::StorageError(
+                        "Truncated inline data length in binary entry".to_string(),
+                    ));
+                }
+                let len = u32::from_le_bytes(buf[offset..offset + 4].try_into().unwrap()) as usize;
+                offset += 4;
+                if offset + len > buf.len() {
+                    return Err(RustqlError::StorageError(
+                        "Truncated inline data in binary entry".to_string(),
+                    ));
+                }
+                let inline_data = std::str::from_utf8(&buf[offset..offset + len])
+                    .map_err(|e| {
+                        RustqlError::StorageError(format!(
+                            "Invalid UTF-8 in inline leaf payload: {}",
+                            e
+                        ))
+                    })?
+                    .to_owned();
+                offset += len;
+                entries.push(BTreeEntry::with_inline_data(key, inline_data));
+                continue;
+            }
             if offset + 8 > buf.len() {
                 return Err(RustqlError::StorageError(
                     "Truncated pointer in binary entry".to_string(),
@@ -1124,7 +1231,7 @@ impl BTreePage {
             }
             let pointer = u64::from_le_bytes(buf[offset..offset + 8].try_into().unwrap());
             offset += 8;
-            entries.push(BTreeEntry { key, pointer });
+            entries.push(BTreeEntry::new(key, pointer));
         }
 
         Ok(BTreePage { header, entries })
@@ -1290,30 +1397,37 @@ impl BTreeFile {
         }
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn insert(
         &mut self,
         key: Value,
         data_pointer: u64,
         root_page_id: u64,
     ) -> Result<u64, RustqlError> {
-        let path = self.find_path_to_leaf(&key, root_page_id)?;
+        self.insert_entry(BTreeEntry::new(key, data_pointer), root_page_id)
+    }
+
+    fn insert_entry(
+        &mut self,
+        new_entry: BTreeEntry,
+        root_page_id: u64,
+    ) -> Result<u64, RustqlError> {
+        let path = self.find_path_to_leaf(&new_entry.key, root_page_id)?;
         let leaf_page_id = *path.last().unwrap();
         let mut leaf_page = self.read_page(leaf_page_id)?;
 
         for (idx, entry) in leaf_page.entries.iter().enumerate() {
-            if entry.key == key {
-                leaf_page.entries[idx].pointer = data_pointer;
+            if entry.key == new_entry.key {
+                leaf_page.entries[idx] = new_entry;
                 self.write_page(&leaf_page)?;
                 return Ok(root_page_id);
             }
         }
 
-        let new_entry = BTreeEntry::new(key.clone(), data_pointer);
-
         if leaf_page.can_accept_entry(&new_entry) {
             let insert_pos = leaf_page
                 .entries
-                .binary_search_by(|e| e.key.cmp(&key))
+                .binary_search_by(|e| e.key.cmp(&new_entry.key))
                 .unwrap_or_else(|pos| pos);
             leaf_page.entries.insert(insert_pos, new_entry);
             leaf_page.header.entry_count = leaf_page.entries.len() as u16;
@@ -1346,6 +1460,7 @@ impl BTreeFile {
 
         let right_page_id = self.get_next_page_id()?;
         let mut right_page = BTreePage::new(right_page_id, page.header.kind);
+        right_page.header.reserved = page.header.reserved;
         right_page.entries = right_entries;
         right_page.header.entry_count = right_page.entries.len() as u16;
         self.write_page(&right_page)?;
@@ -1430,26 +1545,32 @@ impl BTreeFile {
         end_key: Option<&Value>,
         root_page_id: u64,
     ) -> Result<Vec<(Value, u64)>, RustqlError> {
-        scan_pages_in_order(
+        scan_pages_in_order_entries(
             |page_id| self.read_page(page_id),
             start_key,
             end_key,
             root_page_id,
         )
+        .map(|entries| {
+            entries
+                .into_iter()
+                .map(|entry| (entry.key, entry.pointer))
+                .collect()
+        })
     }
 }
 
-fn scan_pages_in_order<F>(
+fn scan_pages_in_order_entries<F>(
     mut read_page: F,
     start_key: Option<&Value>,
     end_key: Option<&Value>,
     root_page_id: u64,
-) -> Result<Vec<(Value, u64)>, RustqlError>
+) -> Result<Vec<BTreeEntry>, RustqlError>
 where
     F: FnMut(u64) -> Result<BTreePage, RustqlError>,
 {
     let mut entries = Vec::new();
-    scan_page_in_order_recursive(
+    scan_page_in_order_recursive_entries(
         &mut read_page,
         root_page_id,
         start_key,
@@ -1459,12 +1580,12 @@ where
     Ok(entries)
 }
 
-fn scan_page_in_order_recursive<F>(
+fn scan_page_in_order_recursive_entries<F>(
     read_page: &mut F,
     page_id: u64,
     start_key: Option<&Value>,
     end_key: Option<&Value>,
-    entries: &mut Vec<(Value, u64)>,
+    entries: &mut Vec<BTreeEntry>,
 ) -> Result<(), RustqlError>
 where
     F: FnMut(u64) -> Result<BTreePage, RustqlError>,
@@ -1480,7 +1601,7 @@ where
                 if end_key.is_some_and(|end| &entry.key > end) {
                     break;
                 }
-                entries.push((entry.key, entry.pointer));
+                entries.push(entry);
             }
             Ok(())
         }
@@ -1495,7 +1616,7 @@ where
                     continue;
                 }
 
-                scan_page_in_order_recursive(
+                scan_page_in_order_recursive_entries(
                     read_page,
                     entry.pointer,
                     start_key,
@@ -1592,18 +1713,66 @@ mod tests {
     }
 
     #[test]
+    fn btree_storage_writes_inline_leaf_payloads() {
+        let temp_path = std::env::temp_dir().join("rustql_btree_inline_payload_test.dat");
+        remove_storage_artifacts(&temp_path);
+
+        let engine = BTreeStorageEngine::new(&temp_path);
+        let mut db = Database::new();
+        db.tables.insert(
+            "users".to_string(),
+            Table::new(
+                vec![ColumnDefinition {
+                    name: "id".to_string(),
+                    data_type: DataType::Integer,
+                    nullable: false,
+                    primary_key: true,
+                    unique: false,
+                    default_value: None,
+                    foreign_key: None,
+                    check: None,
+                    auto_increment: false,
+                    generated: None,
+                }],
+                vec![vec![Value::Integer(1)]],
+                vec![],
+            ),
+        );
+
+        engine.save(&db).expect("failed to save database");
+
+        let mut file = BTreeFile::open(&temp_path).expect("failed to open BTree file");
+        let meta_page = file.read_page(0).expect("failed to read meta page");
+        let root_page_id = meta_page
+            .entries
+            .iter()
+            .find(|entry| matches!(&entry.key, Value::Text(text) if text == "root"))
+            .expect("root entry should exist")
+            .pointer;
+        let root_page = file
+            .read_page(root_page_id)
+            .expect("failed to read root page");
+
+        assert_eq!(root_page.header.kind, PageKind::Leaf);
+        assert_ne!(root_page.header.reserved & LEAF_INLINE_DATA_FLAG, 0);
+        assert!(
+            root_page
+                .entries
+                .iter()
+                .all(|entry| entry.inline_data.is_some())
+        );
+
+        remove_storage_artifacts(&temp_path);
+    }
+
+    #[test]
     fn btree_storage_loads_legacy_row_keys_in_row_id_order() {
         let temp_path = std::env::temp_dir().join("rustql_btree_legacy_rows_test.dat");
         remove_storage_artifacts(&temp_path);
 
         let mut file = BTreeFile::create(&temp_path).expect("Failed to create BTree file");
-        write_versioned_header(
-            &mut file.file,
-            BTreeFile::MAGIC,
-            BTreeFile::VERSION,
-            "BTree storage file",
-        )
-        .expect("Failed to write versioned header");
+        write_versioned_header(&mut file.file, BTreeFile::MAGIC, 2, "BTree storage file")
+            .expect("Failed to write versioned header");
 
         let mut meta_page = BTreePage::new(0, PageKind::Meta);
         meta_page

@@ -2,6 +2,7 @@ use crate::ast::*;
 use crate::database::DatabaseCatalog;
 use crate::error::RustqlError;
 use std::cmp::Ordering;
+use std::collections::HashMap;
 
 pub fn evaluate_expression(
     db: Option<&dyn DatabaseCatalog>,
@@ -1855,32 +1856,16 @@ fn execute_cast(val: Value, target_type: &DataType) -> Result<Value, RustqlError
 
 pub fn evaluate_select_order_expression(
     expr: &Expression,
-    columns: &[ColumnDefinition],
     row: &[Value],
-    column_specs: &[(String, Column)],
     projected_row: &[Value],
+    projected_lookup: &HashMap<String, usize>,
+    base_lookup: &HashMap<String, usize>,
     allow_ordinal: bool,
 ) -> Result<Value, RustqlError> {
     match expr {
         Expression::Column(name) => {
-            for (idx, (header, col_spec)) in column_specs.iter().enumerate() {
-                if header == name {
-                    return Ok(projected_row[idx].clone());
-                }
-                if let Column::Named {
-                    name: original_name,
-                    alias,
-                } = col_spec
-                    && (alias.as_ref().map(|a| a == name).unwrap_or(false)
-                        || original_name == name
-                        || original_name
-                            .split('.')
-                            .next_back()
-                            .map(|n| n == name)
-                            .unwrap_or(false))
-                {
-                    return Ok(projected_row[idx].clone());
-                }
+            if let Some(&idx) = projected_lookup.get(name) {
+                return Ok(projected_row[idx].clone());
             }
 
             let column_name = if name.contains('.') {
@@ -1889,9 +1874,9 @@ pub fn evaluate_select_order_expression(
                 name.as_str()
             };
 
-            let idx = columns
-                .iter()
-                .position(|c| c.name == column_name)
+            let idx = base_lookup
+                .get(column_name)
+                .copied()
                 .ok_or_else(|| RustqlError::ColumnNotFound(format!("{} (ORDER BY)", name)))?;
             Ok(row[idx].clone())
         }
@@ -1912,18 +1897,18 @@ pub fn evaluate_select_order_expression(
             | BinaryOperator::Divide => {
                 let left_val = evaluate_select_order_expression(
                     left,
-                    columns,
                     row,
-                    column_specs,
                     projected_row,
+                    projected_lookup,
+                    base_lookup,
                     false,
                 )?;
                 let right_val = evaluate_select_order_expression(
                     right,
-                    columns,
                     row,
-                    column_specs,
                     projected_row,
+                    projected_lookup,
+                    base_lookup,
                     false,
                 )?;
                 apply_arithmetic(&left_val, &right_val, op)

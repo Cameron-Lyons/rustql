@@ -167,13 +167,7 @@ impl WalLog {
                 } => {
                     db.tables.insert(
                         name,
-                        Table {
-                            columns,
-                            rows,
-                            row_ids,
-                            next_row_id,
-                            constraints,
-                        },
+                        Table::with_rows_and_ids(columns, rows, row_ids, next_row_id, constraints),
                     );
                     for index in indexes {
                         db.indexes.insert(index.name.clone(), index);
@@ -330,13 +324,7 @@ fn rollback_single_entry(entry: WalEntry, db: &mut Database) {
         } => {
             db.tables.insert(
                 name,
-                Table {
-                    columns,
-                    rows,
-                    row_ids,
-                    next_row_id,
-                    constraints,
-                },
+                Table::with_rows_and_ids(columns, rows, row_ids, next_row_id, constraints),
             );
             for index in indexes {
                 db.indexes.insert(index.name.clone(), index);

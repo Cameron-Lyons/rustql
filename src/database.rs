@@ -125,6 +125,8 @@ pub struct Table {
     pub next_row_id: u64,
     #[serde(default)]
     pub constraints: Vec<TableConstraint>,
+    #[serde(skip)]
+    row_id_positions: HashMap<RowId, usize>,
 }
 
 fn default_next_row_id() -> u64 {
@@ -132,20 +134,44 @@ fn default_next_row_id() -> u64 {
 }
 
 impl Table {
-    pub fn new(
+    pub fn with_rows_and_ids(
         columns: Vec<ColumnDefinition>,
         rows: Vec<Vec<Value>>,
+        row_ids: Vec<RowId>,
+        next_row_id: u64,
         constraints: Vec<TableConstraint>,
     ) -> Self {
         let mut table = Self {
             columns,
             rows,
-            row_ids: Vec::new(),
-            next_row_id: default_next_row_id(),
+            row_ids,
+            next_row_id,
             constraints,
+            row_id_positions: HashMap::new(),
         };
         table.ensure_row_ids();
         table
+    }
+
+    pub fn new(
+        columns: Vec<ColumnDefinition>,
+        rows: Vec<Vec<Value>>,
+        constraints: Vec<TableConstraint>,
+    ) -> Self {
+        Self::with_rows_and_ids(
+            columns,
+            rows,
+            Vec::new(),
+            default_next_row_id(),
+            constraints,
+        )
+    }
+
+    fn rebuild_row_id_positions(&mut self) {
+        self.row_id_positions.clear();
+        for (position, row_id) in self.row_ids.iter().copied().enumerate() {
+            self.row_id_positions.insert(row_id, position);
+        }
     }
 
     pub fn ensure_row_ids(&mut self) {
@@ -165,6 +191,7 @@ impl Table {
         if self.next_row_id == 0 {
             self.next_row_id = default_next_row_id();
         }
+        self.rebuild_row_id_positions();
     }
 
     pub fn iter_rows_with_ids(&self) -> impl Iterator<Item = (RowId, &Vec<Value>)> {
@@ -176,9 +203,11 @@ impl Table {
     }
 
     pub fn position_of_row_id(&self, row_id: RowId) -> Option<usize> {
-        self.row_ids
-            .iter()
-            .position(|candidate| *candidate == row_id)
+        self.row_id_positions.get(&row_id).copied().or_else(|| {
+            self.row_ids
+                .iter()
+                .position(|candidate| *candidate == row_id)
+        })
     }
 
     pub fn row_by_id(&self, row_id: RowId) -> Option<&Vec<Value>> {
@@ -197,6 +226,7 @@ impl Table {
         self.next_row_id += 1;
         self.rows.push(row);
         self.row_ids.push(row_id);
+        self.row_id_positions.insert(row_id, self.rows.len() - 1);
         row_id
     }
 
@@ -208,6 +238,7 @@ impl Table {
         if self.next_row_id <= row_id.0 {
             self.next_row_id = row_id.0 + 1;
         }
+        self.rebuild_row_id_positions();
     }
 
     pub fn remove_row_by_id(&mut self, row_id: RowId) -> Option<(usize, Vec<Value>)> {
@@ -215,6 +246,7 @@ impl Table {
         let position = self.position_of_row_id(row_id)?;
         self.row_ids.remove(position);
         let row = self.rows.remove(position);
+        self.rebuild_row_id_positions();
         Some((position, row))
     }
 
@@ -421,13 +453,8 @@ impl<'a> ScopedDatabase<'a> {
         temp_table_name: String,
         columns: Vec<ColumnDefinition>,
     ) -> Self {
-        let temp_table = Table {
-            columns,
-            rows: vec![Vec::new()],
-            row_ids: vec![RowId(1)],
-            next_row_id: 2,
-            constraints: Vec::new(),
-        };
+        let temp_table =
+            Table::with_rows_and_ids(columns, vec![Vec::new()], vec![RowId(1)], 2, Vec::new());
 
         Self {
             base,
@@ -446,6 +473,7 @@ impl<'a> ScopedDatabase<'a> {
         self.temp_table.row_ids.clear();
         self.temp_table.row_ids.push(RowId(1));
         self.temp_table.next_row_id = 2;
+        self.temp_table.ensure_row_ids();
     }
 }
 
