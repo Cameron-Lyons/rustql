@@ -1,7 +1,7 @@
 use crate::ast::{ColumnDefinition, TableConstraint, Value};
 use crate::database::{Database, RowId};
 use crate::error::RustqlError;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -89,6 +89,9 @@ const FILE_HEADER_SIZE: usize = 16;
 const HEADER_RESERVED: u32 = 0;
 const JOURNAL_MAGIC: [u8; 8] = *b"RSTQLJW\0";
 const JOURNAL_VERSION: u32 = 1;
+const LEGACY_ROW_KEY_PREFIX: &str = "row:";
+const ROW_KEY_PREFIX: &str = "table_row:";
+const ROW_ID_KEY_WIDTH: usize = 20;
 
 #[derive(Serialize, Deserialize)]
 enum TransactionJournal {
@@ -101,6 +104,49 @@ struct TableStorageRecord {
     columns: Vec<ColumnDefinition>,
     constraints: Vec<TableConstraint>,
     next_row_id: u64,
+}
+
+fn format_row_storage_key(table_name: &str, row_id: RowId) -> String {
+    format!(
+        "{ROW_KEY_PREFIX}{table_name}:{:0width$}",
+        row_id.0,
+        width = ROW_ID_KEY_WIDTH
+    )
+}
+
+fn parse_row_storage_key(key: &str) -> Option<(&str, RowId, bool)> {
+    if let Some(row_key) = key.strip_prefix(ROW_KEY_PREFIX) {
+        let (table_name, row_id_str) = row_key.rsplit_once(':')?;
+        let row_id = row_id_str.parse::<u64>().ok()?;
+        return Some((table_name, RowId(row_id), true));
+    }
+
+    let row_key = key.strip_prefix(LEGACY_ROW_KEY_PREFIX)?;
+    let (table_name, row_id_str) = row_key.rsplit_once(':')?;
+    let row_id = row_id_str.parse::<u64>().ok()?;
+    Some((table_name, RowId(row_id), false))
+}
+
+fn insert_loaded_row(table: &mut crate::database::Table, row_id: RowId, row: Vec<Value>) {
+    if table
+        .row_ids
+        .last()
+        .is_none_or(|last_row_id| *last_row_id < row_id)
+    {
+        table.row_ids.push(row_id);
+        table.rows.push(row);
+    } else {
+        let position = table
+            .row_ids
+            .binary_search(&row_id)
+            .unwrap_or_else(|pos| pos);
+        table.row_ids.insert(position, row_id);
+        table.rows.insert(position, row);
+    }
+
+    if table.next_row_id <= row_id.0 {
+        table.next_row_id = row_id.0 + 1;
+    }
 }
 
 enum VersionedFileState {
@@ -517,7 +563,7 @@ impl<'a> CachedBTreeFile<'a> {
 
     fn load_database_from_rows(&self, root_page_id: u64) -> Result<Database, RustqlError> {
         let mut db = Database::new();
-        let mut table_rows: HashMap<String, Vec<(RowId, Vec<Value>)>> = HashMap::new();
+        let mut pending_rows: HashMap<String, Vec<(RowId, Vec<Value>)>> = HashMap::new();
 
         for (key, pointer) in self.range_scan(None, None, root_page_id)? {
             let Value::Text(key_str) = key else {
@@ -525,14 +571,8 @@ impl<'a> CachedBTreeFile<'a> {
             };
 
             if let Some(table_name) = key_str.strip_prefix("schema:") {
-                let schema_json = self.read_data_from_pointer(pointer)?;
-                let schema: TableStorageRecord =
-                    serde_json::from_str(&schema_json).map_err(|e| {
-                        format!(
-                            "Failed to deserialize schema for table {}: {}",
-                            table_name, e
-                        )
-                    })?;
+                let schema: TableStorageRecord = self
+                    .read_data_from_pointer(pointer, format!("schema for table {}", table_name))?;
 
                 db.tables.insert(
                     table_name.to_string(),
@@ -544,84 +584,90 @@ impl<'a> CachedBTreeFile<'a> {
                         constraints: schema.constraints,
                     },
                 );
+                if let Some(mut rows) = pending_rows.remove(table_name) {
+                    rows.sort_by_key(|(row_id, _)| *row_id);
+                    if let Some(table_ref) = db.tables.get_mut(table_name) {
+                        for (row_id, row) in rows {
+                            insert_loaded_row(table_ref, row_id, row);
+                        }
+                    }
+                }
                 continue;
             }
 
             if let Some(index_name) = key_str.strip_prefix("index:") {
-                let index_json = self.read_data_from_pointer(pointer)?;
-                let index: crate::database::Index = serde_json::from_str(&index_json)
-                    .map_err(|e| format!("Failed to deserialize index {}: {}", index_name, e))?;
+                let index: crate::database::Index =
+                    self.read_data_from_pointer(pointer, format!("index {}", index_name))?;
                 db.indexes.insert(index_name.to_string(), index);
                 continue;
             }
 
             if let Some(index_name) = key_str.strip_prefix("cindex:") {
-                let index_json = self.read_data_from_pointer(pointer)?;
-                let index: crate::database::CompositeIndex = serde_json::from_str(&index_json)
-                    .map_err(|e| {
-                        format!(
-                            "Failed to deserialize composite index {}: {}",
-                            index_name, e
-                        )
-                    })?;
+                let index: crate::database::CompositeIndex = self
+                    .read_data_from_pointer(pointer, format!("composite index {}", index_name))?;
                 db.composite_indexes.insert(index_name.to_string(), index);
                 continue;
             }
 
             if let Some(view_name) = key_str.strip_prefix("view:") {
-                let view_json = self.read_data_from_pointer(pointer)?;
-                let view: crate::database::View = serde_json::from_str(&view_json)
-                    .map_err(|e| format!("Failed to deserialize view {}: {}", view_name, e))?;
+                let view: crate::database::View =
+                    self.read_data_from_pointer(pointer, format!("view {}", view_name))?;
                 db.views.insert(view_name.to_string(), view);
                 continue;
             }
 
-            if let Some(row_key) = key_str.strip_prefix("row:")
-                && let Some((table_name, row_id_str)) = row_key.split_once(':')
-                && let Ok(row_id) = row_id_str.parse::<u64>()
+            if let Some((table_name, row_id, can_insert_in_order)) = parse_row_storage_key(&key_str)
             {
-                let row_json = self.read_data_from_pointer(pointer)?;
-                let row: Vec<Value> = serde_json::from_str(&row_json).map_err(|e| {
-                    format!(
-                        "Failed to deserialize row {} for table {}: {}",
-                        row_id_str, table_name, e
-                    )
-                })?;
-                table_rows
+                let row: Vec<Value> = self.read_data_from_pointer(
+                    pointer,
+                    format!("row {} for table {}", row_id.0, table_name),
+                )?;
+                if can_insert_in_order && let Some(table_ref) = db.tables.get_mut(table_name) {
+                    insert_loaded_row(table_ref, row_id, row);
+                    continue;
+                }
+                pending_rows
                     .entry(table_name.to_string())
                     .or_default()
-                    .push((RowId(row_id), row));
+                    .push((row_id, row));
             }
         }
 
-        for (table_name, mut row_indices) in table_rows {
+        for (table_name, mut row_indices) in pending_rows {
             row_indices.sort_by_key(|(row_id, _)| *row_id);
-            let sorted_row_ids: Vec<RowId> =
-                row_indices.iter().map(|(row_id, _)| *row_id).collect();
-            let sorted_rows: Vec<Vec<Value>> =
-                row_indices.into_iter().map(|(_, row)| row).collect();
-
             if let Some(table_ref) = db.tables.get_mut(&table_name) {
-                table_ref.rows = sorted_rows;
-                table_ref.row_ids = sorted_row_ids;
+                for (row_id, row) in row_indices {
+                    insert_loaded_row(table_ref, row_id, row);
+                }
             }
         }
 
         Ok(db)
     }
 
-    fn read_data_from_pointer(&self, pointer: u64) -> Result<String, RustqlError> {
+    fn read_data_from_pointer<T>(
+        &self,
+        pointer: u64,
+        label: impl Into<String>,
+    ) -> Result<T, RustqlError>
+    where
+        T: DeserializeOwned,
+    {
+        let label = label.into();
         let data_page = self.read_page(pointer)?;
 
         if let Some(entry) = data_page.entries.first()
             && let Value::Text(ref json_str) = entry.key
         {
-            return Ok(json_str.clone());
+            return serde_json::from_str(json_str).map_err(|e| {
+                RustqlError::StorageError(format!("Failed to deserialize {}: {}", label, e))
+            });
         }
 
-        Err(RustqlError::StorageError(
-            "Data page does not contain valid JSON".to_string(),
-        ))
+        Err(RustqlError::StorageError(format!(
+            "Data page for {} does not contain valid JSON",
+            label
+        )))
     }
 
     fn range_scan(
@@ -724,7 +770,7 @@ impl BTreeFile {
 
         for (table_name, table) in &db.tables {
             for (row_id, row) in table.iter_rows_with_ids() {
-                let row_key = Value::Text(format!("row:{}:{}", table_name, row_id.0));
+                let row_key = Value::Text(format_row_storage_key(table_name, row_id));
                 let row_json = serde_json::to_string(row).map_err(|e| {
                     format!(
                         "Failed to serialize row {} for table {}: {}",
@@ -1469,7 +1515,7 @@ where
 mod tests {
     use super::*;
     use crate::ast::{ColumnDefinition, DataType, TableConstraint};
-    use crate::database::{CompositeIndex, Table, View};
+    use crate::database::{CompositeIndex, RowId, Table, View};
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
 
@@ -1541,6 +1587,105 @@ mod tests {
         assert_eq!(users.columns.len(), 2);
         assert_eq!(users.rows[0][0], Value::Integer(1));
         assert_eq!(users.rows[0][1], Value::Text("Alice".to_string()));
+
+        remove_storage_artifacts(&temp_path);
+    }
+
+    #[test]
+    fn btree_storage_loads_legacy_row_keys_in_row_id_order() {
+        let temp_path = std::env::temp_dir().join("rustql_btree_legacy_rows_test.dat");
+        remove_storage_artifacts(&temp_path);
+
+        let mut file = BTreeFile::create(&temp_path).expect("Failed to create BTree file");
+        write_versioned_header(
+            &mut file.file,
+            BTreeFile::MAGIC,
+            BTreeFile::VERSION,
+            "BTree storage file",
+        )
+        .expect("Failed to write versioned header");
+
+        let mut meta_page = BTreePage::new(0, PageKind::Meta);
+        meta_page
+            .entries
+            .push(BTreeEntry::new(Value::Text("root".to_string()), 1));
+        meta_page.header.entry_count = meta_page.entries.len() as u16;
+        file.write_page(&meta_page)
+            .expect("Failed to write meta page");
+
+        let root_page_id = 1;
+        let root_page = BTreePage::new(root_page_id, PageKind::Leaf);
+        file.write_page(&root_page)
+            .expect("Failed to write root page");
+
+        let schema_json = serde_json::to_string(&TableStorageRecord {
+            columns: vec![ColumnDefinition {
+                name: "value".to_string(),
+                data_type: DataType::Text,
+                nullable: false,
+                primary_key: false,
+                unique: false,
+                default_value: None,
+                foreign_key: None,
+                check: None,
+                auto_increment: false,
+                generated: None,
+            }],
+            constraints: Vec::<TableConstraint>::new(),
+            next_row_id: 11,
+        })
+        .expect("Failed to encode schema");
+        let schema_pointer = file
+            .write_data_to_pointer(&schema_json)
+            .expect("Failed to write schema");
+
+        let mut current_root_id = file
+            .insert(
+                Value::Text("schema:test".to_string()),
+                schema_pointer,
+                root_page_id,
+            )
+            .expect("Failed to insert schema");
+
+        for (row_id, value) in [(10u64, "ten"), (2u64, "two")] {
+            let row_json =
+                serde_json::to_string(&vec![Value::Text(value.to_string())]).expect("row json");
+            let row_pointer = file
+                .write_data_to_pointer(&row_json)
+                .unwrap_or_else(|_| panic!("Failed to write legacy row {}", row_id));
+            current_root_id = file
+                .insert(
+                    Value::Text(format!("row:test:{}", row_id)),
+                    row_pointer,
+                    current_root_id,
+                )
+                .unwrap_or_else(|_| panic!("Failed to insert legacy row {}", row_id));
+        }
+
+        let mut meta_page = file.read_page(0).expect("Failed to reload meta page");
+        meta_page
+            .entries
+            .iter_mut()
+            .find(|entry| matches!(&entry.key, Value::Text(text) if text == "root"))
+            .expect("root entry should exist")
+            .pointer = current_root_id;
+        meta_page.header.entry_count = meta_page.entries.len() as u16;
+        file.write_page(&meta_page)
+            .expect("Failed to update root pointer");
+        drop(file);
+
+        let engine = BTreeStorageEngine::new(&temp_path);
+        let loaded = engine.load().expect("Failed to load legacy rows");
+        let table = loaded.tables.get("test").expect("table should exist");
+
+        assert_eq!(table.row_ids, vec![RowId(2), RowId(10)]);
+        assert_eq!(
+            table.rows,
+            vec![
+                vec![Value::Text("two".to_string())],
+                vec![Value::Text("ten".to_string())]
+            ]
+        );
 
         remove_storage_artifacts(&temp_path);
     }
