@@ -2148,6 +2148,85 @@ mod tests {
     }
 
     #[test]
+    fn btree_storage_corruptions_do_not_panic() {
+        let temp_path = std::env::temp_dir().join("rustql_btree_corruption_fuzz.dat");
+        remove_storage_artifacts(&temp_path);
+
+        let engine = BTreeStorageEngine::new(&temp_path);
+        let mut db = Database::new();
+        db.tables.insert(
+            "test".to_string(),
+            Table::new(
+                vec![
+                    ColumnDefinition {
+                        name: "id".to_string(),
+                        data_type: DataType::Integer,
+                        nullable: false,
+                        primary_key: true,
+                        unique: false,
+                        default_value: None,
+                        foreign_key: None,
+                        check: None,
+                        auto_increment: false,
+                        generated: None,
+                    },
+                    ColumnDefinition {
+                        name: "name".to_string(),
+                        data_type: DataType::Text,
+                        nullable: false,
+                        primary_key: false,
+                        unique: false,
+                        default_value: None,
+                        foreign_key: None,
+                        check: None,
+                        auto_increment: false,
+                        generated: None,
+                    },
+                ],
+                vec![
+                    vec![Value::Integer(1), Value::Text("Alice".to_string())],
+                    vec![Value::Integer(2), Value::Text("Bob".to_string())],
+                ],
+                vec![],
+            ),
+        );
+        engine.save(&db).expect("failed to save baseline database");
+
+        let baseline = std::fs::read(&temp_path).expect("failed to read baseline storage file");
+        assert!(
+            baseline.len() > FILE_HEADER_SIZE,
+            "baseline file should include header and pages"
+        );
+
+        fn next_random(state: &mut u64) -> u64 {
+            *state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            *state
+        }
+
+        for case in 0..64u64 {
+            let mut mutated = baseline.clone();
+            let mut state = case + 1;
+            let mutations = 1 + (next_random(&mut state) % 4) as usize;
+            for _ in 0..mutations {
+                let index = (next_random(&mut state) as usize) % mutated.len();
+                let mask = ((next_random(&mut state) as u8) | 1).max(1);
+                mutated[index] ^= mask;
+            }
+            std::fs::write(&temp_path, &mutated).expect("failed to write mutated storage file");
+
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let mutated_engine = BTreeStorageEngine::new(&temp_path);
+                let _ = mutated_engine.load();
+            }));
+            assert!(result.is_ok(), "load panicked on corruption case {}", case);
+        }
+
+        remove_storage_artifacts(&temp_path);
+    }
+
+    #[test]
     fn btree_recovers_committed_journal_on_load() {
         let temp_path = std::env::temp_dir().join("rustql_btree_committed_journal.dat");
         remove_storage_artifacts(&temp_path);

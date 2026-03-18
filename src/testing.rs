@@ -1,7 +1,8 @@
 use crate::ast::{Statement, Value};
 use crate::database::Database;
 use crate::{
-    CommandTag, Engine, EngineOptions, ExplainAnalyzeResult, QueryResult, RowBatch, StorageMode,
+    CommandResult, CommandTag, Engine, EngineOptions, ExplainAnalyzeResult, QueryResult, RowBatch,
+    StorageMode,
 };
 use crate::{lexer, parser};
 use std::sync::{Mutex, OnceLock};
@@ -45,6 +46,18 @@ pub fn process_query(sql: &str) -> Result<String, String> {
         .join("\n"))
 }
 
+pub fn execute_sql(sql: &str) -> Result<QueryResult, String> {
+    let harness = harness().lock().unwrap_or_else(|err| err.into_inner());
+    let mut session = harness.engine.session();
+    session.execute_one(sql).map_err(|err| err.to_string())
+}
+
+pub fn execute_script_results(sql: &str) -> Result<Vec<QueryResult>, String> {
+    let harness = harness().lock().unwrap_or_else(|err| err.into_inner());
+    let mut session = harness.engine.session();
+    session.execute_script(sql).map_err(|err| err.to_string())
+}
+
 pub fn execute_statement(statement: Statement) -> Result<QueryResult, String> {
     let harness = harness().lock().unwrap_or_else(|err| err.into_inner());
     let mut session = harness.engine.session();
@@ -56,6 +69,20 @@ pub fn execute_statement(statement: Statement) -> Result<QueryResult, String> {
 pub fn execute(statement: Statement) -> Result<String, String> {
     let result = execute_statement(statement.clone())?;
     Ok(render_result_for_statement(&statement, &result))
+}
+
+pub fn query_rows(sql: &str) -> Result<RowBatch, String> {
+    match execute_sql(sql)? {
+        QueryResult::Rows(rows) => Ok(rows),
+        other => Err(format!("Expected row result, got {other:?}")),
+    }
+}
+
+pub fn command_result(sql: &str) -> Result<CommandResult, String> {
+    match execute_sql(sql)? {
+        QueryResult::Command(command) => Ok(command),
+        other => Err(format!("Expected command result, got {other:?}")),
+    }
 }
 
 pub fn snapshot_database() -> Database {

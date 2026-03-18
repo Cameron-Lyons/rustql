@@ -19,12 +19,13 @@ Planning Time
 Execution Time
 Actual Rows: 2
 
-query ok
+query exact
 SELECT slt_ea_users.name, slt_ea_orders.amount
 FROM slt_ea_users
 JOIN slt_ea_orders ON slt_ea_users.id = slt_ea_orders.user_id
 WHERE slt_ea_orders.amount >= 10.0
 ORDER BY slt_ea_orders.id;
 ----
-Alice
-Bob
+slt_ea_users.name\tslt_ea_orders.amount
+Alice\t12
+Bob\t15

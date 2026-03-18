@@ -1,4 +1,6 @@
-use rustql::testing::{process_query, reset_database};
+use rustql::CommandTag;
+use rustql::ast::Value;
+use rustql::testing::{command_result, process_query, query_rows, reset_database};
 use std::sync::Mutex;
 
 static TEST_MUTEX: Mutex<()> = Mutex::new(());
@@ -12,9 +14,11 @@ fn setup_test<'a>() -> std::sync::MutexGuard<'a, ()> {
 #[test]
 fn test_create_table() {
     let _guard = setup_test();
-    let result = process_query("CREATE TABLE users (id INTEGER, name TEXT, age INTEGER)");
+    let result = command_result("CREATE TABLE users (id INTEGER, name TEXT, age INTEGER)");
     assert!(result.is_ok());
-    assert_eq!(result.unwrap(), "Table 'users' created");
+    let result = result.unwrap();
+    assert_eq!(result.tag, CommandTag::CreateTable);
+    assert_eq!(result.affected, 0);
 
     let result = process_query("CREATE TABLE users (id INTEGER, name TEXT)");
     assert!(result.is_err());
@@ -25,23 +29,65 @@ fn test_create_table() {
 fn test_insert_and_select() {
     let _guard = setup_test();
     process_query("CREATE TABLE users (id INTEGER, name TEXT, age INTEGER)").unwrap();
-    let result = process_query("INSERT INTO users VALUES (1, 'Alice', 25)");
+    let result = command_result("INSERT INTO users VALUES (1, 'Alice', 25)");
     assert!(result.is_ok());
-    assert_eq!(result.unwrap(), "1 row(s) inserted");
+    let result = result.unwrap();
+    assert_eq!(result.tag, CommandTag::Insert);
+    assert_eq!(result.affected, 1);
 
-    let result = process_query("INSERT INTO users VALUES (2, 'Bob', 30), (3, 'Charlie', 35)");
+    let result = command_result("INSERT INTO users VALUES (2, 'Bob', 30), (3, 'Charlie', 35)");
     assert!(result.is_ok());
-    assert_eq!(result.unwrap(), "2 row(s) inserted");
+    let result = result.unwrap();
+    assert_eq!(result.tag, CommandTag::Insert);
+    assert_eq!(result.affected, 2);
 
-    let result = process_query("SELECT * FROM users").unwrap();
-    assert!(result.contains("Alice"));
-    assert!(result.contains("Bob"));
-    assert!(result.contains("Charlie"));
+    let result = query_rows("SELECT * FROM users ORDER BY id").unwrap();
+    assert_eq!(
+        result
+            .columns
+            .iter()
+            .map(|column| column.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["id", "name", "age"]
+    );
+    assert_eq!(
+        result.rows,
+        vec![
+            vec![
+                Value::Integer(1),
+                Value::Text("Alice".to_string()),
+                Value::Integer(25)
+            ],
+            vec![
+                Value::Integer(2),
+                Value::Text("Bob".to_string()),
+                Value::Integer(30)
+            ],
+            vec![
+                Value::Integer(3),
+                Value::Text("Charlie".to_string()),
+                Value::Integer(35)
+            ],
+        ]
+    );
 
-    let result = process_query("SELECT name, age FROM users").unwrap();
-    assert!(result.contains("Alice"));
-    assert!(result.contains("25"));
-    assert!(!result.contains("id"));
+    let result = query_rows("SELECT name, age FROM users ORDER BY id").unwrap();
+    assert_eq!(
+        result
+            .columns
+            .iter()
+            .map(|column| column.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["name", "age"]
+    );
+    assert_eq!(
+        result.rows,
+        vec![
+            vec![Value::Text("Alice".to_string()), Value::Integer(25)],
+            vec![Value::Text("Bob".to_string()), Value::Integer(30)],
+            vec![Value::Text("Charlie".to_string()), Value::Integer(35)],
+        ]
+    );
 }
 
 #[test]
@@ -50,24 +96,21 @@ fn test_select_aliases() {
     process_query("CREATE TABLE users (id INTEGER, name TEXT, age INTEGER)").unwrap();
     process_query("INSERT INTO users VALUES (1, 'Alice', 25), (2, 'Bob', 30)").unwrap();
 
-    let result = process_query("SELECT name AS username, age FROM users ORDER BY id").unwrap();
-    let mut lines = result.lines();
-    let header = lines.next().unwrap();
-    let header_cols: Vec<&str> = header.split('\t').filter(|s| !s.is_empty()).collect();
-    assert_eq!(header_cols, vec!["username", "age"]);
-
-    let separator = lines.next().unwrap();
-    assert!(separator.chars().all(|c| c == '-'));
-
-    let rows: Vec<&str> = lines.collect();
-    assert_eq!(rows.len(), 2);
-    assert!(
-        rows.iter()
-            .any(|line| line.contains("Alice") && line.contains("25"))
+    let result = query_rows("SELECT name AS username, age FROM users ORDER BY id").unwrap();
+    assert_eq!(
+        result
+            .columns
+            .iter()
+            .map(|column| column.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["username", "age"]
     );
-    assert!(
-        rows.iter()
-            .any(|line| line.contains("Bob") && line.contains("30"))
+    assert_eq!(
+        result.rows,
+        vec![
+            vec![Value::Text("Alice".to_string()), Value::Integer(25)],
+            vec![Value::Text("Bob".to_string()), Value::Integer(30)],
+        ]
     );
 }
 
@@ -160,22 +203,15 @@ fn test_order_by_ordinal() {
     process_query("INSERT INTO users VALUES (1, 'Alice', 30), (2, 'Bob', 25), (3, 'Charlie', 35)")
         .unwrap();
 
-    let result = process_query("SELECT name, age FROM users ORDER BY 2 DESC").unwrap();
-    let rows: Vec<&str> = result
-        .lines()
-        .skip(2)
-        .filter(|line| !line.trim().is_empty())
-        .collect();
-
-    assert_eq!(rows.len(), 3);
-    let parsed: Vec<Vec<&str>> = rows
-        .iter()
-        .map(|line| line.split('\t').filter(|s| !s.is_empty()).collect())
-        .collect();
-
-    assert_eq!(parsed[0], vec!["Charlie", "35"]);
-    assert_eq!(parsed[1], vec!["Alice", "30"]);
-    assert_eq!(parsed[2], vec!["Bob", "25"]);
+    let result = query_rows("SELECT name, age FROM users ORDER BY 2 DESC").unwrap();
+    assert_eq!(
+        result.rows,
+        vec![
+            vec![Value::Text("Charlie".to_string()), Value::Integer(35)],
+            vec![Value::Text("Alice".to_string()), Value::Integer(30)],
+            vec![Value::Text("Bob".to_string()), Value::Integer(25)],
+        ]
+    );
 }
 
 #[test]
@@ -185,21 +221,15 @@ fn test_order_by_expression() {
     process_query("INSERT INTO sales VALUES (1, 10, 2), (2, 5, 5), (3, 7, 1)").unwrap();
 
     let result =
-        process_query("SELECT id, price, quantity FROM sales ORDER BY price * quantity DESC")
-            .unwrap();
-    let rows: Vec<&str> = result
-        .lines()
-        .skip(2)
-        .filter(|line| !line.trim().is_empty())
-        .collect();
-
-    assert_eq!(rows.len(), 3);
-    let parsed: Vec<Vec<&str>> = rows
-        .iter()
-        .map(|line| line.split('\t').filter(|s| !s.is_empty()).collect())
-        .collect();
-
-    assert_eq!(parsed[0], vec!["2", "5", "5"]);
+        query_rows("SELECT id, price, quantity FROM sales ORDER BY price * quantity DESC").unwrap();
+    assert_eq!(
+        result.rows,
+        vec![
+            vec![Value::Integer(2), Value::Integer(5), Value::Integer(5)],
+            vec![Value::Integer(1), Value::Integer(10), Value::Integer(2)],
+            vec![Value::Integer(3), Value::Integer(7), Value::Integer(1)],
+        ]
+    );
 }
 
 #[test]
