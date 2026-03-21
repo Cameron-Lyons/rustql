@@ -1,5 +1,7 @@
 # RustQL
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 A SQL database engine written in Rust with an interactive REPL. RustQL supports a broad subset of SQL including DDL, DML, joins, subqueries, aggregates, transactions, indexing, and cost-based query optimization, backed by pluggable storage engines.
 
 ## Features
@@ -152,3 +154,7 @@ git config core.hooksPath .githooks
 The pre-commit hook enforces:
 - `cargo fmt --all -- --check`
 - `cargo clippy --workspace --all-targets --all-features -- -D warnings`
+
+## License
+
+MIT. See [LICENSE](LICENSE).
