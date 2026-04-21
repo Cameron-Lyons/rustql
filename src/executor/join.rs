@@ -65,8 +65,14 @@ pub fn perform_multiple_joins(
                                     .collect(),
                             );
                         }
+                        let sub_columns_ref = sub_columns.as_ref().ok_or_else(|| {
+                            RustqlError::Internal(
+                                "LATERAL subquery returned rows without column metadata"
+                                    .to_string(),
+                            )
+                        })?;
                         let lateral_eval_columns =
-                            qualified_subquery_columns(alias, sub_columns.as_ref().unwrap());
+                            qualified_subquery_columns(alias, sub_columns_ref);
                         let mut join_eval_columns = outer_scope_columns.clone();
                         join_eval_columns.extend(lateral_eval_columns);
 
@@ -201,13 +207,19 @@ pub fn perform_multiple_joins(
                                 let mut col_offset = 0;
                                 for (idx, &col_count) in table_column_counts.iter().enumerate() {
                                     if idx == tbl_idx {
-                                        let table = if idx == 0 {
-                                            from_table
+                                        let columns: Cow<'_, [ColumnDefinition]> = if idx == 0 {
+                                            Cow::Borrowed(from_table.columns.as_slice())
+                                        } else if idx == table_column_counts.len() - 1
+                                            && table_names[idx] == join_table_name
+                                        {
+                                            Cow::Borrowed(join_table.columns.as_slice())
                                         } else {
-                                            db.get_table(&joins[idx - 1].table).unwrap()
+                                            Cow::Borrowed(
+                                                &all_columns[col_offset..col_offset + col_count],
+                                            )
                                         };
                                         if let Some(col_idx) =
-                                            table.columns.iter().position(|c| c.name == col_name)
+                                            columns.iter().position(|c| c.name == col_name)
                                         {
                                             return Some(col_offset + col_idx);
                                         }

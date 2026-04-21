@@ -98,8 +98,8 @@ fn default_engine() -> Box<dyn StorageEngine> {
     }
 }
 
-pub fn load_database() -> Database {
-    default_engine().load().unwrap_or_default()
+pub fn load_database() -> Result<Database, RustqlError> {
+    default_engine().load()
 }
 
 pub fn save_database(db: &Database) -> Result<(), RustqlError> {
@@ -447,23 +447,35 @@ impl BTreeStorageEngine {
     }
 
     pub fn cache_stats(&self) -> (u64, u64, usize) {
-        let cache = self.page_cache.read().unwrap();
+        let cache = self
+            .page_cache
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         cache.stats()
     }
 
     pub fn invalidate_page(&self, page_id: u64) {
-        let mut cache = self.page_cache.write().unwrap();
+        let mut cache = self
+            .page_cache
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         cache.pages.remove(&page_id);
         cache.access_order.retain(|&id| id != page_id);
     }
 
     pub fn clear_cache(&self) {
-        let mut cache = self.page_cache.write().unwrap();
+        let mut cache = self
+            .page_cache
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         cache.clear();
     }
 
     pub fn invalidate_pages(&self, page_ids: &[u64]) {
-        let mut cache = self.page_cache.write().unwrap();
+        let mut cache = self
+            .page_cache
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         for &page_id in page_ids {
             cache.pages.remove(&page_id);
             cache.access_order.retain(|&id| id != page_id);
@@ -594,7 +606,9 @@ impl BTreeStorageEngine {
 
 impl StorageEngine for BTreeStorageEngine {
     fn load(&self) -> Result<Database, RustqlError> {
-        let _path_guard = self.path_lock.write().unwrap();
+        let _path_guard = self.path_lock.write().map_err(|e| {
+            RustqlError::StorageError(format!("Failed to acquire BTree storage write lock: {}", e))
+        })?;
         self.recover_if_needed_locked()?;
         let mut cached_file = CachedBTreeFile { engine: self };
         let mut db = cached_file.read_database_via_pages()?;
@@ -603,24 +617,32 @@ impl StorageEngine for BTreeStorageEngine {
     }
 
     fn save(&self, db: &Database) -> Result<(), RustqlError> {
-        let _path_guard = self.path_lock.write().unwrap();
+        let _path_guard = self.path_lock.write().map_err(|e| {
+            RustqlError::StorageError(format!("Failed to acquire BTree storage write lock: {}", e))
+        })?;
         self.save_locked(db)
     }
 
     fn begin_transaction(&self) -> Result<(), RustqlError> {
-        let _path_guard = self.path_lock.write().unwrap();
+        let _path_guard = self.path_lock.write().map_err(|e| {
+            RustqlError::StorageError(format!("Failed to acquire BTree storage write lock: {}", e))
+        })?;
         self.write_journal_locked(&TransactionJournal::Pending)
     }
 
     fn prepare_commit(&self, db: &Database) -> Result<(), RustqlError> {
-        let _path_guard = self.path_lock.write().unwrap();
+        let _path_guard = self.path_lock.write().map_err(|e| {
+            RustqlError::StorageError(format!("Failed to acquire BTree storage write lock: {}", e))
+        })?;
         self.write_journal_locked(&TransactionJournal::Committed {
             database: db.clone(),
         })
     }
 
     fn clear_transaction(&self) -> Result<(), RustqlError> {
-        let _path_guard = self.path_lock.write().unwrap();
+        let _path_guard = self.path_lock.write().map_err(|e| {
+            RustqlError::StorageError(format!("Failed to acquire BTree storage write lock: {}", e))
+        })?;
         self.clear_journal_locked()
     }
 }
@@ -1150,7 +1172,9 @@ fn decode_value(data: &[u8], offset: &mut usize) -> Result<Value, RustqlError> {
                     "Truncated integer in binary entry".to_string(),
                 ));
             }
-            let val = i64::from_le_bytes(data[*offset..*offset + 8].try_into().unwrap());
+            let mut bytes = [0u8; 8];
+            bytes.copy_from_slice(&data[*offset..*offset + 8]);
+            let val = i64::from_le_bytes(bytes);
             *offset += 8;
             Ok(Value::Integer(val))
         }
@@ -1160,7 +1184,9 @@ fn decode_value(data: &[u8], offset: &mut usize) -> Result<Value, RustqlError> {
                     "Truncated float in binary entry".to_string(),
                 ));
             }
-            let val = f64::from_le_bytes(data[*offset..*offset + 8].try_into().unwrap());
+            let mut bytes = [0u8; 8];
+            bytes.copy_from_slice(&data[*offset..*offset + 8]);
+            let val = f64::from_le_bytes(bytes);
             *offset += 8;
             Ok(Value::Float(val))
         }
@@ -1170,7 +1196,9 @@ fn decode_value(data: &[u8], offset: &mut usize) -> Result<Value, RustqlError> {
                     "Truncated string length in binary entry".to_string(),
                 ));
             }
-            let len = u32::from_le_bytes(data[*offset..*offset + 4].try_into().unwrap()) as usize;
+            let mut len_bytes = [0u8; 4];
+            len_bytes.copy_from_slice(&data[*offset..*offset + 4]);
+            let len = u32::from_le_bytes(len_bytes) as usize;
             *offset += 4;
             if *offset + len > data.len() {
                 return Err(RustqlError::StorageError(
@@ -1188,7 +1216,10 @@ fn decode_value(data: &[u8], offset: &mut usize) -> Result<Value, RustqlError> {
                 TAG_DATE => Ok(Value::Date(s)),
                 TAG_TIME => Ok(Value::Time(s)),
                 TAG_DATETIME => Ok(Value::DateTime(s)),
-                _ => unreachable!(),
+                other => Err(RustqlError::StorageError(format!(
+                    "Invalid string-like binary entry tag: {}",
+                    other
+                ))),
             }
         }
         TAG_BOOLEAN => {
@@ -1314,7 +1345,9 @@ impl BTreePage {
                         "Truncated inline data length in binary entry".to_string(),
                     ));
                 }
-                let len = u32::from_le_bytes(buf[offset..offset + 4].try_into().unwrap()) as usize;
+                let mut len_bytes = [0u8; 4];
+                len_bytes.copy_from_slice(&buf[offset..offset + 4]);
+                let len = u32::from_le_bytes(len_bytes) as usize;
                 offset += 4;
                 if offset + len > buf.len() {
                     return Err(RustqlError::StorageError(
@@ -1338,7 +1371,9 @@ impl BTreePage {
                     "Truncated pointer in binary entry".to_string(),
                 ));
             }
-            let pointer = u64::from_le_bytes(buf[offset..offset + 8].try_into().unwrap());
+            let mut pointer_bytes = [0u8; 8];
+            pointer_bytes.copy_from_slice(&buf[offset..offset + 8]);
+            let pointer = u64::from_le_bytes(pointer_bytes);
             offset += 8;
             entries.push(BTreeEntry::new(key, pointer));
         }
@@ -1522,7 +1557,9 @@ impl BTreeFile {
         root_page_id: u64,
     ) -> Result<u64, RustqlError> {
         let path = self.find_path_to_leaf(&new_entry.key, root_page_id)?;
-        let leaf_page_id = *path.last().unwrap();
+        let leaf_page_id = path.last().copied().ok_or_else(|| {
+            RustqlError::StorageError("BTree insert could not locate a leaf page".to_string())
+        })?;
         let mut leaf_page = self.read_page(leaf_page_id)?;
 
         for (idx, entry) in leaf_page.entries.iter().enumerate() {

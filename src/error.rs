@@ -67,6 +67,8 @@ impl fmt::Display for RustqlError {
 
 impl std::error::Error for RustqlError {}
 
+pub type Result<T> = std::result::Result<T, RustqlError>;
+
 impl From<std::io::Error> for RustqlError {
     fn from(e: std::io::Error) -> Self {
         RustqlError::StorageError(e.to_string())

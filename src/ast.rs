@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::fmt;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Statement {
@@ -598,6 +599,21 @@ pub enum Value {
     Date(String),
     Time(String),
     DateTime(String),
+}
+
+impl fmt::Display for Value {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Value::Null => f.write_str("NULL"),
+            Value::Integer(value) => write!(f, "{}", value),
+            Value::Float(value) => write!(f, "{}", value),
+            Value::Text(value) => f.write_str(value),
+            Value::Boolean(value) => write!(f, "{}", value),
+            Value::Date(value) => f.write_str(value),
+            Value::Time(value) => f.write_str(value),
+            Value::DateTime(value) => f.write_str(value),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -341,7 +341,7 @@ impl Database {
         }
     }
 
-    pub fn load() -> Self {
+    pub fn load() -> Result<Self, RustqlError> {
         crate::storage::load_database()
     }
 

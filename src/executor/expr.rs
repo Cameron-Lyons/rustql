@@ -1062,7 +1062,10 @@ pub fn evaluate_value_expression_with_db(
                                         .unwrap_or(0);
                                     Ok(Value::Integer(s))
                                 }
-                                _ => unreachable!(),
+                                _ => Err(RustqlError::TypeMismatch(format!(
+                                    "Unsupported EXTRACT part '{}'",
+                                    part
+                                ))),
                             }
                         }
                         "quarter" => {
@@ -1599,16 +1602,7 @@ pub fn compare_values(
 }
 
 pub fn format_value(value: &Value) -> String {
-    match value {
-        Value::Null => "NULL".to_string(),
-        Value::Integer(n) => n.to_string(),
-        Value::Float(f) => f.to_string(),
-        Value::Text(s) => s.clone(),
-        Value::Boolean(b) => b.to_string(),
-        Value::Date(d) => d.clone(),
-        Value::Time(t) => t.clone(),
-        Value::DateTime(dt) => dt.clone(),
-    }
+    value.to_string()
 }
 
 pub fn apply_arithmetic(
@@ -1644,7 +1638,9 @@ pub fn apply_arithmetic(
                     Ok(Value::Float(*l as f64 / *r as f64))
                 }
             }
-            _ => unreachable!(),
+            _ => Err(RustqlError::Internal(
+                "Invalid arithmetic operator".to_string(),
+            )),
         },
         _ => {
             let l = to_float(left)?;
@@ -1660,7 +1656,9 @@ pub fn apply_arithmetic(
                         Ok(Value::Float(l / r))
                     }
                 }
-                _ => unreachable!(),
+                _ => Err(RustqlError::Internal(
+                    "Invalid arithmetic operator".to_string(),
+                )),
             }
         }
     }

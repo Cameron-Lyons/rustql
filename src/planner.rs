@@ -959,16 +959,20 @@ impl<'a> QueryPlanner<'a> {
                             null_count += 1;
                         } else {
                             distinct_values.insert(val.clone());
-                            if min_val.is_none()
-                                || compare_values_same_type(val, min_val.as_ref().unwrap())
-                                    == Ordering::Less
-                            {
+                            if match min_val.as_ref() {
+                                Some(current_min) => {
+                                    compare_values_same_type(val, current_min) == Ordering::Less
+                                }
+                                None => true,
+                            } {
                                 min_val = Some(val.clone());
                             }
-                            if max_val.is_none()
-                                || compare_values_same_type(val, max_val.as_ref().unwrap())
-                                    == Ordering::Greater
-                            {
+                            if match max_val.as_ref() {
+                                Some(current_max) => {
+                                    compare_values_same_type(val, current_max) == Ordering::Greater
+                                }
+                                None => true,
+                            } {
                                 max_val = Some(val.clone());
                             }
                         }
@@ -1182,8 +1186,7 @@ impl<'a> QueryPlanner<'a> {
             return Ok(source_columns);
         }
 
-        Ok(stmt
-            .columns
+        stmt.columns
             .iter()
             .map(|column| {
                 let name = match column {
@@ -1193,7 +1196,12 @@ impl<'a> QueryPlanner<'a> {
                     }
                     Column::Function(agg) => format_aggregate_header(agg),
                     Column::Subquery(_) => "<subquery>".to_string(),
-                    Column::All => unreachable!("Column::All handled before projection inference"),
+                    Column::All => {
+                        return Err(RustqlError::Internal(
+                            "Wildcard projection must be expanded before output inference"
+                                .to_string(),
+                        ));
+                    }
                 };
 
                 let data_type = match column {
@@ -1209,7 +1217,7 @@ impl<'a> QueryPlanner<'a> {
                     _ => DataType::Text,
                 };
 
-                ColumnDefinition {
+                Ok(ColumnDefinition {
                     name,
                     data_type,
                     nullable: true,
@@ -1220,9 +1228,9 @@ impl<'a> QueryPlanner<'a> {
                     check: None,
                     auto_increment: false,
                     generated: None,
-                }
+                })
             })
-            .collect())
+            .collect()
     }
 
     fn infer_select_source_columns(

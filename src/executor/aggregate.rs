@@ -665,7 +665,9 @@ pub(crate) fn execute_select_with_grouping_result(
     table: &Table,
     rows: Vec<&Vec<Value>>,
 ) -> Result<SelectResult, RustqlError> {
-    let raw_group_by = stmt.group_by.clone().unwrap();
+    let raw_group_by = stmt.group_by.clone().ok_or_else(|| {
+        RustqlError::Internal("Grouped SELECT execution requires GROUP BY".to_string())
+    })?;
 
     match &raw_group_by {
         GroupByClause::GroupingSets(sets) => {

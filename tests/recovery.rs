@@ -129,6 +129,26 @@ fn json_engine_rejects_corrupt_storage_file() {
     cleanup_storage_files(&path);
 }
 
+#[test]
+fn json_engine_rejects_empty_storage_file() {
+    let path = unique_temp_path("json");
+    cleanup_storage_files(&path);
+    fs::write(&path, "").unwrap();
+
+    let result = Engine::open(EngineOptions {
+        storage: StorageMode::Json { path: path.clone() },
+    });
+    let Err(error) = result else {
+        panic!("expected empty JSON storage to fail");
+    };
+    assert!(
+        error.to_string().contains("JSON storage file") && error.to_string().contains("is empty"),
+        "unexpected error: {error}"
+    );
+
+    cleanup_storage_files(&path);
+}
+
 fn open_disk_engine(path: &Path) -> Engine {
     Engine::open(EngineOptions {
         storage: StorageMode::BTree {

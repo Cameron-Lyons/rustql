@@ -27,4 +27,4 @@ pub use engine::{
     ColumnMeta, CommandResult, CommandTag, Engine, EngineOptions, ExplainAnalyzeResult, PlanTree,
     QueryResult, Row, RowBatch, Session, StorageMode,
 };
-pub use error::{ConstraintKind, RustqlError};
+pub use error::{ConstraintKind, Result, RustqlError};

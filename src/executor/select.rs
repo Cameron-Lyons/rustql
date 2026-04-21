@@ -1116,28 +1116,32 @@ pub(crate) fn execute_select_internal(
             .iter()
             .map(|col| match col {
                 Column::Named { name, alias } => {
-                    (alias.clone().unwrap_or_else(|| name.clone()), col.clone())
+                    Ok((alias.clone().unwrap_or_else(|| name.clone()), col.clone()))
                 }
-                Column::Function(agg) => (
+                Column::Function(agg) => Ok((
                     agg.alias
                         .clone()
                         .unwrap_or_else(|| format!("{:?}", agg.function)),
                     col.clone(),
-                ),
-                Column::Subquery(_) => ("<subquery>".to_string(), col.clone()),
-                Column::Expression { alias, .. } => (
+                )),
+                Column::Subquery(_) => Ok(("<subquery>".to_string(), col.clone())),
+                Column::Expression { alias, .. } => Ok((
                     alias.clone().unwrap_or_else(|| "<expression>".to_string()),
                     col.clone(),
-                ),
-                Column::All => unreachable!(),
+                )),
+                Column::All => Err(RustqlError::Internal(
+                    "Wildcard projection must be expanded before projection planning".to_string(),
+                )),
             })
-            .collect()
+            .collect::<Result<Vec<_>, RustqlError>>()?
     };
 
     let projection_steps: Vec<ProjectionStep> = column_specs
         .iter()
         .map(|(_, col)| match col {
-            Column::All => unreachable!(),
+            Column::All => Err(RustqlError::Internal(
+                "Wildcard projection must be expanded before projection execution".to_string(),
+            )),
             Column::Named { name, .. } => Ok(ProjectionStep::Named(resolve_named_column_index(
                 &all_columns,
                 name,
@@ -1657,9 +1661,9 @@ pub fn eval_subquery_exists_with_outer(
         .get_table(&subquery.from)
         .ok_or_else(|| RustqlError::TableNotFound(subquery.from.clone()))?;
 
-    if subquery.where_clause.is_none() {
+    let Some(where_expr) = subquery.where_clause.as_ref() else {
         return Ok(!table.rows.is_empty());
-    }
+    };
 
     let mut combined_columns: Vec<ColumnDefinition> = outer_columns.to_vec();
     combined_columns.extend(table.columns.clone());
@@ -1667,12 +1671,8 @@ pub fn eval_subquery_exists_with_outer(
 
     for inner_row in &table.rows {
         reset_combined_row(&mut combined_row, outer_row, inner_row);
-        let include_row = evaluate_expression(
-            Some(db),
-            subquery.where_clause.as_ref().unwrap(),
-            &combined_columns,
-            &combined_row,
-        )?;
+        let include_row =
+            evaluate_expression(Some(db), where_expr, &combined_columns, &combined_row)?;
         if include_row {
             return Ok(true);
         }
@@ -1693,9 +1693,9 @@ fn eval_subquery_exists_with_joins(
     let (joined_rows, all_subquery_columns) =
         perform_multiple_joins(None, db, main_table, &subquery.from, &subquery.joins)?;
 
-    if subquery.where_clause.is_none() {
+    let Some(where_expr) = subquery.where_clause.as_ref() else {
         return Ok(!joined_rows.is_empty());
-    }
+    };
 
     let mut combined_columns: Vec<ColumnDefinition> = outer_columns.to_vec();
     combined_columns.extend(all_subquery_columns.clone());
@@ -1703,12 +1703,8 @@ fn eval_subquery_exists_with_joins(
 
     for sub_row in joined_rows {
         reset_combined_row(&mut combined_row, outer_row, &sub_row);
-        let include_row = evaluate_expression(
-            Some(db),
-            subquery.where_clause.as_ref().unwrap(),
-            &combined_columns,
-            &combined_row,
-        )?;
+        let include_row =
+            evaluate_expression(Some(db), where_expr, &combined_columns, &combined_row)?;
         if include_row {
             return Ok(true);
         }

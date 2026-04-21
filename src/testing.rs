@@ -12,18 +12,26 @@ struct TestHarness {
 }
 
 impl TestHarness {
-    fn new() -> Self {
-        Self {
-            engine: Engine::open(EngineOptions {
-                storage: StorageMode::Memory,
-            })
-            .expect("failed to create test engine"),
-        }
+    fn new() -> Result<Self, String> {
+        let engine = Engine::open(EngineOptions {
+            storage: StorageMode::Memory,
+        })
+        .map_err(|err| format!("failed to create test engine: {}", err))?;
+
+        Ok(Self { engine })
     }
 }
 
 thread_local! {
-    static HARNESS: RefCell<TestHarness> = RefCell::new(TestHarness::new());
+    static HARNESS: RefCell<Result<TestHarness, String>> = RefCell::new(TestHarness::new());
+}
+
+fn with_harness<T>(operation: impl FnOnce(&TestHarness) -> Result<T, String>) -> Result<T, String> {
+    HARNESS.with(|harness| {
+        let harness = harness.borrow();
+        let harness = harness.as_ref().map_err(|err| err.clone())?;
+        operation(harness)
+    })
 }
 
 pub fn reset_database() {
@@ -33,8 +41,7 @@ pub fn reset_database() {
 }
 
 pub fn process_query(sql: &str) -> Result<String, String> {
-    HARNESS.with(|harness| {
-        let harness = harness.borrow();
+    with_harness(|harness| {
         let mut session = harness.engine.session();
         let statements = parser::parse_script(lexer::tokenize(sql).map_err(|err| err.to_string())?)
             .map_err(|err| err.to_string())?;
@@ -49,24 +56,21 @@ pub fn process_query(sql: &str) -> Result<String, String> {
 }
 
 pub fn execute_sql(sql: &str) -> Result<QueryResult, String> {
-    HARNESS.with(|harness| {
-        let harness = harness.borrow();
+    with_harness(|harness| {
         let mut session = harness.engine.session();
         session.execute_one(sql).map_err(|err| err.to_string())
     })
 }
 
 pub fn execute_script_results(sql: &str) -> Result<Vec<QueryResult>, String> {
-    HARNESS.with(|harness| {
-        let harness = harness.borrow();
+    with_harness(|harness| {
         let mut session = harness.engine.session();
         session.execute_script(sql).map_err(|err| err.to_string())
     })
 }
 
 pub fn execute_statement(statement: Statement) -> Result<QueryResult, String> {
-    HARNESS.with(|harness| {
-        let harness = harness.borrow();
+    with_harness(|harness| {
         let mut session = harness.engine.session();
         session
             .execute_statement(statement)
@@ -93,8 +97,8 @@ pub fn command_result(sql: &str) -> Result<CommandResult, String> {
     }
 }
 
-pub fn snapshot_database() -> Database {
-    HARNESS.with(|harness| harness.borrow().engine.snapshot_database())
+pub fn snapshot_database() -> Result<Database, String> {
+    with_harness(|harness| Ok(harness.engine.snapshot_database()))
 }
 
 pub fn render_results(results: &[QueryResult]) -> String {
@@ -243,14 +247,5 @@ fn render_rows(rows: &RowBatch) -> String {
 }
 
 fn render_value(value: &Value) -> String {
-    match value {
-        Value::Null => "NULL".to_string(),
-        Value::Integer(value) => value.to_string(),
-        Value::Float(value) => value.to_string(),
-        Value::Text(value) => value.clone(),
-        Value::Boolean(value) => value.to_string(),
-        Value::Date(value) => value.clone(),
-        Value::Time(value) => value.clone(),
-        Value::DateTime(value) => value.clone(),
-    }
+    value.to_string()
 }

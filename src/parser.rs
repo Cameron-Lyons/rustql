@@ -639,7 +639,12 @@ impl Parser {
                         crate::ast::SetOperation::Except
                     }
                 }
-                _ => unreachable!(),
+                token => {
+                    return Err(RustqlError::ParseError(format!(
+                        "Expected set operation, found {:?}",
+                        token
+                    )));
+                }
             };
             let other_stmt = self.parse_select_inner(Vec::new())?;
             Some((set_op_type, Box::new(other_stmt)))
@@ -1065,7 +1070,12 @@ impl Parser {
         if let Token::Identifier(ref _name) = *self.current_token() {
             let window_name = match self.advance() {
                 Token::Identifier(n) => n,
-                _ => unreachable!(),
+                token => {
+                    return Err(RustqlError::ParseError(format!(
+                        "Expected window name, found {:?}",
+                        token
+                    )));
+                }
             };
             return Ok((
                 vec![Expression::Column(format!("__window_ref:{}", window_name))],

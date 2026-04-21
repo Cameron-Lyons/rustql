@@ -151,14 +151,5 @@ fn render_rows(rows: &RowBatch) -> String {
 }
 
 fn render_value(value: &Value) -> String {
-    match value {
-        Value::Null => "NULL".to_string(),
-        Value::Integer(value) => value.to_string(),
-        Value::Float(value) => value.to_string(),
-        Value::Text(value) => value.clone(),
-        Value::Boolean(value) => value.to_string(),
-        Value::Date(value) => value.clone(),
-        Value::Time(value) => value.clone(),
-        Value::DateTime(value) => value.clone(),
-    }
+    value.to_string()
 }

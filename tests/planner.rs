@@ -22,7 +22,7 @@ fn test_query_planner_basic() {
 
     process_query("CREATE INDEX idx_age ON users (age)").unwrap();
 
-    let db = snapshot_database();
+    let db = snapshot_database().unwrap();
 
     let tokens = lexer::tokenize("SELECT * FROM users WHERE age > 25").unwrap();
     let statement = parser::parse(tokens).unwrap();
@@ -48,7 +48,7 @@ fn test_query_planner_join() {
     process_query("INSERT INTO users VALUES (1, 'Alice')").unwrap();
     process_query("INSERT INTO orders VALUES (1, 1, 100.0)").unwrap();
 
-    let db = snapshot_database();
+    let db = snapshot_database().unwrap();
 
     let tokens = lexer::tokenize(
         "SELECT users.name, orders.amount FROM users JOIN orders ON users.id = orders.user_id",

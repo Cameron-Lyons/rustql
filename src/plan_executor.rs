@@ -413,11 +413,12 @@ impl<'a> PlanExecutor<'a> {
                 let include = if matches!(join_type, JoinType::Cross) {
                     true
                 } else {
-                    self.evaluate_expression(
-                        condition,
-                        combined_columns.as_ref().unwrap(),
-                        &combined_row,
-                    )?
+                    let combined_columns = combined_columns.as_ref().ok_or_else(|| {
+                        RustqlError::Internal(
+                            "Join condition evaluation is missing combined columns".to_string(),
+                        )
+                    })?;
+                    self.evaluate_expression(condition, combined_columns, &combined_row)?
                 };
 
                 if include {
@@ -961,10 +962,10 @@ impl<'a> PlanExecutor<'a> {
                 prepared_inputs[input_idx] =
                     Some(self.prepare_aggregate_input(&aggregates[input_idx], rows, columns)?);
             }
-            values.push(self.compute_aggregate_from_input(
-                aggregate,
-                prepared_inputs[input_idx].as_ref().unwrap(),
-            )?);
+            let prepared_input = prepared_inputs[input_idx].as_ref().ok_or_else(|| {
+                RustqlError::Internal("Aggregate input was not prepared".to_string())
+            })?;
+            values.push(self.compute_aggregate_from_input(aggregate, prepared_input)?);
         }
 
         Ok(values)
@@ -1417,20 +1418,23 @@ impl<'a> PlanExecutor<'a> {
                     .iter()
                     .map(|col| match col {
                         Column::Named { name, alias } => {
-                            (alias.clone().unwrap_or_else(|| name.clone()), col.clone())
+                            Ok((alias.clone().unwrap_or_else(|| name.clone()), col.clone()))
                         }
-                        Column::Expression { alias, .. } => (
+                        Column::Expression { alias, .. } => Ok((
                             alias.clone().unwrap_or_else(|| "<expression>".to_string()),
                             col.clone(),
-                        ),
-                        Column::Function(agg) => (
+                        )),
+                        Column::Function(agg) => Ok((
                             crate::executor::aggregate::format_aggregate_header(agg),
                             col.clone(),
-                        ),
-                        Column::Subquery(_) => ("<subquery>".to_string(), col.clone()),
-                        Column::All => unreachable!(),
+                        )),
+                        Column::Subquery(_) => Ok(("<subquery>".to_string(), col.clone())),
+                        Column::All => Err(RustqlError::Internal(
+                            "Wildcard projection must be expanded before plan projection"
+                                .to_string(),
+                        )),
                     })
-                    .collect()
+                    .collect::<Result<Vec<_>, RustqlError>>()?
             };
 
         let aggregate_count = select_stmt
@@ -1475,7 +1479,10 @@ impl<'a> PlanExecutor<'a> {
             for (_, col) in &column_specs {
                 let val = match col {
                     Column::All => {
-                        unreachable!("Column::All should not appear in column_specs")
+                        return Err(RustqlError::Internal(
+                            "Wildcard projection must be expanded before plan projection"
+                                .to_string(),
+                        ));
                     }
                     Column::Named { name, .. } => {
                         let idx = find_result_column_index(&result.columns, name)

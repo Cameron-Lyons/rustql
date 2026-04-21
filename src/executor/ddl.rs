@@ -247,7 +247,9 @@ pub fn execute_alter_table(
             save_if_not_in_transaction(context, &db)?;
             Ok(command_result(CommandTag::AlterTable, 0))
         }
-        AlterOperation::RenameTable(_) => unreachable!(),
+        AlterOperation::RenameTable(_) => Err(RustqlError::Internal(
+            "ALTER TABLE RENAME must be handled before table lookup".to_string(),
+        )),
         AlterOperation::AddConstraint(constraint) => {
             let constraint_cols = match &constraint {
                 crate::ast::TableConstraint::PrimaryKey { columns, .. } => columns.clone(),
@@ -365,12 +367,16 @@ pub fn execute_create_index(
                 filter_expr: stmt.where_clause.clone(),
             };
 
+            let first_column_position = column_positions.first().copied().ok_or_else(|| {
+                RustqlError::Internal("CREATE INDEX requires at least one column".to_string())
+            })?;
+
             for (row_id, row) in table.iter_rows_with_ids() {
                 if !row_matches_index_filter(&db, table, index.filter_expr.as_ref(), row) {
                     continue;
                 }
                 let value = row
-                    .get(*column_positions.first().unwrap())
+                    .get(first_column_position)
                     .cloned()
                     .unwrap_or(Value::Null);
                 index.entries.entry(value).or_default().push(row_id);
