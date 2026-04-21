@@ -241,25 +241,6 @@ impl BTreeStorageEngine {
 
     fn write_journal_locked(&self, journal: &TransactionJournal) -> Result<(), RustqlError> {
         let path = self.journal_path();
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(&path)
-            .map_err(|e| {
-                RustqlError::StorageError(format!(
-                    "Failed to create transaction journal '{}': {}",
-                    path.display(),
-                    e
-                ))
-            })?;
-
-        write_versioned_header(
-            &mut file,
-            JOURNAL_MAGIC,
-            JOURNAL_VERSION,
-            "transaction journal",
-        )?;
         let payload = serde_json::to_vec(journal).map_err(|e| {
             RustqlError::StorageError(format!(
                 "Failed to serialize transaction journal '{}': {}",
@@ -267,20 +248,13 @@ impl BTreeStorageEngine {
                 e
             ))
         })?;
-        file.write_all(&payload).map_err(|e| {
-            RustqlError::StorageError(format!(
-                "Failed to write transaction journal '{}': {}",
-                path.display(),
-                e
-            ))
-        })?;
-        file.flush().map_err(|e| {
-            RustqlError::StorageError(format!(
-                "Failed to flush transaction journal '{}': {}",
-                path.display(),
-                e
-            ))
-        })
+        let mut data = Vec::with_capacity(FILE_HEADER_SIZE + payload.len());
+        data.extend_from_slice(&JOURNAL_MAGIC);
+        data.extend_from_slice(&JOURNAL_VERSION.to_le_bytes());
+        data.extend_from_slice(&HEADER_RESERVED.to_le_bytes());
+        data.extend_from_slice(&payload);
+
+        super::atomic_write(&path, &data)
     }
 
     fn read_journal_locked(&self) -> Result<Option<TransactionJournal>, RustqlError> {
@@ -340,7 +314,8 @@ impl BTreeStorageEngine {
                 path.display(),
                 e
             ))
-        })
+        })?;
+        super::sync_parent_dir(&path)
     }
 
     fn recover_if_needed_locked(&self) -> Result<(), RustqlError> {
@@ -364,8 +339,17 @@ impl BTreeStorageEngine {
     fn save_locked(&self, db: &Database) -> Result<(), RustqlError> {
         let mut db = db.clone();
         db.normalize_row_ids();
-        let mut file = BTreeFile::create(&self.data_path)?;
-        let result = file.write_database_via_pages(&db);
+        let temp_path = super::storage_temp_path(&self.data_path);
+        let result = (|| {
+            let mut file = BTreeFile::create(&temp_path)?;
+            file.write_database_via_pages(&db)?;
+            file.sync_all()?;
+            drop(file);
+            super::rename_synced(&temp_path, &self.data_path)
+        })();
+        if result.is_err() {
+            super::cleanup_temp_file(&temp_path);
+        }
         self.clear_cache();
         result
     }
@@ -694,6 +678,12 @@ impl BTreeFile {
                 RustqlError::StorageError(format!("Failed to create BTree storage file: {}", e))
             })?;
         Ok(BTreeFile { file })
+    }
+
+    fn sync_all(&self) -> Result<(), RustqlError> {
+        self.file.sync_all().map_err(|e| {
+            RustqlError::StorageError(format!("Failed to sync BTree storage file: {}", e))
+        })
     }
 
     #[allow(dead_code)]

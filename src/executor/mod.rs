@@ -1,9 +1,11 @@
-pub mod aggregate;
-pub mod ddl;
-pub mod dml;
-pub mod expr;
-pub mod join;
-pub mod select;
+#[allow(dead_code)]
+pub(crate) mod aggregate;
+pub(crate) mod ddl;
+pub(crate) mod dml;
+#[allow(dead_code)]
+pub(crate) mod expr;
+pub(crate) mod join;
+pub(crate) mod select;
 
 use crate::ast::*;
 use crate::database::Database;
@@ -13,14 +15,14 @@ use crate::storage::StorageEngine;
 use crate::wal::{self, WalState};
 use std::sync::{Arc, Mutex, RwLock};
 
-pub struct ExecutionContext {
+pub(crate) struct ExecutionContext {
     database: RwLock<Database>,
     wal_state: Mutex<WalState>,
     storage: Option<Arc<dyn StorageEngine>>,
 }
 
 impl ExecutionContext {
-    pub fn new(database: Database, storage: Option<Arc<dyn StorageEngine>>) -> Self {
+    pub(crate) fn new(database: Database, storage: Option<Arc<dyn StorageEngine>>) -> Self {
         Self {
             database: RwLock::new(database),
             wal_state: Mutex::new(WalState::default()),
@@ -28,7 +30,7 @@ impl ExecutionContext {
         }
     }
 
-    pub fn database_snapshot(&self) -> Database {
+    pub(crate) fn database_snapshot(&self) -> Database {
         self.database
             .read()
             .unwrap_or_else(|err| err.into_inner())
@@ -152,7 +154,7 @@ fn infer_data_type(rows: &[Vec<Value>], idx: usize) -> DataType {
         .unwrap_or(DataType::Text)
 }
 
-pub fn execute(
+pub(crate) fn execute(
     context: &ExecutionContext,
     statement: Statement,
 ) -> Result<QueryResult, RustqlError> {
@@ -194,7 +196,8 @@ pub fn execute(
     }
 }
 
-pub fn reset_database_state(context: &ExecutionContext) {
+#[allow(dead_code)]
+pub(crate) fn reset_database_state(context: &ExecutionContext) {
     {
         let mut db = get_database_write(context);
         db.tables.clear();

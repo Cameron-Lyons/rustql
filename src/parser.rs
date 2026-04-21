@@ -1,11 +1,11 @@
 use crate::ast::*;
 use crate::error::RustqlError;
-use crate::lexer::Token;
+use crate::lexer::{SourceSpan, SpannedToken, Token};
 
 mod entry;
 mod token_format;
 
-pub use entry::{parse, parse_script};
+pub use entry::{parse, parse_script, parse_script_spanned, parse_spanned};
 use token_format::{token_to_sql, token_to_string};
 
 type ParseOverClauseResult =
@@ -13,16 +13,50 @@ type ParseOverClauseResult =
 
 pub struct Parser {
     tokens: Vec<Token>,
+    spans: Vec<Option<SourceSpan>>,
     current: usize,
 }
 
 impl Parser {
     fn new(tokens: Vec<Token>) -> Self {
-        Parser { tokens, current: 0 }
+        let spans = vec![None; tokens.len()];
+        Parser {
+            tokens,
+            spans,
+            current: 0,
+        }
+    }
+
+    fn new_spanned(tokens: Vec<SpannedToken>) -> Self {
+        let (tokens, spans): (Vec<_>, Vec<_>) = tokens
+            .into_iter()
+            .map(|spanned| (spanned.token, Some(spanned.span)))
+            .unzip();
+        Parser {
+            tokens,
+            spans,
+            current: 0,
+        }
     }
 
     fn current_token(&self) -> &Token {
         self.tokens.get(self.current).unwrap_or(&Token::Eof)
+    }
+
+    fn current_span(&self) -> Option<SourceSpan> {
+        self.spans.get(self.current).copied().flatten()
+    }
+
+    fn with_current_location(&self, err: RustqlError) -> RustqlError {
+        match (err, self.current_span()) {
+            (RustqlError::ParseError(message), Some(span)) if !message.contains(" at line ") => {
+                RustqlError::ParseError(format!(
+                    "{} at line {}, column {}",
+                    message, span.start.line, span.start.column
+                ))
+            }
+            (err, _) => err,
+        }
     }
 
     #[allow(dead_code)]

@@ -112,8 +112,8 @@ impl Session<'_> {
             return Ok(Vec::new());
         }
 
-        let tokens = lexer::tokenize(sql)?;
-        let statements = parser::parse_script(tokens)?;
+        let tokens = lexer::tokenize_spanned(sql)?;
+        let statements = parser::parse_script_spanned(tokens)?;
         let mut results = Vec::with_capacity(statements.len());
         for statement in statements {
             results.push(self.execute_statement(statement)?);
@@ -122,8 +122,8 @@ impl Session<'_> {
     }
 
     pub fn execute_one(&mut self, sql: &str) -> Result<QueryResult, RustqlError> {
-        let tokens = lexer::tokenize(sql)?;
-        let statement = parser::parse(tokens)?;
+        let tokens = lexer::tokenize_spanned(sql)?;
+        let statement = parser::parse_spanned(tokens)?;
         self.execute_statement(statement)
     }
 

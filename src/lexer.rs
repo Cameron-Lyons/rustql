@@ -249,6 +249,29 @@ pub enum Token {
     Eof,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SourceLocation {
+    pub line: usize,
+    pub column: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SourceSpan {
+    pub start: SourceLocation,
+    pub end: SourceLocation,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpannedToken {
+    pub token: Token,
+    pub span: SourceSpan,
+}
+
+pub fn tokenize_spanned(input: &str) -> Result<Vec<SpannedToken>, RustqlError> {
+    let tokens = tokenize(input)?;
+    Ok(assign_spans(input, tokens))
+}
+
 pub fn tokenize(input: &str) -> Result<Vec<Token>, RustqlError> {
     let mut tokens = Vec::new();
     let mut chars = input.chars().peekable();
@@ -437,6 +460,185 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, RustqlError> {
 
     tokens.push(Token::Eof);
     Ok(tokens)
+}
+
+struct SpanCursor<'a> {
+    input: &'a str,
+    byte_index: usize,
+    line: usize,
+    column: usize,
+}
+
+impl<'a> SpanCursor<'a> {
+    fn new(input: &'a str) -> Self {
+        Self {
+            input,
+            byte_index: 0,
+            line: 1,
+            column: 1,
+        }
+    }
+
+    fn location(&self) -> SourceLocation {
+        SourceLocation {
+            line: self.line,
+            column: self.column,
+        }
+    }
+
+    fn peek(&self) -> Option<char> {
+        self.input.get(self.byte_index..)?.chars().next()
+    }
+
+    fn peek_next(&self) -> Option<char> {
+        let mut chars = self.input.get(self.byte_index..)?.chars();
+        chars.next()?;
+        chars.next()
+    }
+
+    fn bump(&mut self) -> Option<char> {
+        let ch = self.peek()?;
+        self.byte_index += ch.len_utf8();
+        if ch == '\n' {
+            self.line += 1;
+            self.column = 1;
+        } else {
+            self.column += 1;
+        }
+        Some(ch)
+    }
+
+    fn skip_whitespace(&mut self) {
+        while matches!(self.peek(), Some(' ' | '\t' | '\n' | '\r')) {
+            self.bump();
+        }
+    }
+
+    fn consume_fixed(&mut self, text: &str) {
+        for _ in text.chars() {
+            self.bump();
+        }
+    }
+
+    fn consume_number_token(&mut self) {
+        if self.peek() == Some('-') {
+            self.bump();
+        }
+
+        let mut has_dot = false;
+        while let Some(ch) = self.peek() {
+            if ch.is_ascii_digit() {
+                self.bump();
+            } else if ch == '.' && !has_dot {
+                has_dot = true;
+                self.bump();
+            } else {
+                break;
+            }
+        }
+    }
+
+    fn consume_identifier_token(&mut self) {
+        if self.peek() == Some('`') {
+            self.bump();
+            while let Some(ch) = self.bump() {
+                if ch == '`' {
+                    break;
+                }
+            }
+            return;
+        }
+
+        self.consume_identifier_part();
+        while self.peek() == Some('.')
+            && self
+                .peek_next()
+                .is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+        {
+            self.bump();
+            self.consume_identifier_part();
+        }
+    }
+
+    fn consume_identifier_part(&mut self) {
+        while let Some(ch) = self.peek() {
+            if ch.is_ascii_alphanumeric() || ch == '_' {
+                self.bump();
+            } else {
+                break;
+            }
+        }
+    }
+
+    fn consume_string_token(&mut self) {
+        let Some(delimiter @ ('\'' | '"')) = self.peek() else {
+            return;
+        };
+        self.bump();
+
+        let mut escaped = false;
+        while let Some(ch) = self.bump() {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == delimiter {
+                break;
+            }
+        }
+    }
+}
+
+fn assign_spans(input: &str, tokens: Vec<Token>) -> Vec<SpannedToken> {
+    let mut cursor = SpanCursor::new(input);
+    tokens
+        .into_iter()
+        .map(|token| {
+            cursor.skip_whitespace();
+            let start = cursor.location();
+            match &token {
+                Token::Eof => {}
+                Token::Identifier(_) => cursor.consume_identifier_token(),
+                Token::Number(_) | Token::Float(_) => cursor.consume_number_token(),
+                Token::StringLiteral(_) => cursor.consume_string_token(),
+                _ => {
+                    if let Some(text) = fixed_token_text(&token) {
+                        cursor.consume_fixed(text);
+                    } else {
+                        cursor.consume_identifier_token();
+                    }
+                }
+            }
+            let end = cursor.location();
+            SpannedToken {
+                token,
+                span: SourceSpan { start, end },
+            }
+        })
+        .collect()
+}
+
+fn fixed_token_text(token: &Token) -> Option<&'static str> {
+    match token {
+        Token::Dot => Some("."),
+        Token::LeftParen => Some("("),
+        Token::RightParen => Some(")"),
+        Token::Comma => Some(","),
+        Token::Semicolon => Some(";"),
+        Token::Star => Some("*"),
+        Token::Plus => Some("+"),
+        Token::Minus => Some("-"),
+        Token::Divide => Some("/"),
+        Token::Equal => Some("="),
+        Token::NotEqual => Some("<>"),
+        Token::LessThan => Some("<"),
+        Token::LessThanOrEqual => Some("<="),
+        Token::GreaterThan => Some(">"),
+        Token::GreaterThanOrEqual => Some(">="),
+        Token::Concat => Some("||"),
+        Token::DoubleColon => Some("::"),
+        _ => None,
+    }
 }
 
 fn read_identifier(chars: &mut std::iter::Peekable<std::str::Chars>) -> String {

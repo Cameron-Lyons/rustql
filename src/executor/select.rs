@@ -16,13 +16,13 @@ use super::expr::{
     evaluate_value_expression,
 };
 use super::join::perform_multiple_joins;
-use super::{ExecutionContext, SelectResult, get_database_read, get_database_write, rows_result};
+use super::{ExecutionContext, SelectResult, get_database_read, rows_result};
 
 pub fn execute_select(
     context: &ExecutionContext,
     stmt: SelectStatement,
 ) -> Result<QueryResult, RustqlError> {
-    let mut db = get_database_write(context);
+    let mut db = context.database_snapshot();
     let result = execute_select_in_db(Some(context), stmt, &mut db)?;
     Ok(rows_result(result))
 }
@@ -606,7 +606,7 @@ pub(crate) fn explain_select(
     }
     drop(db);
 
-    let mut db = get_database_write(context);
+    let mut db = context.database_snapshot();
     plan_select_in_db(Some(context), stmt, &mut db)
 }
 

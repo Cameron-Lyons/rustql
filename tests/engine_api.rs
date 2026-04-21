@@ -43,6 +43,19 @@ fn default_engine_options_use_json_storage() {
 }
 
 #[test]
+fn execute_one_parse_errors_include_line_and_column() {
+    let engine = Engine::open(EngineOptions {
+        storage: StorageMode::Memory,
+    })
+    .unwrap();
+    let mut session = engine.session();
+
+    let error = session.execute_one("SELECT FROM users").unwrap_err();
+
+    assert!(error.to_string().contains("line 1, column"));
+}
+
+#[test]
 fn explicit_json_storage_persists_between_engines() {
     let _guard = test_guard();
     let path = unique_temp_path("engine_json", "json");

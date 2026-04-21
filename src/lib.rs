@@ -5,14 +5,19 @@ pub mod error;
 pub mod executor;
 pub mod lexer;
 pub mod parser;
-pub mod plan_executor;
+#[allow(dead_code)]
+mod plan_executor;
 pub mod planner;
-pub mod storage;
+#[allow(dead_code)]
+mod storage;
 #[doc(hidden)]
 pub mod testing;
-pub mod wal;
+#[allow(dead_code)]
+mod wal;
 
+pub use database::Database;
 pub use engine::{
     ColumnMeta, CommandResult, CommandTag, Engine, EngineOptions, PlanTree, QueryResult, Row,
     RowBatch, Session, StorageMode,
 };
+pub use error::{ConstraintKind, RustqlError};

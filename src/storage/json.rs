@@ -58,9 +58,7 @@ impl StorageEngine for JsonStorageEngine {
         let data = serde_json::to_string_pretty(&db).map_err(|e| {
             RustqlError::StorageError(format!("Failed to serialize database: {}", e))
         })?;
-        fs::write(&self.path, data).map_err(|e| {
-            RustqlError::StorageError(format!("Failed to write database file: {}", e))
-        })?;
+        super::atomic_write(&self.path, data.as_bytes())?;
         Ok(())
     }
 }
