@@ -1345,6 +1345,10 @@ impl Parser {
                 self.advance();
                 Expression::Value(Value::Text(s))
             }
+            Token::Null => {
+                self.advance();
+                Expression::Value(Value::Null)
+            }
             Token::GenerateSeries
             | Token::Filter
             | Token::Lateral

@@ -659,7 +659,7 @@ fn execute_select_in_db(
                 rows: execution.rows,
             });
         }
-        execute_select_internal(context, rewritten, db)
+        execute_select_legacy_internal(context, rewritten, db)
     })();
     temp_scope.cleanup(db);
     result
@@ -951,6 +951,14 @@ pub(crate) fn execute_select_internal(
         });
     }
 
+    execute_select_legacy_internal(context, stmt, db)
+}
+
+fn execute_select_legacy_internal(
+    context: Option<&ExecutionContext>,
+    stmt: SelectStatement,
+    db: &Database,
+) -> Result<SelectResult, RustqlError> {
     if let Some(ref tf) = stmt.from_function
         && tf.name == "generate_series"
     {

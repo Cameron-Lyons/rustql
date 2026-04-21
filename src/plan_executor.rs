@@ -1,6 +1,7 @@
 use crate::ast::*;
 use crate::database::{Database, Table};
 use crate::error::RustqlError;
+use crate::executor::expr::apply_arithmetic;
 use crate::executor::select::execute_select_internal;
 use crate::planner::PlanNode;
 use std::cmp::Ordering;
@@ -988,7 +989,7 @@ impl<'a> PlanExecutor<'a> {
                     BinaryOperator::Plus
                     | BinaryOperator::Minus
                     | BinaryOperator::Multiply
-                    | BinaryOperator::Divide => self.apply_arithmetic(&left_val, &right_val, op),
+                    | BinaryOperator::Divide => apply_arithmetic(&left_val, &right_val, op),
                     _ => Err(RustqlError::Internal(
                         "Only arithmetic operators are supported in SELECT expressions".to_string(),
                     )),
@@ -1012,59 +1013,6 @@ impl<'a> PlanExecutor<'a> {
             _ => Err(RustqlError::Internal(
                 "Complex expressions not yet supported in SELECT".to_string(),
             )),
-        }
-    }
-
-    fn apply_arithmetic(
-        &self,
-        left: &Value,
-        right: &Value,
-        op: &BinaryOperator,
-    ) -> Result<Value, RustqlError> {
-        let to_float = |value: &Value| -> Result<f64, RustqlError> {
-            match value {
-                Value::Integer(i) => Ok(*i as f64),
-                Value::Float(f) => Ok(*f),
-                Value::Null => Ok(0.0),
-                _ => Err(RustqlError::TypeMismatch(
-                    "Arithmetic requires numeric values".to_string(),
-                )),
-            }
-        };
-
-        match (left, right) {
-            (Value::Integer(l), Value::Integer(r)) => match op {
-                BinaryOperator::Plus => Ok(Value::Integer(l + r)),
-                BinaryOperator::Minus => Ok(Value::Integer(l - r)),
-                BinaryOperator::Multiply => Ok(Value::Integer(l * r)),
-                BinaryOperator::Divide => {
-                    if *r == 0 {
-                        Err(RustqlError::DivisionByZero)
-                    } else if l % r == 0 {
-                        Ok(Value::Integer(l / r))
-                    } else {
-                        Ok(Value::Float(*l as f64 / *r as f64))
-                    }
-                }
-                _ => unreachable!(),
-            },
-            _ => {
-                let l = to_float(left)?;
-                let r = to_float(right)?;
-                match op {
-                    BinaryOperator::Plus => Ok(Value::Float(l + r)),
-                    BinaryOperator::Minus => Ok(Value::Float(l - r)),
-                    BinaryOperator::Multiply => Ok(Value::Float(l * r)),
-                    BinaryOperator::Divide => {
-                        if r.abs() < f64::EPSILON {
-                            Err(RustqlError::DivisionByZero)
-                        } else {
-                            Ok(Value::Float(l / r))
-                        }
-                    }
-                    _ => unreachable!(),
-                }
-            }
         }
     }
 
@@ -1957,7 +1905,7 @@ impl<'a> PlanExecutor<'a> {
                     BinaryOperator::Plus
                     | BinaryOperator::Minus
                     | BinaryOperator::Multiply
-                    | BinaryOperator::Divide => self.apply_arithmetic(&left_val, &right_val, op),
+                    | BinaryOperator::Divide => apply_arithmetic(&left_val, &right_val, op),
                     _ => Err(RustqlError::Internal(
                         "Only arithmetic operators are supported in HAVING expressions".to_string(),
                     )),

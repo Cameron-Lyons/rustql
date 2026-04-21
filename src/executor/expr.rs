@@ -1602,13 +1602,16 @@ pub fn apply_arithmetic(
     right: &Value,
     op: &BinaryOperator,
 ) -> Result<Value, RustqlError> {
+    if matches!(left, Value::Null) || matches!(right, Value::Null) {
+        return Ok(Value::Null);
+    }
+
     let to_float = |value: &Value| -> Result<f64, RustqlError> {
         match value {
             Value::Integer(i) => Ok(*i as f64),
             Value::Float(f) => Ok(*f),
-            Value::Null => Ok(0.0),
             _ => Err(RustqlError::TypeMismatch(
-                "Arithmetic in ORDER BY requires numeric values".to_string(),
+                "Arithmetic requires numeric values".to_string(),
             )),
         }
     };

@@ -56,6 +56,53 @@ fn execute_one_parse_errors_include_line_and_column() {
 }
 
 #[test]
+fn arithmetic_with_null_returns_null() {
+    let engine = Engine::open(EngineOptions {
+        storage: StorageMode::Memory,
+    })
+    .unwrap();
+    let mut session = engine.session();
+
+    let result = session.execute_one("SELECT NULL + 5 AS value").unwrap();
+
+    match result {
+        QueryResult::Rows(rows) => {
+            assert_eq!(rows.rows, vec![vec![ast::Value::Null]]);
+        }
+        other => panic!("expected rows, got {other:?}"),
+    }
+}
+
+#[test]
+fn planned_arithmetic_with_null_returns_null() {
+    let engine = Engine::open(EngineOptions {
+        storage: StorageMode::Memory,
+    })
+    .unwrap();
+    let mut session = engine.session();
+
+    session
+        .execute_script(
+            "
+            CREATE TABLE null_math (a INTEGER, b INTEGER);
+            INSERT INTO null_math VALUES (10, NULL);
+            ",
+        )
+        .unwrap();
+
+    let result = session
+        .execute_one("SELECT a + b AS value FROM null_math")
+        .unwrap();
+
+    match result {
+        QueryResult::Rows(rows) => {
+            assert_eq!(rows.rows, vec![vec![ast::Value::Null]]);
+        }
+        other => panic!("expected rows, got {other:?}"),
+    }
+}
+
+#[test]
 fn explicit_json_storage_persists_between_engines() {
     let _guard = test_guard();
     let path = unique_temp_path("engine_json", "json");
