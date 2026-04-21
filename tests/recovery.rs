@@ -107,6 +107,28 @@ fn test_partial_index_filter_persists_across_reload() {
     cleanup_storage_files(&path);
 }
 
+#[test]
+fn json_engine_rejects_corrupt_storage_file() {
+    let path = unique_temp_path("json");
+    cleanup_storage_files(&path);
+    fs::write(&path, "{ this is not valid json").unwrap();
+
+    let result = Engine::open(EngineOptions {
+        storage: StorageMode::Json { path: path.clone() },
+    });
+    let Err(error) = result else {
+        panic!("expected corrupt JSON storage to fail");
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("Failed to parse JSON storage file"),
+        "unexpected error: {error}"
+    );
+
+    cleanup_storage_files(&path);
+}
+
 fn open_disk_engine(path: &Path) -> Engine {
     Engine::open(EngineOptions {
         storage: StorageMode::BTree {

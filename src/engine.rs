@@ -107,6 +107,10 @@ pub struct Session<'e> {
 }
 
 impl Session<'_> {
+    pub fn execute(&mut self, sql: &str) -> Result<Vec<QueryResult>, RustqlError> {
+        self.execute_script(sql)
+    }
+
     pub fn execute_script(&mut self, sql: &str) -> Result<Vec<QueryResult>, RustqlError> {
         if sql.trim().is_empty() {
             return Ok(Vec::new());

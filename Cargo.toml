@@ -3,6 +3,12 @@ name = "rustql"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
+rust-version = "1.87"
+description = "A small SQL database engine and REPL written in Rust."
+readme = "README.md"
+repository = "https://github.com/Cameron-Lyons/rustql"
+keywords = ["database", "sql", "query-engine", "repl"]
+categories = ["database-implementations", "command-line-utilities"]
 
 [lib]
 name = "rustql"

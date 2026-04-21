@@ -5,7 +5,7 @@ use crate::{
     StorageMode,
 };
 use crate::{lexer, parser};
-use std::sync::{Mutex, OnceLock};
+use std::cell::RefCell;
 
 struct TestHarness {
     engine: Engine,
@@ -22,48 +22,56 @@ impl TestHarness {
     }
 }
 
-fn harness() -> &'static Mutex<TestHarness> {
-    static HARNESS: OnceLock<Mutex<TestHarness>> = OnceLock::new();
-    HARNESS.get_or_init(|| Mutex::new(TestHarness::new()))
+thread_local! {
+    static HARNESS: RefCell<TestHarness> = RefCell::new(TestHarness::new());
 }
 
 pub fn reset_database() {
-    let mut harness = harness().lock().unwrap_or_else(|err| err.into_inner());
-    *harness = TestHarness::new();
+    HARNESS.with(|harness| {
+        *harness.borrow_mut() = TestHarness::new();
+    });
 }
 
 pub fn process_query(sql: &str) -> Result<String, String> {
-    let harness = harness().lock().unwrap_or_else(|err| err.into_inner());
-    let mut session = harness.engine.session();
-    let statements = parser::parse_script(lexer::tokenize(sql).map_err(|err| err.to_string())?)
-        .map_err(|err| err.to_string())?;
-    let results = session.execute_script(sql).map_err(|err| err.to_string())?;
-    Ok(statements
-        .iter()
-        .zip(results.iter())
-        .map(|(statement, result)| render_result_for_statement(statement, result))
-        .collect::<Vec<_>>()
-        .join("\n"))
+    HARNESS.with(|harness| {
+        let harness = harness.borrow();
+        let mut session = harness.engine.session();
+        let statements = parser::parse_script(lexer::tokenize(sql).map_err(|err| err.to_string())?)
+            .map_err(|err| err.to_string())?;
+        let results = session.execute_script(sql).map_err(|err| err.to_string())?;
+        Ok(statements
+            .iter()
+            .zip(results.iter())
+            .map(|(statement, result)| render_result_for_statement(statement, result))
+            .collect::<Vec<_>>()
+            .join("\n"))
+    })
 }
 
 pub fn execute_sql(sql: &str) -> Result<QueryResult, String> {
-    let harness = harness().lock().unwrap_or_else(|err| err.into_inner());
-    let mut session = harness.engine.session();
-    session.execute_one(sql).map_err(|err| err.to_string())
+    HARNESS.with(|harness| {
+        let harness = harness.borrow();
+        let mut session = harness.engine.session();
+        session.execute_one(sql).map_err(|err| err.to_string())
+    })
 }
 
 pub fn execute_script_results(sql: &str) -> Result<Vec<QueryResult>, String> {
-    let harness = harness().lock().unwrap_or_else(|err| err.into_inner());
-    let mut session = harness.engine.session();
-    session.execute_script(sql).map_err(|err| err.to_string())
+    HARNESS.with(|harness| {
+        let harness = harness.borrow();
+        let mut session = harness.engine.session();
+        session.execute_script(sql).map_err(|err| err.to_string())
+    })
 }
 
 pub fn execute_statement(statement: Statement) -> Result<QueryResult, String> {
-    let harness = harness().lock().unwrap_or_else(|err| err.into_inner());
-    let mut session = harness.engine.session();
-    session
-        .execute_statement(statement)
-        .map_err(|err| err.to_string())
+    HARNESS.with(|harness| {
+        let harness = harness.borrow();
+        let mut session = harness.engine.session();
+        session
+            .execute_statement(statement)
+            .map_err(|err| err.to_string())
+    })
 }
 
 pub fn execute(statement: Statement) -> Result<String, String> {
@@ -86,8 +94,7 @@ pub fn command_result(sql: &str) -> Result<CommandResult, String> {
 }
 
 pub fn snapshot_database() -> Database {
-    let harness = harness().lock().unwrap_or_else(|err| err.into_inner());
-    harness.engine.snapshot_database()
+    HARNESS.with(|harness| harness.borrow().engine.snapshot_database())
 }
 
 pub fn render_results(results: &[QueryResult]) -> String {

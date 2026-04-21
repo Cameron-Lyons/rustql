@@ -1,4 +1,4 @@
-use rustql::ast::Value;
+use rustql::Value;
 use rustql::{CommandTag, Engine, EngineOptions, ExplainAnalyzeResult, QueryResult, RowBatch};
 use std::io::{self, IsTerminal, Read, Write};
 use std::process::ExitCode;

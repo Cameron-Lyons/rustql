@@ -89,6 +89,7 @@ let engine = Engine::open(EngineOptions {
 let mut session = engine.session();
 
 session.execute_one("CREATE TABLE users (id INTEGER)").unwrap();
+let results = session.execute("SELECT * FROM users").unwrap();
 ```
 
 ## Storage modes

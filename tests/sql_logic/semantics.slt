@@ -1,0 +1,50 @@
+# focused semantic regressions
+statement ok
+CREATE TABLE slt_sem_values (id INTEGER, val INTEGER);
+
+statement ok
+INSERT INTO slt_sem_values VALUES (1, 10), (2, NULL), (3, 20);
+
+query exact
+SELECT id FROM slt_sem_values WHERE val IS DISTINCT FROM 10 ORDER BY id;
+----
+id
+2
+3
+
+query exact
+SELECT id FROM slt_sem_values WHERE val IS NOT DISTINCT FROM NULL ORDER BY id;
+----
+id
+2
+
+statement ok
+BEGIN TRANSACTION;
+
+statement ok
+INSERT INTO slt_sem_values VALUES (4, 99);
+
+statement ok
+ROLLBACK;
+
+query exact
+SELECT id FROM slt_sem_values ORDER BY id;
+----
+id
+1
+2
+3
+
+statement ok
+CREATE TABLE slt_sem_orders (id INTEGER, value INTEGER);
+
+statement ok
+INSERT INTO slt_sem_orders VALUES (1, 5), (2, 15), (3, 25);
+
+query exact
+SELECT id FROM slt_sem_orders
+WHERE value > (SELECT AVG(value) FROM slt_sem_orders)
+ORDER BY id;
+----
+id
+3

@@ -44,10 +44,30 @@ impl JsonStorageEngine {
 
 impl StorageEngine for JsonStorageEngine {
     fn load(&self) -> Result<Database, RustqlError> {
-        let _guard = self.lock.read().unwrap();
+        let _guard = self.lock.read().map_err(|e| {
+            RustqlError::StorageError(format!("Failed to acquire JSON storage read lock: {}", e))
+        })?;
         if Path::new(&self.path).exists() {
-            let data = fs::read_to_string(&self.path).unwrap_or_default();
-            let mut db: Database = serde_json::from_str(&data).unwrap_or_default();
+            let data = fs::read_to_string(&self.path).map_err(|e| {
+                RustqlError::StorageError(format!(
+                    "Failed to read JSON storage file '{}': {}",
+                    self.path.display(),
+                    e
+                ))
+            })?;
+            if data.trim().is_empty() {
+                return Err(RustqlError::StorageError(format!(
+                    "JSON storage file '{}' is empty",
+                    self.path.display()
+                )));
+            }
+            let mut db: Database = serde_json::from_str(&data).map_err(|e| {
+                RustqlError::StorageError(format!(
+                    "Failed to parse JSON storage file '{}': {}",
+                    self.path.display(),
+                    e
+                ))
+            })?;
             db.normalize_row_ids();
             Ok(db)
         } else {
@@ -56,7 +76,9 @@ impl StorageEngine for JsonStorageEngine {
     }
 
     fn save(&self, db: &Database) -> Result<(), RustqlError> {
-        let _guard = self.lock.write().unwrap();
+        let _guard = self.lock.write().map_err(|e| {
+            RustqlError::StorageError(format!("Failed to acquire JSON storage write lock: {}", e))
+        })?;
         let mut db = db.clone();
         db.normalize_row_ids();
         let data = serde_json::to_string_pretty(&db).map_err(|e| {
