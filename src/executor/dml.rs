@@ -134,7 +134,7 @@ pub fn execute_insert(
                         .columns
                         .iter()
                         .position(|c| c.name == *col_name)
-                        .unwrap();
+                        .ok_or_else(|| RustqlError::ColumnNotFound(col_name.clone()))?;
                     full_row[col_pos] = values[idx].clone();
                 }
 
@@ -1325,7 +1325,11 @@ pub fn execute_merge(
                             .iter()
                             .find(|(i, _)| *i == row_idx)
                             .map(|(_, r)| r.clone())
-                            .unwrap();
+                            .ok_or_else(|| {
+                                RustqlError::Internal(
+                                    "Missing matched target row for merge".to_string(),
+                                )
+                            })?;
                         let mut combined_row: Vec<Value> = target_row.clone();
                         combined_row.extend(source_row.clone());
 
@@ -1354,7 +1358,10 @@ pub fn execute_merge(
                                         )?;
                                     }
                                 }
-                                let table = db.tables.get_mut(&stmt.target_table).unwrap();
+                                let table =
+                                    db.tables.get_mut(&stmt.target_table).ok_or_else(|| {
+                                        RustqlError::TableNotFound(stmt.target_table.clone())
+                                    })?;
                                 let row_id = table.row_id_at(row_idx).ok_or_else(|| {
                                     RustqlError::Internal(
                                         "Missing row id for merge update".to_string(),
@@ -1373,7 +1380,10 @@ pub fn execute_merge(
                                 affected += 1;
                             }
                             MergeMatchedAction::Delete => {
-                                let table = db.tables.get_mut(&stmt.target_table).unwrap();
+                                let table =
+                                    db.tables.get_mut(&stmt.target_table).ok_or_else(|| {
+                                        RustqlError::TableNotFound(stmt.target_table.clone())
+                                    })?;
                                 let row_id = table.row_id_at(row_idx).ok_or_else(|| {
                                     RustqlError::Internal(
                                         "Missing row id for merge delete".to_string(),
@@ -1443,7 +1453,9 @@ pub fn execute_merge(
                                 }
                             }
 
-                            let table = db.tables.get_mut(&stmt.target_table).unwrap();
+                            let table = db.tables.get_mut(&stmt.target_table).ok_or_else(|| {
+                                RustqlError::TableNotFound(stmt.target_table.clone())
+                            })?;
                             let row_id = table.insert_row(new_row);
                             super::record_wal_entry(
                                 context,

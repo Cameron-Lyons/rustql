@@ -12,7 +12,16 @@ pub type PlanTree = crate::planner::PlanNode;
 #[derive(Debug, Clone)]
 pub enum StorageMode {
     Memory,
-    Disk { path: PathBuf },
+    Json {
+        path: PathBuf,
+    },
+    BTree {
+        path: PathBuf,
+    },
+    #[deprecated(note = "Use StorageMode::BTree instead")]
+    Disk {
+        path: PathBuf,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -23,9 +32,31 @@ pub struct EngineOptions {
 impl Default for EngineOptions {
     fn default() -> Self {
         Self {
-            storage: StorageMode::Disk {
-                path: PathBuf::from("rustql.db"),
+            storage: StorageMode::Json {
+                path: PathBuf::from("rustql_data.json"),
             },
+        }
+    }
+}
+
+impl EngineOptions {
+    pub fn from_env() -> Result<Self, RustqlError> {
+        match std::env::var("RUSTQL_STORAGE") {
+            Ok(value) if value.eq_ignore_ascii_case("btree") => Ok(Self {
+                storage: StorageMode::BTree {
+                    path: PathBuf::from("rustql_btree.dat"),
+                },
+            }),
+            Ok(value) if value.eq_ignore_ascii_case("json") => Ok(Self::default()),
+            Ok(value) => Err(RustqlError::StorageError(format!(
+                "Unsupported RUSTQL_STORAGE value '{}'. Expected 'json' or 'btree'",
+                value
+            ))),
+            Err(std::env::VarError::NotPresent) => Ok(Self::default()),
+            Err(err) => Err(RustqlError::StorageError(format!(
+                "Failed to read RUSTQL_STORAGE: {}",
+                err
+            ))),
         }
     }
 }
@@ -35,10 +66,19 @@ pub struct Engine {
 }
 
 impl Engine {
+    #[allow(deprecated)]
     pub fn open(options: EngineOptions) -> Result<Self, RustqlError> {
         let (database, storage) = match &options.storage {
             StorageMode::Memory => (Database::new(), None),
-            StorageMode::Disk { path } => {
+            StorageMode::Json { path } => {
+                let storage = Arc::new(crate::storage::JsonStorageEngine::new(path.clone()));
+                let database = storage.load()?;
+                (
+                    database,
+                    Some(storage as Arc<dyn crate::storage::StorageEngine>),
+                )
+            }
+            StorageMode::BTree { path } | StorageMode::Disk { path } => {
                 let storage = Arc::new(crate::storage::BTreeStorageEngine::new(path.clone()));
                 let database = storage.load()?;
                 (

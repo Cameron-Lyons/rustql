@@ -663,7 +663,9 @@ pub(crate) fn execute_select_with_grouping_result(
     table: &Table,
     rows: Vec<&Vec<Value>>,
 ) -> Result<SelectResult, RustqlError> {
-    let raw_group_by = stmt.group_by.clone().unwrap();
+    let raw_group_by = stmt.group_by.clone().ok_or_else(|| {
+        RustqlError::AggregateError("GROUP BY execution requires a GROUP BY clause".to_string())
+    })?;
 
     match &raw_group_by {
         GroupByClause::GroupingSets(sets) => {
@@ -1260,7 +1262,7 @@ fn compute_windowed_aggregate(
             if counts.is_empty() {
                 return Value::Null;
             }
-            counts.sort_by(|a, b| b.1.cmp(&a.1));
+            counts.sort_by_key(|item| std::cmp::Reverse(item.1));
             counts[0].0.clone()
         }
         AggregateFunctionType::PercentileCont => {

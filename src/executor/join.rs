@@ -65,8 +65,14 @@ pub fn perform_multiple_joins(
                                     .collect(),
                             );
                         }
+                        let sub_columns_ref = sub_columns.as_ref().ok_or_else(|| {
+                            RustqlError::Internal(format!(
+                                "Unable to infer columns for lateral subquery '{}'",
+                                alias
+                            ))
+                        })?;
                         let lateral_eval_columns =
-                            qualified_subquery_columns(alias, sub_columns.as_ref().unwrap());
+                            qualified_subquery_columns(alias, sub_columns_ref);
                         let mut join_eval_columns = outer_scope_columns.clone();
                         join_eval_columns.extend(lateral_eval_columns);
 
@@ -205,7 +211,7 @@ pub fn perform_multiple_joins(
                                         let table = if idx == 0 {
                                             from_table
                                         } else {
-                                            db.tables.get(&joins[idx - 1].table).unwrap()
+                                            db.tables.get(&joins[idx - 1].table)?
                                         };
                                         if let Some(col_idx) =
                                             table.columns.iter().position(|c| c.name == col_name)

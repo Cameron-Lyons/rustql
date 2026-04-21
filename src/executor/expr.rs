@@ -1105,13 +1105,10 @@ pub fn evaluate_value_expression_with_db(
                     )),
                 },
                 ScalarFunctionType::Ascii => match evaluated_args.first() {
-                    Some(Value::Text(s)) => {
-                        if s.is_empty() {
-                            Ok(Value::Null)
-                        } else {
-                            Ok(Value::Integer(s.chars().next().unwrap() as i64))
-                        }
-                    }
+                    Some(Value::Text(s)) => match s.chars().next() {
+                        Some(ch) => Ok(Value::Integer(ch as i64)),
+                        None => Ok(Value::Null),
+                    },
                     Some(Value::Null) => Ok(Value::Null),
                     _ => Err(RustqlError::TypeMismatch(
                         "ASCII requires a text argument".to_string(),

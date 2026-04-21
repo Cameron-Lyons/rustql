@@ -1,3 +1,5 @@
 /target
+rustql.db
 rustql_btree.dat
 rustql_data.json
+*.wal

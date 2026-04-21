@@ -10,6 +10,22 @@ fn setup_test() -> std::sync::MutexGuard<'static, ()> {
 }
 
 #[test]
+fn test_out_of_range_integer_literal_returns_parse_error() {
+    let _guard = setup_test();
+
+    let error = process_query("SELECT 9223372036854775808").unwrap_err();
+    assert!(error.contains("Invalid integer literal"));
+}
+
+#[test]
+fn test_minimum_integer_literal_is_supported() {
+    let _guard = setup_test();
+
+    let result = process_query("SELECT -9223372036854775808").unwrap();
+    assert!(result.contains("-9223372036854775808"));
+}
+
+#[test]
 fn test_three_table_join() {
     let _guard = setup_test();
 

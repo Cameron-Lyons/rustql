@@ -1,13 +1,22 @@
 use rustql::ast::Value;
 use rustql::{CommandTag, Engine, EngineOptions, QueryResult, RowBatch};
 use std::io::{self, IsTerminal, Read, Write};
+use std::process::ExitCode;
 
-fn main() {
-    let engine = match Engine::open(EngineOptions::default()) {
+fn main() -> ExitCode {
+    let options = match EngineOptions::from_env() {
+        Ok(options) => options,
+        Err(e) => {
+            eprintln!("Error: {}", e);
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let engine = match Engine::open(options) {
         Ok(engine) => engine,
         Err(e) => {
             eprintln!("Error: {}", e);
-            return;
+            return ExitCode::FAILURE;
         }
     };
     let mut session = engine.session();
@@ -18,10 +27,16 @@ fn main() {
 
         loop {
             print!("rustql> ");
-            io::stdout().flush().unwrap();
+            if let Err(e) = io::stdout().flush() {
+                eprintln!("Error: {}", e);
+                return ExitCode::FAILURE;
+            }
 
             let mut input = String::new();
-            io::stdin().read_line(&mut input).unwrap();
+            if let Err(e) = io::stdin().read_line(&mut input) {
+                eprintln!("Error: {}", e);
+                return ExitCode::FAILURE;
+            }
 
             let query = input.trim();
 
@@ -41,15 +56,23 @@ fn main() {
         }
     } else {
         let mut input = String::new();
-        io::stdin().read_to_string(&mut input).unwrap();
+        if let Err(e) = io::stdin().read_to_string(&mut input) {
+            eprintln!("Error: {}", e);
+            return ExitCode::FAILURE;
+        }
 
         if !input.trim().is_empty() {
             match session.execute_script(&input) {
                 Ok(results) => println!("{}", render_results(&results)),
-                Err(e) => eprintln!("Error: {}", e),
+                Err(e) => {
+                    eprintln!("Error: {}", e);
+                    return ExitCode::FAILURE;
+                }
             }
         }
     }
+
+    ExitCode::SUCCESS
 }
 
 fn render_results(results: &[QueryResult]) -> String {

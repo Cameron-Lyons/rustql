@@ -29,15 +29,18 @@ impl ExecutionContext {
     }
 
     pub fn database_snapshot(&self) -> Database {
-        self.database.read().unwrap().clone()
+        self.database
+            .read()
+            .unwrap_or_else(|err| err.into_inner())
+            .clone()
     }
 
     pub(crate) fn database_read(&self) -> std::sync::RwLockReadGuard<'_, Database> {
-        self.database.read().unwrap()
+        self.database.read().unwrap_or_else(|err| err.into_inner())
     }
 
     pub(crate) fn database_write(&self) -> std::sync::RwLockWriteGuard<'_, Database> {
-        self.database.write().unwrap()
+        self.database.write().unwrap_or_else(|err| err.into_inner())
     }
 
     fn persist_database(&self, db: &Database) -> Result<(), RustqlError> {
@@ -72,7 +75,7 @@ impl ExecutionContext {
     where
         F: FnOnce(&mut WalState) -> R,
     {
-        let mut wal_state = self.wal_state.lock().unwrap();
+        let mut wal_state = self.wal_state.lock().unwrap_or_else(|err| err.into_inner());
         f(&mut wal_state)
     }
 
@@ -80,7 +83,7 @@ impl ExecutionContext {
     where
         F: FnOnce(&WalState) -> R,
     {
-        let wal_state = self.wal_state.lock().unwrap();
+        let wal_state = self.wal_state.lock().unwrap_or_else(|err| err.into_inner());
         f(&wal_state)
     }
 }

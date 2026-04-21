@@ -9,6 +9,121 @@ fn test_guard() -> std::sync::MutexGuard<'static, ()> {
     LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
 }
 
+fn unique_temp_path(label: &str, extension: &str) -> std::path::PathBuf {
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    std::env::temp_dir().join(format!(
+        "rustql_{}_{}_{}.{}",
+        label,
+        std::process::id(),
+        timestamp,
+        extension
+    ))
+}
+
+fn cleanup_storage_path(path: &std::path::Path) {
+    let _ = std::fs::remove_file(path);
+    let mut journal_path = path.as_os_str().to_os_string();
+    journal_path.push(".wal");
+    let _ = std::fs::remove_file(std::path::PathBuf::from(journal_path));
+}
+
+#[test]
+fn default_engine_options_use_json_storage() {
+    let options = EngineOptions::default();
+
+    match options.storage {
+        StorageMode::Json { path } => {
+            assert_eq!(path, std::path::PathBuf::from("rustql_data.json"))
+        }
+        other => panic!("expected JSON storage by default, got: {other:?}"),
+    }
+}
+
+#[test]
+fn explicit_json_storage_persists_between_engines() {
+    let _guard = test_guard();
+    let path = unique_temp_path("engine_json", "json");
+    cleanup_storage_path(&path);
+
+    {
+        let engine = Engine::open(EngineOptions {
+            storage: StorageMode::Json { path: path.clone() },
+        })
+        .unwrap();
+        let mut session = engine.session();
+        session
+            .execute_script(
+                "
+                CREATE TABLE users (id INTEGER, name TEXT);
+                INSERT INTO users VALUES (1, 'Alice');
+                ",
+            )
+            .unwrap();
+    }
+
+    let engine = Engine::open(EngineOptions {
+        storage: StorageMode::Json { path: path.clone() },
+    })
+    .unwrap();
+    let mut session = engine.session();
+    let result = session
+        .execute_one("SELECT name FROM users WHERE id = 1")
+        .unwrap();
+
+    match result {
+        QueryResult::Rows(rows) => {
+            assert_eq!(rows.rows, vec![vec![ast::Value::Text("Alice".to_string())]]);
+        }
+        other => panic!("expected rows result, got: {other:?}"),
+    }
+
+    cleanup_storage_path(&path);
+}
+
+#[test]
+fn explicit_btree_storage_persists_between_engines() {
+    let _guard = test_guard();
+    let path = unique_temp_path("engine_btree", "dat");
+    cleanup_storage_path(&path);
+
+    {
+        let engine = Engine::open(EngineOptions {
+            storage: StorageMode::BTree { path: path.clone() },
+        })
+        .unwrap();
+        let mut session = engine.session();
+        session
+            .execute_script(
+                "
+                CREATE TABLE users (id INTEGER, name TEXT);
+                INSERT INTO users VALUES (1, 'Alice');
+                ",
+            )
+            .unwrap();
+    }
+
+    let engine = Engine::open(EngineOptions {
+        storage: StorageMode::BTree { path: path.clone() },
+    })
+    .unwrap();
+    let mut session = engine.session();
+    let result = session
+        .execute_one("SELECT name FROM users WHERE id = 1")
+        .unwrap();
+
+    match result {
+        QueryResult::Rows(rows) => {
+            assert_eq!(rows.rows, vec![vec![ast::Value::Text("Alice".to_string())]]);
+        }
+        other => panic!("expected rows result, got: {other:?}"),
+    }
+
+    cleanup_storage_path(&path);
+}
+
 #[test]
 fn execute_select_returns_typed_rows() {
     let _guard = test_guard();

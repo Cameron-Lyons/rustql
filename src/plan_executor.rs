@@ -1761,7 +1761,7 @@ impl<'a> PlanExecutor<'a> {
                 if counts.is_empty() {
                     return Ok(Value::Null);
                 }
-                counts.sort_by(|a, b| b.1.cmp(&a.1));
+                counts.sort_by_key(|item| std::cmp::Reverse(item.1));
                 Ok(counts[0].0.clone())
             }
             AggregateFunctionType::PercentileCont => {

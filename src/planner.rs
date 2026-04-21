@@ -250,7 +250,12 @@ impl<'a> QueryPlanner<'a> {
         if let Some(where_expr) = where_clause
             && let Some(index_usage) = self.find_best_index(table_name, where_expr, db)
         {
-            let index = db.indexes.get(&index_usage.index_name).unwrap();
+            let index = db.indexes.get(&index_usage.index_name).ok_or_else(|| {
+                RustqlError::IndexError(format!(
+                    "Index '{}' does not exist",
+                    index_usage.index_name
+                ))
+            })?;
             let estimated_rows = self.estimate_index_selectivity(&index_usage, index, stats);
             let cost = self.estimate_index_scan_cost(stats.row_count, estimated_rows);
 
@@ -847,11 +852,9 @@ impl<'a> QueryPlanner<'a> {
         stats: &TableStats,
     ) -> usize {
         match &index_usage.operation {
-            IndexOperation::Equality(_) => index
-                .entries
-                .get(&index_usage.value.clone().unwrap())
-                .map(|v| v.len())
-                .unwrap_or(0),
+            IndexOperation::Equality(value) => {
+                index.entries.get(value).map(|v| v.len()).unwrap_or(0)
+            }
             IndexOperation::Range { .. } => (stats.row_count as f64 * 0.1) as usize,
             IndexOperation::In(values) => values
                 .iter()
@@ -888,13 +891,15 @@ impl<'a> QueryPlanner<'a> {
                             null_count += 1;
                         } else {
                             distinct_values.insert(val.clone());
-                            if min_val.is_none()
-                                || self.compare_values(val, min_val.as_ref().unwrap()) < 0
+                            if min_val
+                                .as_ref()
+                                .is_none_or(|current| self.compare_values(val, current) < 0)
                             {
                                 min_val = Some(val.clone());
                             }
-                            if max_val.is_none()
-                                || self.compare_values(val, max_val.as_ref().unwrap()) > 0
+                            if max_val
+                                .as_ref()
+                                .is_none_or(|current| self.compare_values(val, current) > 0)
                             {
                                 max_val = Some(val.clone());
                             }

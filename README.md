@@ -78,7 +78,7 @@ echo "SHOW TABLES" | cargo run --release
 
 | Backend | File | Activation |
 |---------|------|------------|
-| JSON (default) | `rustql_data.json` | default |
+| JSON (default) | `rustql_data.json` | default or `RUSTQL_STORAGE=json` |
 | B-tree | `rustql_btree.dat` | `RUSTQL_STORAGE=btree` |
 
 The **JSON** backend serializes the entire database to a single JSON file on every write. It is human-readable and simple to debug.
@@ -89,6 +89,19 @@ The **B-tree** backend stores data in a page-based binary format (4 KB pages) wi
 RUSTQL_STORAGE=btree cargo run --release
 ```
 
+Library users can choose storage explicitly with `EngineOptions`:
+
+```rust
+use rustql::{Engine, EngineOptions, StorageMode};
+use std::path::PathBuf;
+
+let engine = Engine::open(EngineOptions {
+    storage: StorageMode::BTree {
+        path: PathBuf::from("rustql_btree.dat"),
+    },
+})?;
+```
+
 ## Project structure
 
 | File | Purpose |
@@ -96,13 +109,15 @@ RUSTQL_STORAGE=btree cargo run --release
 | `main.rs` | Interactive REPL |
 | `lib.rs` | Library entry point; tokenize &rarr; parse &rarr; execute pipeline |
 | `lexer.rs` | Tokenizer |
-| `parser.rs` | Recursive-descent SQL parser |
+| `parser.rs` | Recursive-descent SQL parser core |
+| `parser/` | Parser entry points and token formatting helpers |
 | `ast.rs` | Abstract syntax tree types |
 | `database.rs` | Core `Database`, `Table`, and `Index` structures |
-| `executor.rs` | Statement executor (DDL, DML, constraints, foreign keys) |
+| `executor/` | Statement executor (DDL, DML, constraints, foreign keys) |
 | `planner.rs` | Cost-based query planner |
 | `plan_executor.rs` | Executes optimized query plans |
-| `storage.rs` | Pluggable storage engines (JSON and B-tree) |
+| `storage.rs` | Storage trait and default backend selection |
+| `storage/` | JSON and B-tree storage implementations |
 | `wal.rs` | Write-ahead log for transaction rollback |
 | `error.rs` | Error types |
 

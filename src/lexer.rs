@@ -287,10 +287,11 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, RustqlError> {
                 if let Some(&next_ch) = chars.peek() {
                     if next_ch.is_ascii_digit() {
                         let num = read_number(&mut chars);
+                        let literal = format!("-{}", num);
                         if num.contains('.') {
-                            tokens.push(Token::Float(-num.parse::<f64>().unwrap()));
+                            tokens.push(Token::Float(parse_float_literal(&literal)?));
                         } else {
-                            tokens.push(Token::Number(-num.parse::<i64>().unwrap()));
+                            tokens.push(Token::Number(parse_integer_literal(&literal)?));
                         }
                     } else {
                         tokens.push(Token::Minus);
@@ -374,9 +375,9 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, RustqlError> {
             _ if ch.is_ascii_digit() => {
                 let num = read_number(&mut chars);
                 if num.contains('.') {
-                    tokens.push(Token::Float(num.parse::<f64>().unwrap()));
+                    tokens.push(Token::Float(parse_float_literal(&num)?));
                 } else {
-                    tokens.push(Token::Number(num.parse::<i64>().unwrap()));
+                    tokens.push(Token::Number(parse_integer_literal(&num)?));
                 }
             }
             _ if ch.is_ascii_alphabetic() || ch == '_' => {
@@ -468,6 +469,18 @@ fn read_number(chars: &mut std::iter::Peekable<std::str::Chars>) -> String {
         }
     }
     num
+}
+
+fn parse_integer_literal(literal: &str) -> Result<i64, RustqlError> {
+    literal
+        .parse::<i64>()
+        .map_err(|_| RustqlError::ParseError(format!("Invalid integer literal: {}", literal)))
+}
+
+fn parse_float_literal(literal: &str) -> Result<f64, RustqlError> {
+    literal
+        .parse::<f64>()
+        .map_err(|_| RustqlError::ParseError(format!("Invalid float literal: {}", literal)))
 }
 
 fn read_string(

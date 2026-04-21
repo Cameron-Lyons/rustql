@@ -49,7 +49,10 @@ mod index_entries {
         let mut map = serde_json::Map::new();
         for (key, value) in entries {
             let key_str = value_to_string(key);
-            map.insert(key_str, serde_json::to_value(value).unwrap());
+            map.insert(
+                key_str,
+                serde_json::to_value(value).map_err(serde::ser::Error::custom)?,
+            );
         }
         map.serialize(serializer)
     }
@@ -63,7 +66,8 @@ mod index_entries {
         let mut entries = BTreeMap::new();
         for (key_str, value) in map {
             let key = string_to_value(&key_str);
-            let indices: Vec<RowId> = serde_json::from_value(value).unwrap();
+            let indices: Vec<RowId> =
+                serde_json::from_value(value).map_err(serde::de::Error::custom)?;
             entries.insert(key, indices);
         }
         Ok(entries)
