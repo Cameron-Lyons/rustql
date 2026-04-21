@@ -176,8 +176,17 @@ pub struct CommandResult {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct ExplainAnalyzeResult {
+    pub plan: PlanTree,
+    pub planning_ms: f64,
+    pub execution_ms: f64,
+    pub actual_rows: usize,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum QueryResult {
     Rows(RowBatch),
     Command(CommandResult),
     Explain(PlanTree),
+    ExplainAnalyze(ExplainAnalyzeResult),
 }

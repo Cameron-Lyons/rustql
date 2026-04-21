@@ -1,9 +1,9 @@
 use crate::ast::*;
-use crate::database::{Database, RowId, Table};
+use crate::database::{CompositeIndex, Database, DatabaseCatalog, Index, RowId, Table};
 use crate::engine::{CommandTag, QueryResult};
 use crate::error::RustqlError;
 use crate::wal::WalEntry;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use super::{
     ExecutionContext, SelectResult, command_result, get_database_read, get_database_write,
@@ -101,6 +101,8 @@ pub fn execute_drop_table(
 ) -> Result<QueryResult, RustqlError> {
     let mut db = get_database_write(context);
     if let Some(removed) = db.tables.remove(&stmt.name) {
+        let (removed_indexes, removed_composite_indexes) =
+            remove_indexes_for_table(&mut db, &stmt.name);
         super::record_wal_entry(
             context,
             WalEntry::DropTable {
@@ -110,6 +112,8 @@ pub fn execute_drop_table(
                 row_ids: removed.row_ids,
                 next_row_id: removed.next_row_id,
                 constraints: removed.constraints,
+                indexes: removed_indexes,
+                composite_indexes: removed_composite_indexes,
             },
         );
         save_if_not_in_transaction(context, &db)?;
@@ -335,7 +339,7 @@ pub fn execute_create_index(
 ) -> Result<QueryResult, RustqlError> {
     let mut db = get_database_write(context);
 
-    if db.indexes.contains_key(&stmt.name) {
+    if db.indexes.contains_key(&stmt.name) || db.composite_indexes.contains_key(&stmt.name) {
         if stmt.if_not_exists {
             return Ok(command_result(CommandTag::CreateIndex, 0));
         }
@@ -345,133 +349,61 @@ pub fn execute_create_index(
         )));
     }
 
-    let first_column = stmt
-        .columns
-        .first()
-        .ok_or_else(|| RustqlError::Internal("Index must have at least one column".to_string()))?
-        .clone();
-
-    let mut indexes_to_insert: Vec<(String, crate::database::Index)> = Vec::new();
-
     {
         let table = db
             .tables
             .get(&stmt.table)
             .ok_or_else(|| RustqlError::TableNotFound(stmt.table.clone()))?;
+        let column_positions = get_column_positions(table, &stmt.columns)?;
 
-        let col_idx = table
-            .columns
-            .iter()
-            .position(|col| col.name == first_column)
-            .ok_or_else(|| {
-                format!(
-                    "Column '{}' does not exist in table '{}'",
-                    first_column, stmt.table
-                )
-            })?;
-
-        let filter_expr_str: Option<String> =
-            stmt.where_clause.as_ref().map(|expr| format!("{:?}", expr));
-
-        let mut index = crate::database::Index {
-            name: stmt.name.clone(),
-            table: stmt.table.clone(),
-            column: first_column.clone(),
-            entries: BTreeMap::new(),
-            filter_expr: filter_expr_str,
-        };
-
-        for (row_id, row) in table.iter_rows_with_ids() {
-            if let Some(ref where_expr) = stmt.where_clause {
-                let passes =
-                    super::expr::evaluate_expression(None, where_expr, &table.columns, row)
-                        .unwrap_or(false);
-                if !passes {
-                    continue;
-                }
-            }
-            let value = row.get(col_idx).cloned().unwrap_or(Value::Null);
-            index.entries.entry(value).or_default().push(row_id);
-        }
-
-        indexes_to_insert.push((stmt.name.clone(), index));
-
-        for (i, col_name) in stmt.columns.iter().enumerate().skip(1) {
-            let extra_col_idx = table
-                .columns
-                .iter()
-                .position(|col| col.name == *col_name)
-                .ok_or_else(|| {
-                    format!(
-                        "Column '{}' does not exist in table '{}'",
-                        col_name, stmt.table
-                    )
-                })?;
-
-            let extra_index_name = format!("{}_{}", stmt.name, i + 1);
-            let mut extra_index = crate::database::Index {
-                name: extra_index_name.clone(),
+        if stmt.columns.len() == 1 {
+            let mut index = Index {
+                name: stmt.name.clone(),
                 table: stmt.table.clone(),
-                column: col_name.clone(),
+                column: stmt.columns[0].clone(),
                 entries: BTreeMap::new(),
-                filter_expr: None,
+                filter_expr: stmt.where_clause.clone(),
             };
 
             for (row_id, row) in table.iter_rows_with_ids() {
-                let value = row.get(extra_col_idx).cloned().unwrap_or(Value::Null);
-                extra_index.entries.entry(value).or_default().push(row_id);
+                if !row_matches_index_filter(&db, table, index.filter_expr.as_ref(), row) {
+                    continue;
+                }
+                let value = row
+                    .get(*column_positions.first().unwrap())
+                    .cloned()
+                    .unwrap_or(Value::Null);
+                index.entries.entry(value).or_default().push(row_id);
             }
 
-            indexes_to_insert.push((extra_index_name, extra_index));
-        }
-    }
-
-    for (index_name, index) in indexes_to_insert {
-        db.indexes.insert(index_name.clone(), index);
-        super::record_wal_entry(context, WalEntry::CreateIndex { name: index_name });
-    }
-
-    if stmt.columns.len() > 1 {
-        let table = db
-            .tables
-            .get(&stmt.table)
-            .ok_or_else(|| RustqlError::TableNotFound(stmt.table.clone()))?;
-        let col_indices: Vec<usize> = stmt
-            .columns
-            .iter()
-            .map(|col_name| {
-                table
-                    .columns
-                    .iter()
-                    .position(|c| c.name == *col_name)
-                    .ok_or_else(|| {
-                        RustqlError::Internal(format!(
-                            "Column '{}' not found in table '{}'",
-                            col_name, stmt.table
-                        ))
-                    })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let composite_name = format!("{}_composite", stmt.name);
-        let mut entries = BTreeMap::new();
-        for (row_id, row) in table.iter_rows_with_ids() {
-            let key: Vec<Value> = col_indices
-                .iter()
-                .map(|&i| row.get(i).cloned().unwrap_or(Value::Null))
-                .collect();
-            entries.entry(key).or_insert_with(Vec::new).push(row_id);
-        }
-        db.composite_indexes.insert(
-            composite_name,
-            crate::database::CompositeIndex {
+            db.indexes.insert(stmt.name.clone(), index);
+        } else {
+            let mut index = CompositeIndex {
                 name: stmt.name.clone(),
                 table: stmt.table.clone(),
                 columns: stmt.columns.clone(),
-                entries,
-            },
-        );
+                entries: BTreeMap::new(),
+                filter_expr: stmt.where_clause.clone(),
+            };
+
+            for (row_id, row) in table.iter_rows_with_ids() {
+                if !row_matches_index_filter(&db, table, index.filter_expr.as_ref(), row) {
+                    continue;
+                }
+                let key = composite_key_for_row(row, &column_positions);
+                index.entries.entry(key).or_default().push(row_id);
+            }
+
+            db.composite_indexes.insert(stmt.name.clone(), index);
+        }
     }
 
+    super::record_wal_entry(
+        context,
+        WalEntry::CreateIndex {
+            name: stmt.name.clone(),
+        },
+    );
     save_if_not_in_transaction(context, &db)?;
     Ok(command_result(CommandTag::CreateIndex, 0))
 }
@@ -481,12 +413,16 @@ pub fn execute_drop_index(
     stmt: DropIndexStatement,
 ) -> Result<QueryResult, RustqlError> {
     let mut db = get_database_write(context);
-    if let Some(removed) = db.indexes.remove(&stmt.name) {
+    let removed_index = db.indexes.remove(&stmt.name);
+    let removed_composite_index = db.composite_indexes.remove(&stmt.name);
+
+    if removed_index.is_some() || removed_composite_index.is_some() {
         super::record_wal_entry(
             context,
             WalEntry::DropIndex {
                 name: stmt.name.clone(),
-                index: removed,
+                index: removed_index,
+                composite_index: Box::new(removed_composite_index),
             },
         );
         save_if_not_in_transaction(context, &db)?;
@@ -499,6 +435,35 @@ pub fn execute_drop_index(
             stmt.name
         )))
     }
+}
+
+fn remove_indexes_for_table(
+    db: &mut Database,
+    table_name: &str,
+) -> (Vec<Index>, Vec<CompositeIndex>) {
+    let index_names: Vec<String> = db
+        .indexes
+        .iter()
+        .filter(|(_, index)| index.table == table_name)
+        .map(|(name, _)| name.clone())
+        .collect();
+    let composite_index_names: Vec<String> = db
+        .composite_indexes
+        .iter()
+        .filter(|(_, index)| index.table == table_name)
+        .map(|(name, _)| name.clone())
+        .collect();
+
+    let removed_indexes = index_names
+        .into_iter()
+        .filter_map(|name| db.indexes.remove(&name))
+        .collect();
+    let removed_composite_indexes = composite_index_names
+        .into_iter()
+        .filter_map(|name| db.composite_indexes.remove(&name))
+        .collect();
+
+    (removed_indexes, removed_composite_indexes)
 }
 
 pub fn execute_describe(
@@ -587,12 +552,17 @@ pub fn update_indexes_on_insert(
     row_id: RowId,
     row: &[Value],
 ) -> Result<(), RustqlError> {
+    let db_snapshot = db.clone();
+    let table = db_snapshot
+        .tables
+        .get(table_name)
+        .ok_or_else(|| RustqlError::TableNotFound(table_name.to_string()))?;
+
     for index in db.indexes.values_mut() {
         if index.table == table_name {
-            let table = db
-                .tables
-                .get(table_name)
-                .ok_or_else(|| RustqlError::TableNotFound(table_name.to_string()))?;
+            if !row_matches_index_filter(&db_snapshot, table, index.filter_expr.as_ref(), row) {
+                continue;
+            }
 
             let col_idx = table
                 .columns
@@ -604,6 +574,19 @@ pub fn update_indexes_on_insert(
             index.entries.entry(value).or_default().push(row_id);
         }
     }
+
+    for index in db.composite_indexes.values_mut() {
+        if index.table == table_name {
+            if !row_matches_index_filter(&db_snapshot, table, index.filter_expr.as_ref(), row) {
+                continue;
+            }
+
+            let column_positions = get_column_positions(table, &index.columns)?;
+            let key = composite_key_for_row(row, &column_positions);
+            index.entries.entry(key).or_default().push(row_id);
+        }
+    }
+
     Ok(())
 }
 
@@ -619,6 +602,15 @@ pub fn update_indexes_on_delete(
             }
         }
     }
+
+    for index in db.composite_indexes.values_mut() {
+        if index.table == table_name {
+            for entry in index.entries.values_mut() {
+                entry.retain(|row_id| !deleted_row_ids.contains(row_id));
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -629,13 +621,14 @@ pub fn update_indexes_on_update(
     old_row: &[Value],
     new_row: &[Value],
 ) -> Result<(), RustqlError> {
+    let db_snapshot = db.clone();
+    let table = db_snapshot
+        .tables
+        .get(table_name)
+        .ok_or_else(|| RustqlError::TableNotFound(table_name.to_string()))?;
+
     for index in db.indexes.values_mut() {
         if index.table == table_name {
-            let table = db
-                .tables
-                .get(table_name)
-                .ok_or_else(|| RustqlError::TableNotFound(table_name.to_string()))?;
-
             let col_idx = table
                 .columns
                 .iter()
@@ -644,19 +637,53 @@ pub fn update_indexes_on_update(
 
             let old_value = old_row.get(col_idx).cloned().unwrap_or(Value::Null);
             let new_value = new_row.get(col_idx).cloned().unwrap_or(Value::Null);
+            let old_matches =
+                row_matches_index_filter(&db_snapshot, table, index.filter_expr.as_ref(), old_row);
+            let new_matches =
+                row_matches_index_filter(&db_snapshot, table, index.filter_expr.as_ref(), new_row);
 
-            if old_value != new_value {
-                if let Some(entry) = index.entries.get_mut(&old_value) {
-                    entry.retain(|candidate| *candidate != row_id);
-                    if entry.is_empty() {
-                        index.entries.remove(&old_value);
-                    }
+            match (old_matches, new_matches) {
+                (true, true) if old_value != new_value => {
+                    remove_row_from_entries(&mut index.entries, &old_value, row_id);
+                    index.entries.entry(new_value).or_default().push(row_id);
                 }
-
-                index.entries.entry(new_value).or_default().push(row_id);
+                (true, false) => {
+                    remove_row_from_entries(&mut index.entries, &old_value, row_id);
+                }
+                (false, true) => {
+                    index.entries.entry(new_value).or_default().push(row_id);
+                }
+                _ => {}
             }
         }
     }
+
+    for index in db.composite_indexes.values_mut() {
+        if index.table == table_name {
+            let column_positions = get_column_positions(table, &index.columns)?;
+            let old_key = composite_key_for_row(old_row, &column_positions);
+            let new_key = composite_key_for_row(new_row, &column_positions);
+            let old_matches =
+                row_matches_index_filter(&db_snapshot, table, index.filter_expr.as_ref(), old_row);
+            let new_matches =
+                row_matches_index_filter(&db_snapshot, table, index.filter_expr.as_ref(), new_row);
+
+            match (old_matches, new_matches) {
+                (true, true) if old_key != new_key => {
+                    remove_row_from_entries(&mut index.entries, &old_key, row_id);
+                    index.entries.entry(new_key).or_default().push(row_id);
+                }
+                (true, false) => {
+                    remove_row_from_entries(&mut index.entries, &old_key, row_id);
+                }
+                (false, true) => {
+                    index.entries.entry(new_key).or_default().push(row_id);
+                }
+                _ => {}
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -685,14 +712,142 @@ pub enum IndexUsage {
         lower: Value,
         upper: Value,
     },
+    CompositePrefix {
+        index_name: String,
+        values: Vec<Value>,
+    },
 }
 
-pub fn find_index_usage(db: &Database, table_name: &str, expr: &Expression) -> Option<IndexUsage> {
+pub fn find_index_usage(
+    db: &dyn DatabaseCatalog,
+    table_name: &str,
+    expr: &Expression,
+) -> Option<IndexUsage> {
+    let composite_usage = find_best_composite_index_usage(db, table_name, expr);
+    let single_usage = find_single_index_usage(db, table_name, expr, expr);
+
+    match (composite_usage, single_usage) {
+        (Some((prefix_len, composite_usage)), Some(_single_usage)) if prefix_len > 1 => {
+            Some(composite_usage)
+        }
+        (Some((_prefix_len, _)), Some(single_usage)) => Some(single_usage),
+        (Some((_prefix_len, composite_usage)), None) => Some(composite_usage),
+        (None, Some(single_usage)) => Some(single_usage),
+        (None, None) => None,
+    }
+}
+
+impl IndexUsage {
+    pub fn index_name(&self) -> &str {
+        match self {
+            IndexUsage::Equality { index_name, .. }
+            | IndexUsage::In { index_name, .. }
+            | IndexUsage::RangeGreater { index_name, .. }
+            | IndexUsage::RangeLess { index_name, .. }
+            | IndexUsage::RangeBetween { index_name, .. }
+            | IndexUsage::CompositePrefix { index_name, .. } => index_name,
+        }
+    }
+}
+
+fn find_best_composite_index_usage(
+    db: &dyn DatabaseCatalog,
+    table_name: &str,
+    expr: &Expression,
+) -> Option<(usize, IndexUsage)> {
+    let equality_predicates = extract_equality_predicates(expr);
+    let mut best_match: Option<(usize, IndexUsage)> = None;
+
+    for index in db.composite_indexes_iter() {
+        if index.table != table_name || !query_implies_filter(expr, index.filter_expr.as_ref()) {
+            continue;
+        }
+
+        let mut prefix_values = Vec::new();
+        for column in &index.columns {
+            if let Some(value) = equality_predicates.get(column) {
+                prefix_values.push(value.clone());
+            } else {
+                break;
+            }
+        }
+
+        let prefix_len = prefix_values.len();
+        if prefix_len == 0 {
+            continue;
+        }
+
+        let usage = IndexUsage::CompositePrefix {
+            index_name: index.name.clone(),
+            values: prefix_values,
+        };
+
+        if best_match
+            .as_ref()
+            .is_none_or(|(best_len, _)| prefix_len > *best_len)
+        {
+            best_match = Some((prefix_len, usage));
+        }
+    }
+
+    best_match
+}
+
+fn extract_equality_predicates(expr: &Expression) -> HashMap<String, Value> {
+    let mut predicates = HashMap::new();
+    let mut conjuncts = Vec::new();
+    collect_conjuncts(expr, &mut conjuncts);
+
+    for conjunct in conjuncts {
+        if let Some((column, value)) = extract_column_equality(conjunct) {
+            predicates.insert(column, value);
+        }
+    }
+
+    predicates
+}
+
+fn collect_conjuncts<'a>(expr: &'a Expression, conjuncts: &mut Vec<&'a Expression>) {
+    if let Expression::BinaryOp {
+        left,
+        op: BinaryOperator::And,
+        right,
+    } = expr
+    {
+        collect_conjuncts(left, conjuncts);
+        collect_conjuncts(right, conjuncts);
+    } else {
+        conjuncts.push(expr);
+    }
+}
+
+fn extract_column_equality(expr: &Expression) -> Option<(String, Value)> {
+    if let Expression::BinaryOp { left, op, right } = expr
+        && *op == BinaryOperator::Equal
+    {
+        if let (Expression::Column(column), Expression::Value(value)) = (&**left, &**right) {
+            return Some((normalize_column_name(column).to_string(), value.clone()));
+        }
+
+        if let (Expression::Value(value), Expression::Column(column)) = (&**left, &**right) {
+            return Some((normalize_column_name(column).to_string(), value.clone()));
+        }
+    }
+
+    None
+}
+
+fn find_single_index_usage(
+    db: &dyn DatabaseCatalog,
+    table_name: &str,
+    expr: &Expression,
+    query_expr: &Expression,
+) -> Option<IndexUsage> {
     match expr {
         Expression::BinaryOp { left, op, right } => match op {
             BinaryOperator::Equal => {
                 if let (Expression::Column(col_name), Expression::Value(val)) = (&**left, &**right)
-                    && let Some(index) = find_index_for_column(db, table_name, col_name)
+                    && let Some(index) = find_index_for_column(db, table_name, col_name, query_expr)
                 {
                     return Some(IndexUsage::Equality {
                         index_name: index.name.clone(),
@@ -700,7 +855,7 @@ pub fn find_index_usage(db: &Database, table_name: &str, expr: &Expression) -> O
                     });
                 } else if let (Expression::Value(val), Expression::Column(col_name)) =
                     (&**left, &**right)
-                    && let Some(index) = find_index_for_column(db, table_name, col_name)
+                    && let Some(index) = find_index_for_column(db, table_name, col_name, query_expr)
                 {
                     return Some(IndexUsage::Equality {
                         index_name: index.name.clone(),
@@ -710,7 +865,7 @@ pub fn find_index_usage(db: &Database, table_name: &str, expr: &Expression) -> O
             }
             BinaryOperator::GreaterThan => {
                 if let (Expression::Column(col_name), Expression::Value(val)) = (&**left, &**right)
-                    && let Some(index) = find_index_for_column(db, table_name, col_name)
+                    && let Some(index) = find_index_for_column(db, table_name, col_name, query_expr)
                 {
                     return Some(IndexUsage::RangeGreater {
                         index_name: index.name.clone(),
@@ -721,7 +876,7 @@ pub fn find_index_usage(db: &Database, table_name: &str, expr: &Expression) -> O
             }
             BinaryOperator::GreaterThanOrEqual => {
                 if let (Expression::Column(col_name), Expression::Value(val)) = (&**left, &**right)
-                    && let Some(index) = find_index_for_column(db, table_name, col_name)
+                    && let Some(index) = find_index_for_column(db, table_name, col_name, query_expr)
                 {
                     return Some(IndexUsage::RangeGreater {
                         index_name: index.name.clone(),
@@ -732,7 +887,7 @@ pub fn find_index_usage(db: &Database, table_name: &str, expr: &Expression) -> O
             }
             BinaryOperator::LessThan => {
                 if let (Expression::Column(col_name), Expression::Value(val)) = (&**left, &**right)
-                    && let Some(index) = find_index_for_column(db, table_name, col_name)
+                    && let Some(index) = find_index_for_column(db, table_name, col_name, query_expr)
                 {
                     return Some(IndexUsage::RangeLess {
                         index_name: index.name.clone(),
@@ -743,7 +898,7 @@ pub fn find_index_usage(db: &Database, table_name: &str, expr: &Expression) -> O
             }
             BinaryOperator::LessThanOrEqual => {
                 if let (Expression::Column(col_name), Expression::Value(val)) = (&**left, &**right)
-                    && let Some(index) = find_index_for_column(db, table_name, col_name)
+                    && let Some(index) = find_index_for_column(db, table_name, col_name, query_expr)
                 {
                     return Some(IndexUsage::RangeLess {
                         index_name: index.name.clone(),
@@ -761,7 +916,7 @@ pub fn find_index_usage(db: &Database, table_name: &str, expr: &Expression) -> O
                     } = &**right
                     && *lb_op == BinaryOperator::And
                     && let (Expression::Value(lower), Expression::Value(upper)) = (&**lb, &**rb)
-                    && let Some(index) = find_index_for_column(db, table_name, col_name)
+                    && let Some(index) = find_index_for_column(db, table_name, col_name, query_expr)
                 {
                     return Some(IndexUsage::RangeBetween {
                         index_name: index.name.clone(),
@@ -771,10 +926,10 @@ pub fn find_index_usage(db: &Database, table_name: &str, expr: &Expression) -> O
                 }
             }
             BinaryOperator::And => {
-                if let Some(usage) = find_index_usage(db, table_name, left) {
+                if let Some(usage) = find_single_index_usage(db, table_name, left, query_expr) {
                     return Some(usage);
                 }
-                if let Some(usage) = find_index_usage(db, table_name, right) {
+                if let Some(usage) = find_single_index_usage(db, table_name, right, query_expr) {
                     return Some(usage);
                 }
             }
@@ -782,7 +937,7 @@ pub fn find_index_usage(db: &Database, table_name: &str, expr: &Expression) -> O
         },
         Expression::In { left, values } => {
             if let Expression::Column(col_name) = &**left
-                && let Some(index) = find_index_for_column(db, table_name, col_name)
+                && let Some(index) = find_index_for_column(db, table_name, col_name, query_expr)
             {
                 return Some(IndexUsage::In {
                     index_name: index.name.clone(),
@@ -794,7 +949,7 @@ pub fn find_index_usage(db: &Database, table_name: &str, expr: &Expression) -> O
             op: UnaryOperator::Not,
             expr,
         } => {
-            return find_index_usage(db, table_name, expr);
+            return find_single_index_usage(db, table_name, expr, query_expr);
         }
         _ => {}
     }
@@ -802,58 +957,125 @@ pub fn find_index_usage(db: &Database, table_name: &str, expr: &Expression) -> O
 }
 
 fn find_index_for_column<'a>(
-    db: &'a Database,
+    db: &'a dyn DatabaseCatalog,
     table_name: &str,
     column_name: &str,
-) -> Option<&'a crate::database::Index> {
-    let normalized_col = if column_name.contains('.') {
+    query_expr: &Expression,
+) -> Option<&'a Index> {
+    let normalized_col = normalize_column_name(column_name);
+
+    db.indexes_iter().find(|idx| {
+        idx.table == table_name
+            && idx.column == normalized_col
+            && query_implies_filter(query_expr, idx.filter_expr.as_ref())
+    })
+}
+
+fn normalize_column_name(column_name: &str) -> &str {
+    if column_name.contains('.') {
         column_name.split('.').next_back().unwrap_or(column_name)
     } else {
         column_name
+    }
+}
+
+fn get_column_positions(table: &Table, columns: &[String]) -> Result<Vec<usize>, RustqlError> {
+    columns
+        .iter()
+        .map(|column| {
+            table
+                .columns
+                .iter()
+                .position(|col| col.name == *column)
+                .ok_or_else(|| {
+                    RustqlError::Internal(format!("Column '{}' does not exist in table", column))
+                })
+        })
+        .collect()
+}
+
+pub(crate) fn row_matches_index_filter(
+    db: &dyn DatabaseCatalog,
+    table: &Table,
+    filter_expr: Option<&Expression>,
+    row: &[Value],
+) -> bool {
+    filter_expr.is_none_or(|expr| {
+        super::expr::evaluate_expression(Some(db), expr, &table.columns, row).unwrap_or(false)
+    })
+}
+
+fn remove_row_from_entries<K: Ord + Clone>(
+    entries: &mut BTreeMap<K, Vec<RowId>>,
+    key: &K,
+    row_id: RowId,
+) {
+    if let Some(entry) = entries.get_mut(key) {
+        entry.retain(|candidate| *candidate != row_id);
+        if entry.is_empty() {
+            entries.remove(key);
+        }
+    }
+}
+
+fn query_implies_filter(query_expr: &Expression, filter_expr: Option<&Expression>) -> bool {
+    let Some(filter_expr) = filter_expr else {
+        return true;
     };
 
-    db.indexes
-        .values()
-        .find(|idx| idx.table == table_name && idx.column == normalized_col)
+    let query_equalities = extract_equality_predicates(query_expr);
+    let mut filter_conjuncts = Vec::new();
+    collect_conjuncts(filter_expr, &mut filter_conjuncts);
+
+    filter_conjuncts.into_iter().all(|conjunct| {
+        extract_column_equality(conjunct)
+            .and_then(|(column, value)| query_equalities.get(&column).map(|query| query == &value))
+            .unwrap_or(false)
+    })
+}
+
+fn composite_key_for_row(row: &[Value], column_positions: &[usize]) -> Vec<Value> {
+    column_positions
+        .iter()
+        .map(|&col_idx| row.get(col_idx).cloned().unwrap_or(Value::Null))
+        .collect()
 }
 
 pub fn get_indexed_rows(
-    db: &Database,
+    db: &dyn DatabaseCatalog,
     table: &Table,
     usage: &IndexUsage,
 ) -> Result<HashSet<RowId>, RustqlError> {
-    let index = db
-        .indexes
-        .get(match usage {
-            IndexUsage::Equality { index_name, .. } => index_name,
-            IndexUsage::In { index_name, .. } => index_name,
-            IndexUsage::RangeGreater { index_name, .. } => index_name,
-            IndexUsage::RangeLess { index_name, .. } => index_name,
-            IndexUsage::RangeBetween { index_name, .. } => index_name,
-        })
-        .ok_or_else(|| "Index not found".to_string())?;
-
-    let mut row_indices = HashSet::new();
+    let mut row_ids = HashSet::new();
 
     match usage {
         IndexUsage::Equality { value, .. } => {
+            let index = db
+                .get_index(usage.index_name())
+                .ok_or_else(|| "Index not found".to_string())?;
             if let Some(rows) = index.entries.get(value) {
-                row_indices.extend(rows.iter().copied());
+                row_ids.extend(rows.iter().copied());
             }
         }
         IndexUsage::In { values, .. } => {
+            let index = db
+                .get_index(usage.index_name())
+                .ok_or_else(|| "Index not found".to_string())?;
             for value in values {
                 if let Some(rows) = index.entries.get(value) {
-                    row_indices.extend(rows.iter().copied());
+                    row_ids.extend(rows.iter().copied());
                 }
             }
         }
         IndexUsage::RangeGreater {
             value, inclusive, ..
         } => {
+            let index = db
+                .get_index(usage.index_name())
+                .ok_or_else(|| "Index not found".to_string())?;
             if *inclusive {
                 for (_, rows) in index.entries.range(value..) {
-                    row_indices.extend(rows.iter().copied());
+                    row_ids.extend(rows.iter().copied());
                 }
             } else {
                 use std::ops::Bound;
@@ -861,36 +1083,57 @@ pub fn get_indexed_rows(
                     .entries
                     .range((Bound::Excluded(value), Bound::Unbounded))
                 {
-                    row_indices.extend(rows.iter().copied());
+                    row_ids.extend(rows.iter().copied());
                 }
             }
         }
         IndexUsage::RangeLess {
             value, inclusive, ..
         } => {
+            let index = db
+                .get_index(usage.index_name())
+                .ok_or_else(|| "Index not found".to_string())?;
             if *inclusive {
                 for (_, rows) in index.entries.range(..=value) {
-                    row_indices.extend(rows.iter().copied());
+                    row_ids.extend(rows.iter().copied());
                 }
             } else {
                 for (_, rows) in index.entries.range(..value) {
-                    row_indices.extend(rows.iter().copied());
+                    row_ids.extend(rows.iter().copied());
                 }
             }
         }
         IndexUsage::RangeBetween { lower, upper, .. } => {
+            let index = db
+                .get_index(usage.index_name())
+                .ok_or_else(|| "Index not found".to_string())?;
             for (_, rows) in index.entries.range(lower..=upper) {
-                row_indices.extend(rows.iter().copied());
+                row_ids.extend(rows.iter().copied());
+            }
+        }
+        IndexUsage::CompositePrefix { values, .. } => {
+            let index = db
+                .get_composite_index(usage.index_name())
+                .ok_or_else(|| "Index not found".to_string())?;
+
+            if values.len() == index.columns.len() {
+                if let Some(rows) = index.entries.get(values) {
+                    row_ids.extend(rows.iter().copied());
+                }
+            } else {
+                for (key, rows) in &index.entries {
+                    if key.starts_with(values) {
+                        row_ids.extend(rows.iter().copied());
+                    }
+                }
             }
         }
     }
 
-    let valid_indices: HashSet<RowId> = row_indices
+    Ok(row_ids
         .into_iter()
         .filter(|row_id| table.position_of_row_id(*row_id).is_some())
-        .collect();
-
-    Ok(valid_indices)
+        .collect())
 }
 
 pub fn execute_truncate_table(
@@ -916,6 +1159,11 @@ pub fn execute_truncate_table(
         },
     );
     for index in db.indexes.values_mut() {
+        if index.table == table_name {
+            index.entries.clear();
+        }
+    }
+    for index in db.composite_indexes.values_mut() {
         if index.table == table_name {
             index.entries.clear();
         }

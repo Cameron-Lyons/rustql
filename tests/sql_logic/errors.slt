@@ -1,0 +1,18 @@
+# parser and execution error coverage
+statement ok
+CREATE TABLE slt_error_users (id INTEGER, name TEXT);
+
+statement error already exists
+CREATE TABLE slt_error_users (id INTEGER);
+
+statement error Column count mismatch
+INSERT INTO slt_error_users VALUES (1);
+
+query error Unexpected token
+SELCT * FROM slt_error_users
+
+query error does not exist
+SELECT * FROM slt_missing_users
+
+query error
+SELECT name FROM slt_error_users WHERE id IN (

@@ -1,0 +1,138 @@
+use rustql::testing::render_result;
+use rustql::{Engine, EngineOptions, StorageMode};
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+#[test]
+fn test_persisted_state_after_reload() {
+    let path = unique_temp_path("db");
+    cleanup_storage_files(&path);
+
+    let engine = open_disk_engine(&path);
+    {
+        let mut session = engine.session();
+        session
+            .execute_one("CREATE TABLE recovery_users (id INTEGER, name TEXT)")
+            .unwrap();
+        session
+            .execute_one("INSERT INTO recovery_users VALUES (1, 'Alice')")
+            .unwrap();
+    }
+    drop(engine);
+
+    let reloaded = open_disk_engine(&path);
+    let mut reloaded_session = reloaded.session();
+    let result = reloaded_session
+        .execute_one("SELECT * FROM recovery_users")
+        .unwrap();
+
+    assert!(render_result(&result).contains("Alice"), "got: {result:?}");
+    cleanup_storage_files(&path);
+}
+
+#[test]
+fn test_rolled_back_changes_not_recovered_after_reload() {
+    let path = unique_temp_path("db");
+    cleanup_storage_files(&path);
+
+    let engine = open_disk_engine(&path);
+    {
+        let mut session = engine.session();
+        session
+            .execute_one("CREATE TABLE recovery_tx (id INTEGER, name TEXT)")
+            .unwrap();
+        session.execute_one("BEGIN TRANSACTION").unwrap();
+        session
+            .execute_one("INSERT INTO recovery_tx VALUES (1, 'temp')")
+            .unwrap();
+        session.execute_one("ROLLBACK").unwrap();
+    }
+    drop(engine);
+
+    let reloaded = open_disk_engine(&path);
+    let mut reloaded_session = reloaded.session();
+    let result = reloaded_session
+        .execute_one("SELECT * FROM recovery_tx")
+        .unwrap();
+
+    assert!(!render_result(&result).contains("temp"), "got: {result:?}");
+    cleanup_storage_files(&path);
+}
+
+#[test]
+fn test_partial_index_filter_persists_across_reload() {
+    let path = unique_temp_path("db");
+    cleanup_storage_files(&path);
+
+    let engine = open_disk_engine(&path);
+    {
+        let mut session = engine.session();
+        session
+            .execute_one("CREATE TABLE recovery_pidx (id INTEGER, active INTEGER, val INTEGER)")
+            .unwrap();
+        session
+            .execute_one("INSERT INTO recovery_pidx VALUES (1, 1, 10)")
+            .unwrap();
+        session
+            .execute_one("INSERT INTO recovery_pidx VALUES (2, 0, 10)")
+            .unwrap();
+        session
+            .execute_one("CREATE INDEX idx_recovery_active ON recovery_pidx(val) WHERE active = 1")
+            .unwrap();
+    }
+    drop(engine);
+
+    let reloaded = open_disk_engine(&path);
+    let mut reloaded_session = reloaded.session();
+    let without_filter = render_result(
+        &reloaded_session
+            .execute_one("EXPLAIN SELECT id FROM recovery_pidx WHERE val = 10")
+            .unwrap(),
+    );
+    assert!(
+        !without_filter.contains("Index Scan using idx_recovery_active"),
+        "unexpected partial-index use after reload: {without_filter}"
+    );
+
+    let with_filter = render_result(
+        &reloaded_session
+            .execute_one("EXPLAIN SELECT id FROM recovery_pidx WHERE val = 10 AND active = 1")
+            .unwrap(),
+    );
+    assert!(
+        with_filter.contains("Index Scan using idx_recovery_active"),
+        "missing partial-index use after reload: {with_filter}"
+    );
+    cleanup_storage_files(&path);
+}
+
+fn open_disk_engine(path: &Path) -> Engine {
+    Engine::open(EngineOptions {
+        storage: StorageMode::BTree {
+            path: path.to_path_buf(),
+        },
+    })
+    .unwrap()
+}
+
+fn cleanup_storage_files(path: &Path) {
+    fs::remove_file(path).ok();
+
+    let mut wal = path.as_os_str().to_os_string();
+    wal.push(".wal");
+    fs::remove_file(PathBuf::from(wal)).ok();
+}
+
+fn unique_temp_path(extension: &str) -> PathBuf {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    std::env::temp_dir().join(format!(
+        "rustql-recovery-{}-{}.{}",
+        std::process::id(),
+        timestamp,
+        extension
+    ))
+}

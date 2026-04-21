@@ -1,5 +1,5 @@
 use crate::ast::*;
-use crate::database::{Database, RowId, Table};
+use crate::database::{Database, DatabaseCatalog, RowId, Table};
 use crate::engine::QueryResult;
 use crate::error::RustqlError;
 use crate::plan_executor::PlanExecutor;
@@ -8,23 +8,38 @@ use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use super::aggregate::{
-    compute_aggregate, evaluate_having, evaluate_window_functions,
+    compute_aggregate, evaluate_having, evaluate_window_function_outputs,
     execute_select_with_aggregates_result, execute_select_with_grouping_result,
 };
 use super::expr::{
     compare_values_for_sort, evaluate_expression, evaluate_select_order_expression,
-    evaluate_value_expression,
+    evaluate_value_expression, evaluate_value_expression_with_db,
 };
 use super::join::perform_multiple_joins;
-use super::{ExecutionContext, SelectResult, get_database_read, rows_result};
+use super::{ExecutionContext, SelectResult, get_database_read, get_database_write, rows_result};
+
+const MAX_RECURSIVE_CTE_ITERATIONS: usize = 1000;
 
 pub fn execute_select(
     context: &ExecutionContext,
-    stmt: SelectStatement,
+    mut stmt: SelectStatement,
 ) -> Result<QueryResult, RustqlError> {
-    let mut db = context.database_snapshot();
-    let result = execute_select_in_db(Some(context), stmt, &mut db)?;
-    Ok(rows_result(result))
+    resolve_window_definitions(&mut stmt);
+
+    {
+        let db = get_database_read(context);
+        if select_requires_source_materialization(&db, &stmt) {
+            drop(db);
+            return execute_select_with_materialized_sources(context, stmt);
+        }
+    }
+
+    let db = get_database_read(context);
+    Ok(rows_result(execute_select_internal(
+        Some(context),
+        stmt,
+        &db,
+    )?))
 }
 
 fn execute_set_operation_result(
@@ -32,7 +47,7 @@ fn execute_set_operation_result(
     left_stmt: SelectStatement,
     right_stmt: SelectStatement,
     set_op_type: &SetOperation,
-    db: &Database,
+    db: &dyn DatabaseCatalog,
 ) -> Result<SelectResult, RustqlError> {
     let mut left_stmt_internal = left_stmt;
     left_stmt_internal.set_op = None;
@@ -134,7 +149,7 @@ fn execute_set_operation_result(
 }
 
 pub(crate) fn plan_select_for_execution(
-    db: &Database,
+    db: &dyn DatabaseCatalog,
     stmt: &SelectStatement,
 ) -> Result<Option<planner::PlanNode>, RustqlError> {
     if !can_execute_via_plan(db, stmt) {
@@ -144,7 +159,7 @@ pub(crate) fn plan_select_for_execution(
     Ok(Some(planner::plan_query(db, stmt)?))
 }
 
-fn can_execute_via_plan(db: &Database, stmt: &SelectStatement) -> bool {
+fn can_execute_via_plan(db: &dyn DatabaseCatalog, stmt: &SelectStatement) -> bool {
     let has_aggregate_columns = stmt
         .columns
         .iter()
@@ -240,7 +255,7 @@ fn column_supported_by_plan(column: &Column) -> bool {
     }
 }
 
-fn join_supported_by_plan(db: &Database, join: &Join) -> bool {
+fn join_supported_by_plan(db: &dyn DatabaseCatalog, join: &Join) -> bool {
     if join.lateral {
         return join.using_columns.is_none()
             && !matches!(join.join_type, JoinType::Natural)
@@ -555,6 +570,12 @@ fn execute_generate_series_result(
     Ok(SelectResult { headers, rows })
 }
 
+fn generate_series_function(stmt: &SelectStatement) -> Option<&TableFunction> {
+    stmt.from_function
+        .as_ref()
+        .filter(|tf| tf.name == "generate_series")
+}
+
 #[derive(Default)]
 struct TempTableScope {
     originals: HashMap<String, Option<Table>>,
@@ -580,14 +601,15 @@ impl TempTableScope {
     }
 }
 
-fn select_requires_source_materialization(db: &Database, stmt: &SelectStatement) -> bool {
+fn select_requires_source_materialization(
+    db: &dyn DatabaseCatalog,
+    stmt: &SelectStatement,
+) -> bool {
     stmt.from_values.is_some()
         || stmt.from_subquery.is_some()
         || stmt.joins.iter().any(join_requires_source_materialization)
         || !stmt.ctes.is_empty()
-        || (!stmt.from.is_empty()
-            && !db.tables.contains_key(&stmt.from)
-            && db.views.contains_key(&stmt.from))
+        || (!stmt.from.is_empty() && !db.contains_table(&stmt.from) && db.contains_view(&stmt.from))
 }
 
 pub(crate) fn explain_select(
@@ -606,8 +628,17 @@ pub(crate) fn explain_select(
     }
     drop(db);
 
-    let mut db = context.database_snapshot();
+    let mut db = get_database_write(context);
     plan_select_in_db(Some(context), stmt, &mut db)
+}
+
+fn execute_select_with_materialized_sources(
+    context: &ExecutionContext,
+    stmt: SelectStatement,
+) -> Result<QueryResult, RustqlError> {
+    let mut db = get_database_write(context);
+    let result = execute_select_in_db(Some(context), stmt, &mut db)?;
+    Ok(rows_result(result))
 }
 
 fn execute_select_in_db(
@@ -617,41 +648,19 @@ fn execute_select_in_db(
 ) -> Result<SelectResult, RustqlError> {
     resolve_window_definitions(&mut stmt);
 
+    if !select_requires_source_materialization(db, &stmt)
+        && let Some(plan) = plan_select_for_execution(db, &stmt)?
+    {
+        let execution = PlanExecutor::new(db).execute(&plan, &stmt)?;
+        return Ok(SelectResult {
+            headers: execution.columns,
+            rows: execution.rows,
+        });
+    }
+
     let mut temp_scope = TempTableScope::default();
     let result = (|| {
         let rewritten = rewrite_select_sources_for_scope(context, stmt, db, &mut temp_scope)?;
-
-        if let Some((ref set_op_type, ref other_stmt)) = rewritten.set_op {
-            let left_stmt = SelectStatement {
-                ctes: Vec::new(),
-                distinct: rewritten.distinct,
-                distinct_on: rewritten.distinct_on.clone(),
-                columns: rewritten.columns.clone(),
-                from: rewritten.from.clone(),
-                from_alias: rewritten.from_alias.clone(),
-                from_subquery: rewritten.from_subquery.clone(),
-                from_function: rewritten.from_function.clone(),
-                joins: rewritten.joins.clone(),
-                where_clause: rewritten.where_clause.clone(),
-                group_by: rewritten.group_by.clone(),
-                having: rewritten.having.clone(),
-                order_by: rewritten.order_by.clone(),
-                limit: rewritten.limit,
-                offset: rewritten.offset,
-                fetch: rewritten.fetch.clone(),
-                set_op: None,
-                window_definitions: Vec::new(),
-                from_values: rewritten.from_values.clone(),
-            };
-            return execute_set_operation_result(
-                context,
-                left_stmt,
-                other_stmt.as_ref().clone(),
-                set_op_type,
-                db,
-            );
-        }
-
         if let Some(plan) = plan_select_for_execution(db, &rewritten)? {
             let execution = PlanExecutor::new(db).execute(&plan, &rewritten)?;
             return Ok(SelectResult {
@@ -659,7 +668,7 @@ fn execute_select_in_db(
                 rows: execution.rows,
             });
         }
-        execute_select_legacy_internal(context, rewritten, db)
+        execute_select_internal(context, rewritten, db)
     })();
     temp_scope.cleanup(db);
     result
@@ -729,8 +738,8 @@ fn rewrite_select_sources_for_scope(
     }
 
     if !stmt.from.is_empty()
-        && !db.tables.contains_key(&stmt.from)
-        && let Some(view) = db.views.get(&stmt.from).cloned()
+        && !db.contains_table(&stmt.from)
+        && let Some(view) = db.get_view(&stmt.from).cloned()
     {
         let view_result = execute_view_select_in_db(context, &view.query_sql, db)?;
         temp_scope.insert_or_replace(
@@ -817,9 +826,10 @@ fn materialize_recursive_cte_for_scope(
             Some(set)
         };
 
-        const MAX_ITERATIONS: usize = 1000;
-        for _ in 0..MAX_ITERATIONS {
+        let mut converged = false;
+        for _ in 0..MAX_RECURSIVE_CTE_ITERATIONS {
             if working_rows.is_empty() {
+                converged = true;
                 break;
             }
 
@@ -843,11 +853,19 @@ fn materialize_recursive_cte_for_scope(
             }
 
             if new_rows.is_empty() {
+                converged = true;
                 break;
             }
 
             all_rows.extend(new_rows.clone());
             working_rows = new_rows;
+        }
+
+        if !converged {
+            return Err(RustqlError::Internal(format!(
+                "Recursive CTE '{}' exceeded the iteration limit of {}",
+                cte.name, MAX_RECURSIVE_CTE_ITERATIONS
+            )));
         }
 
         temp_scope.insert_or_replace(db, cte.name.clone(), Table::new(columns, all_rows, vec![]));
@@ -941,7 +959,7 @@ fn value_data_type(value: &Value) -> DataType {
 pub(crate) fn execute_select_internal(
     context: Option<&ExecutionContext>,
     stmt: SelectStatement,
-    db: &Database,
+    db: &dyn DatabaseCatalog,
 ) -> Result<SelectResult, RustqlError> {
     if let Some(plan) = plan_select_for_execution(db, &stmt)? {
         let execution = PlanExecutor::new(db).execute(&plan, &stmt)?;
@@ -951,17 +969,38 @@ pub(crate) fn execute_select_internal(
         });
     }
 
-    execute_select_legacy_internal(context, stmt, db)
-}
+    if let Some((ref set_op_type, ref other_stmt)) = stmt.set_op {
+        let left_stmt = SelectStatement {
+            ctes: Vec::new(),
+            distinct: stmt.distinct,
+            distinct_on: stmt.distinct_on.clone(),
+            columns: stmt.columns.clone(),
+            from: stmt.from.clone(),
+            from_alias: stmt.from_alias.clone(),
+            from_subquery: stmt.from_subquery.clone(),
+            from_function: stmt.from_function.clone(),
+            joins: stmt.joins.clone(),
+            where_clause: stmt.where_clause.clone(),
+            group_by: stmt.group_by.clone(),
+            having: stmt.having.clone(),
+            order_by: stmt.order_by.clone(),
+            limit: stmt.limit,
+            offset: stmt.offset,
+            fetch: stmt.fetch.clone(),
+            set_op: None,
+            window_definitions: Vec::new(),
+            from_values: None,
+        };
+        return execute_set_operation_result(
+            context,
+            left_stmt,
+            other_stmt.as_ref().clone(),
+            set_op_type,
+            db,
+        );
+    }
 
-fn execute_select_legacy_internal(
-    context: Option<&ExecutionContext>,
-    stmt: SelectStatement,
-    db: &Database,
-) -> Result<SelectResult, RustqlError> {
-    if let Some(ref tf) = stmt.from_function
-        && tf.name == "generate_series"
-    {
+    if let Some(tf) = generate_series_function(&stmt) {
         return execute_generate_series_result(stmt.clone(), tf);
     }
 
@@ -969,29 +1008,41 @@ fn execute_select_legacy_internal(
         return execute_select_without_from(stmt);
     }
 
-    let (all_rows, all_columns) = if !stmt.joins.is_empty() {
+    let mut joined_rows_storage: Option<Vec<Vec<Value>>> = None;
+    let all_columns = if stmt.joins.is_empty() {
+        let table = db
+            .get_table(&stmt.from)
+            .ok_or_else(|| RustqlError::TableNotFound(stmt.from.clone()))?;
+        table.columns.clone()
+    } else {
         let main_table = db
-            .tables
-            .get(&stmt.from)
+            .get_table(&stmt.from)
             .ok_or_else(|| RustqlError::TableNotFound(stmt.from.clone()))?;
         let (joined_rows, all_cols) =
             perform_multiple_joins(context, db, main_table, &stmt.from, &stmt.joins)?;
-        (joined_rows, all_cols)
-    } else {
-        let table = db
-            .tables
-            .get(&stmt.from)
-            .ok_or_else(|| RustqlError::TableNotFound(stmt.from.clone()))?;
-        (table.rows.clone(), table.columns.clone())
+        joined_rows_storage = Some(joined_rows);
+        all_cols
     };
 
     let mut filtered_rows: Vec<&Vec<Value>> = Vec::new();
 
-    if stmt.joins.is_empty() {
+    if let Some(joined_rows) = joined_rows_storage.as_ref() {
+        filtered_rows.reserve(joined_rows.len());
+        for row in joined_rows {
+            let include_row = if let Some(ref where_expr) = stmt.where_clause {
+                evaluate_expression(Some(db), where_expr, &all_columns, row)?
+            } else {
+                true
+            };
+            if include_row {
+                filtered_rows.push(row);
+            }
+        }
+    } else {
         let table = db
-            .tables
-            .get(&stmt.from)
+            .get_table(&stmt.from)
             .ok_or_else(|| RustqlError::TableNotFound(stmt.from.clone()))?;
+        filtered_rows.reserve(table.rows.len());
 
         let candidate_indices: Option<HashSet<RowId>> = if let Some(ref where_expr) =
             stmt.where_clause
@@ -1005,34 +1056,13 @@ fn execute_select_legacy_internal(
             None
         };
 
-        let rows_to_check: Vec<(usize, RowId, &Vec<Value>)> =
-            if let Some(ref candidate_set) = candidate_indices {
-                table
-                    .iter_rows_with_ids()
-                    .enumerate()
-                    .filter(|(_, (row_id, _))| candidate_set.contains(row_id))
-                    .map(|(idx, (row_id, row))| (idx, row_id, row))
-                    .collect()
-            } else {
-                table
-                    .iter_rows_with_ids()
-                    .enumerate()
-                    .map(|(idx, (row_id, row))| (idx, row_id, row))
-                    .collect()
-            };
-
-        for (_, _, row) in rows_to_check {
-            let include_row = if let Some(ref where_expr) = stmt.where_clause {
-                evaluate_expression(Some(db), where_expr, &all_columns, row)?
-            } else {
-                true
-            };
-            if include_row {
-                filtered_rows.push(row);
+        for (row_id, row) in table.iter_rows_with_ids() {
+            if candidate_indices
+                .as_ref()
+                .is_some_and(|candidate_set| !candidate_set.contains(&row_id))
+            {
+                continue;
             }
-        }
-    } else {
-        for row in &all_rows {
             let include_row = if let Some(ref where_expr) = stmt.where_clause {
                 evaluate_expression(Some(db), where_expr, &all_columns, row)?
             } else {
@@ -1058,6 +1088,14 @@ fn execute_select_legacy_internal(
         let temp_table = Table::new(all_columns.clone(), Vec::new(), vec![]);
         let row_refs: Vec<&Vec<Value>> = filtered_rows.to_vec();
         return execute_select_with_aggregates_result(stmt.clone(), &temp_table, row_refs);
+    }
+
+    enum ProjectionStep {
+        Named(usize),
+        Function,
+        Subquery(Box<SelectStatement>),
+        Window,
+        Expression(Expression),
     }
 
     let column_specs: Vec<(String, Column)> = if matches!(stmt.columns[0], Column::All) {
@@ -1096,7 +1134,27 @@ fn execute_select_legacy_internal(
             .collect()
     };
 
+    let projection_steps: Vec<ProjectionStep> = column_specs
+        .iter()
+        .map(|(_, col)| match col {
+            Column::All => unreachable!(),
+            Column::Named { name, .. } => Ok(ProjectionStep::Named(resolve_named_column_index(
+                &all_columns,
+                name,
+            )?)),
+            Column::Function(_) => Ok(ProjectionStep::Function),
+            Column::Subquery(subquery) => Ok(ProjectionStep::Subquery(subquery.clone())),
+            Column::Expression {
+                expr: Expression::WindowFunction { .. },
+                ..
+            } => Ok(ProjectionStep::Window),
+            Column::Expression { expr, .. } => Ok(ProjectionStep::Expression(expr.clone())),
+        })
+        .collect::<Result<_, RustqlError>>()?;
+
     let headers: Vec<String> = column_specs.iter().map(|(name, _)| name.clone()).collect();
+    let projected_order_lookup = build_projected_order_lookup(&column_specs);
+    let base_order_lookup = build_base_order_lookup(&all_columns);
 
     let has_window_fn = column_specs.iter().any(|(_, col)| {
         matches!(
@@ -1109,46 +1167,31 @@ fn execute_select_legacy_internal(
     });
 
     let window_rows: Option<Vec<Vec<Value>>> = if has_window_fn {
-        let mut raw: Vec<Vec<Value>> = filtered_rows.iter().map(|r| (*r).clone()).collect();
-        evaluate_window_functions(&mut raw, &all_columns, &stmt.columns)?;
-        Some(raw)
+        Some(evaluate_window_function_outputs(
+            &filtered_rows,
+            &all_columns,
+            &stmt.columns,
+        )?)
     } else {
         None
     };
 
-    let mut outputs: Vec<(Vec<Value>, Vec<Value>)> = Vec::with_capacity(filtered_rows.len());
-    for (row_idx, row_ref) in filtered_rows.iter().enumerate() {
-        let row = *row_ref;
+    let project_row = |row_idx: usize, row: &Vec<Value>| -> Result<Vec<Value>, RustqlError> {
         let mut projected: Vec<Value> = Vec::with_capacity(column_specs.len());
-        let mut wf_offset = all_columns.len();
+        let mut wf_offset = 0;
 
-        for (_, col) in &column_specs {
-            let val = match col {
-                Column::All => unreachable!(),
-                Column::Named { name, .. } => {
-                    let column_name = if name.contains('.') {
-                        name.split('.').next_back().unwrap_or(name)
-                    } else {
-                        name.as_str()
-                    };
-                    let idx = all_columns
-                        .iter()
-                        .position(|c| c.name == column_name)
-                        .ok_or_else(|| RustqlError::ColumnNotFound(name.clone()))?;
-                    row[idx].clone()
-                }
-                Column::Function(_) => {
+        for step in &projection_steps {
+            let val = match step {
+                ProjectionStep::Named(idx) => row[*idx].clone(),
+                ProjectionStep::Function => {
                     return Err(RustqlError::Internal(
                         "Aggregate functions in UNION must use GROUP BY".to_string(),
                     ));
                 }
-                Column::Subquery(subquery) => {
+                ProjectionStep::Subquery(subquery) => {
                     eval_scalar_subquery_with_outer(db, subquery, &all_columns, row)?
                 }
-                Column::Expression {
-                    expr: Expression::WindowFunction { .. },
-                    ..
-                } => {
+                ProjectionStep::Window => {
                     if let Some(ref wr) = window_rows {
                         let v = wr[row_idx].get(wf_offset).cloned().unwrap_or(Value::Null);
                         wf_offset += 1;
@@ -1157,22 +1200,45 @@ fn execute_select_legacy_internal(
                         Value::Null
                     }
                 }
-                Column::Expression { expr, .. } => {
-                    evaluate_value_expression(expr, &all_columns, row)?
+                ProjectionStep::Expression(expr) => {
+                    evaluate_value_expression_with_db(expr, &all_columns, row, Some(db))?
                 }
             };
             projected.push(val);
         }
 
-        let mut order_values: Vec<Value> = Vec::new();
+        Ok(projected)
+    };
+
+    if stmt.order_by.is_none()
+        && stmt.distinct_on.is_none()
+        && !stmt.distinct
+        && stmt.offset.unwrap_or(0) == 0
+        && stmt.limit.is_none()
+        && stmt.fetch.is_none()
+    {
+        let mut rows: Vec<Vec<Value>> = Vec::with_capacity(filtered_rows.len());
+        for (row_idx, row_ref) in filtered_rows.iter().enumerate() {
+            rows.push(project_row(row_idx, row_ref)?);
+        }
+        return Ok(SelectResult { headers, rows });
+    }
+
+    let mut outputs: Vec<(Vec<Value>, Vec<Value>)> = Vec::with_capacity(filtered_rows.len());
+    for (row_idx, row_ref) in filtered_rows.iter().enumerate() {
+        let row = *row_ref;
+        let projected = project_row(row_idx, row)?;
+
+        let mut order_values: Vec<Value> =
+            Vec::with_capacity(stmt.order_by.as_ref().map_or(0, Vec::len));
         if let Some(ref order_by) = stmt.order_by {
             for order_expr in order_by {
                 let value = evaluate_select_order_expression(
                     &order_expr.expr,
-                    &all_columns,
                     row,
-                    &column_specs,
                     &projected,
+                    &projected_order_lookup,
+                    &base_order_lookup,
                     true,
                 )?;
                 order_values.push(value);
@@ -1208,7 +1274,8 @@ fn execute_select_legacy_internal(
                             }
                         }
                     }
-                    evaluate_value_expression(expr, &all_columns, &projected).unwrap_or(Value::Null)
+                    evaluate_value_expression_with_db(expr, &all_columns, &projected, Some(db))
+                        .unwrap_or(Value::Null)
                 })
                 .collect();
             if seen_keys.insert(key) {
@@ -1264,7 +1331,7 @@ fn execute_select_legacy_internal(
 }
 
 pub fn eval_subquery_values(
-    db: &Database,
+    db: &dyn DatabaseCatalog,
     subquery: &SelectStatement,
 ) -> Result<Vec<Value>, RustqlError> {
     if subquery.columns.len() != 1 {
@@ -1273,8 +1340,7 @@ pub fn eval_subquery_values(
         ));
     }
     let table = db
-        .tables
-        .get(&subquery.from)
+        .get_table(&subquery.from)
         .ok_or_else(|| RustqlError::TableNotFound(subquery.from.clone()))?;
 
     let mut filtered_rows: Vec<&Vec<Value>> = Vec::new();
@@ -1293,30 +1359,30 @@ pub fn eval_subquery_values(
             None
         };
 
-        let rows_to_check: Vec<(usize, RowId, &Vec<Value>)> =
-            if let Some(ref candidate_set) = candidate_indices {
-                table
-                    .iter_rows_with_ids()
-                    .enumerate()
-                    .filter(|(_, (row_id, _))| candidate_set.contains(row_id))
-                    .map(|(idx, (row_id, row))| (idx, row_id, row))
-                    .collect()
-            } else {
-                table
-                    .iter_rows_with_ids()
-                    .enumerate()
-                    .map(|(idx, (row_id, row))| (idx, row_id, row))
-                    .collect()
-            };
-
-        for (_, _, row) in rows_to_check {
-            let include_row = if let Some(ref where_expr) = subquery.where_clause {
-                evaluate_expression(Some(db), where_expr, &table.columns, row)?
-            } else {
-                true
-            };
-            if include_row {
-                filtered_rows.push(row);
+        if let Some(ref candidate_set) = candidate_indices {
+            for (_, row) in table
+                .iter_rows_with_ids()
+                .filter(|(row_id, _)| candidate_set.contains(row_id))
+            {
+                let include_row = if let Some(ref where_expr) = subquery.where_clause {
+                    evaluate_expression(Some(db), where_expr, &table.columns, row)?
+                } else {
+                    true
+                };
+                if include_row {
+                    filtered_rows.push(row);
+                }
+            }
+        } else {
+            for (_, row) in table.iter_rows_with_ids() {
+                let include_row = if let Some(ref where_expr) = subquery.where_clause {
+                    evaluate_expression(Some(db), where_expr, &table.columns, row)?
+                } else {
+                    true
+                };
+                if include_row {
+                    filtered_rows.push(row);
+                }
             }
         }
     } else {
@@ -1358,6 +1424,14 @@ pub fn eval_subquery_values(
                         .iter()
                         .map(|expr| {
                             evaluate_value_expression(expr, &table.columns, row)
+                                .or_else(|_| {
+                                    evaluate_value_expression_with_db(
+                                        expr,
+                                        &table.columns,
+                                        row,
+                                        Some(db),
+                                    )
+                                })
                                 .unwrap_or(Value::Null)
                         })
                         .collect();
@@ -1396,6 +1470,14 @@ pub fn eval_subquery_values(
                         .iter()
                         .map(|expr| {
                             evaluate_value_expression(expr, &table.columns, row)
+                                .or_else(|_| {
+                                    evaluate_value_expression_with_db(
+                                        expr,
+                                        &table.columns,
+                                        row,
+                                        Some(db),
+                                    )
+                                })
                                 .unwrap_or(Value::Null)
                         })
                         .collect();
@@ -1438,8 +1520,131 @@ pub fn eval_subquery_values(
     }
 }
 
+fn scalar_subquery_requires_materialization(subquery: &SelectStatement) -> bool {
+    subquery.order_by.is_some() || subquery.offset.unwrap_or(0) > 0 || subquery.limit.is_some()
+}
+
+fn remember_lookup_name(lookup: &mut HashMap<String, usize>, name: &str, index: usize) {
+    lookup.entry(name.to_string()).or_insert(index);
+}
+
+fn build_projected_order_lookup(column_specs: &[(String, Column)]) -> HashMap<String, usize> {
+    let mut lookup = HashMap::new();
+    for (index, (header, col_spec)) in column_specs.iter().enumerate() {
+        remember_lookup_name(&mut lookup, header, index);
+        if let Column::Named { name, alias } = col_spec {
+            if let Some(alias) = alias {
+                remember_lookup_name(&mut lookup, alias, index);
+            }
+            remember_lookup_name(&mut lookup, name, index);
+            remember_lookup_name(
+                &mut lookup,
+                name.split('.').next_back().unwrap_or(name),
+                index,
+            );
+        }
+    }
+    lookup
+}
+
+fn build_base_order_lookup(columns: &[ColumnDefinition]) -> HashMap<String, usize> {
+    let mut lookup = HashMap::new();
+    for (index, column) in columns.iter().enumerate() {
+        remember_lookup_name(&mut lookup, &column.name, index);
+    }
+    lookup
+}
+
+fn resolve_named_column_index(
+    columns: &[ColumnDefinition],
+    name: &str,
+) -> Result<usize, RustqlError> {
+    columns
+        .iter()
+        .position(|c| {
+            c.name
+                == (if name.contains('.') {
+                    name.split('.').next_back().unwrap_or(name)
+                } else {
+                    name
+                })
+        })
+        .ok_or_else(|| RustqlError::ColumnNotFound(name.to_string()))
+}
+
+fn combine_outer_inner_rows(outer_row: &[Value], inner_row: &[Value]) -> Vec<Value> {
+    let mut combined_row = Vec::with_capacity(outer_row.len() + inner_row.len());
+    combined_row.extend_from_slice(outer_row);
+    combined_row.extend_from_slice(inner_row);
+    combined_row
+}
+
+fn reset_combined_row(buffer: &mut Vec<Value>, outer_row: &[Value], inner_row: &[Value]) {
+    buffer.clear();
+    buffer.extend_from_slice(outer_row);
+    buffer.extend_from_slice(inner_row);
+}
+
+fn apply_scalar_order_and_slice(
+    rows: &mut Vec<Vec<Value>>,
+    order_by: Option<&[OrderByExpr]>,
+    combined_columns: &[ColumnDefinition],
+    offset: Option<usize>,
+    limit: Option<usize>,
+) -> Result<(), RustqlError> {
+    if let Some(order_by) = order_by {
+        let mut ordered_rows: Vec<(Vec<Value>, Vec<Value>)> = rows
+            .drain(..)
+            .map(|row| {
+                let order_values = order_by
+                    .iter()
+                    .map(|ob| {
+                        evaluate_value_expression(&ob.expr, combined_columns, &row)
+                            .unwrap_or(Value::Null)
+                    })
+                    .collect();
+                (row, order_values)
+            })
+            .collect();
+        ordered_rows.sort_by(|a, b| {
+            for (index, ob) in order_by.iter().enumerate() {
+                let ord = compare_values_for_sort(&a.1[index], &b.1[index]);
+                if ord != std::cmp::Ordering::Equal {
+                    return if ob.asc { ord } else { ord.reverse() };
+                }
+            }
+            std::cmp::Ordering::Equal
+        });
+        rows.extend(ordered_rows.into_iter().map(|(row, _)| row));
+    }
+    let start = offset.unwrap_or(0);
+    let end = if let Some(limit) = limit {
+        start.saturating_add(limit)
+    } else {
+        rows.len()
+    };
+    let end = end.min(rows.len());
+    if start >= rows.len() {
+        rows.clear();
+    } else {
+        rows.drain(0..start);
+        rows.truncate(end - start);
+    }
+    Ok(())
+}
+
+fn record_scalar_value(slot: &mut Option<Value>, value: Value) -> Result<(), RustqlError> {
+    if slot.replace(value).is_some() {
+        Err(RustqlError::Internal(
+            "Scalar subquery returned more than one row".to_string(),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 pub fn eval_subquery_exists_with_outer(
-    db: &Database,
+    db: &dyn DatabaseCatalog,
     subquery: &SelectStatement,
     outer_columns: &[ColumnDefinition],
     outer_row: &[Value],
@@ -1449,22 +1654,25 @@ pub fn eval_subquery_exists_with_outer(
     }
 
     let table = db
-        .tables
-        .get(&subquery.from)
+        .get_table(&subquery.from)
         .ok_or_else(|| RustqlError::TableNotFound(subquery.from.clone()))?;
+
+    if subquery.where_clause.is_none() {
+        return Ok(!table.rows.is_empty());
+    }
 
     let mut combined_columns: Vec<ColumnDefinition> = outer_columns.to_vec();
     combined_columns.extend(table.columns.clone());
+    let mut combined_row = Vec::with_capacity(outer_row.len() + table.columns.len());
 
     for inner_row in &table.rows {
-        let mut combined_row: Vec<Value> = outer_row.to_vec();
-        combined_row.extend(inner_row.clone());
-
-        let include_row = if let Some(ref where_expr) = subquery.where_clause {
-            evaluate_expression(Some(db), where_expr, &combined_columns, &combined_row)?
-        } else {
-            true
-        };
+        reset_combined_row(&mut combined_row, outer_row, inner_row);
+        let include_row = evaluate_expression(
+            Some(db),
+            subquery.where_clause.as_ref().unwrap(),
+            &combined_columns,
+            &combined_row,
+        )?;
         if include_row {
             return Ok(true);
         }
@@ -1473,31 +1681,34 @@ pub fn eval_subquery_exists_with_outer(
 }
 
 fn eval_subquery_exists_with_joins(
-    db: &Database,
+    db: &dyn DatabaseCatalog,
     subquery: &SelectStatement,
     outer_columns: &[ColumnDefinition],
     outer_row: &[Value],
 ) -> Result<bool, RustqlError> {
     let main_table = db
-        .tables
-        .get(&subquery.from)
+        .get_table(&subquery.from)
         .ok_or_else(|| RustqlError::TableNotFound(subquery.from.clone()))?;
 
     let (joined_rows, all_subquery_columns) =
         perform_multiple_joins(None, db, main_table, &subquery.from, &subquery.joins)?;
 
+    if subquery.where_clause.is_none() {
+        return Ok(!joined_rows.is_empty());
+    }
+
     let mut combined_columns: Vec<ColumnDefinition> = outer_columns.to_vec();
     combined_columns.extend(all_subquery_columns.clone());
+    let mut combined_row = Vec::with_capacity(outer_row.len() + all_subquery_columns.len());
 
     for sub_row in joined_rows {
-        let mut combined_row: Vec<Value> = outer_row.to_vec();
-        combined_row.extend(sub_row);
-
-        let include_row = if let Some(ref where_expr) = subquery.where_clause {
-            evaluate_expression(Some(db), where_expr, &combined_columns, &combined_row)?
-        } else {
-            return Ok(true);
-        };
+        reset_combined_row(&mut combined_row, outer_row, &sub_row);
+        let include_row = evaluate_expression(
+            Some(db),
+            subquery.where_clause.as_ref().unwrap(),
+            &combined_columns,
+            &combined_row,
+        )?;
         if include_row {
             return Ok(true);
         }
@@ -1506,7 +1717,7 @@ fn eval_subquery_exists_with_joins(
 }
 
 pub fn eval_scalar_subquery_with_outer(
-    db: &Database,
+    db: &dyn DatabaseCatalog,
     subquery: &SelectStatement,
     outer_columns: &[ColumnDefinition],
     outer_row: &[Value],
@@ -1519,8 +1730,7 @@ pub fn eval_scalar_subquery_with_outer(
 
     if !subquery.joins.is_empty() {
         let main_table = db
-            .tables
-            .get(&subquery.from)
+            .get_table(&subquery.from)
             .ok_or_else(|| RustqlError::TableNotFound(subquery.from.clone()))?;
 
         let (joined_rows, all_subquery_columns) =
@@ -1528,10 +1738,92 @@ pub fn eval_scalar_subquery_with_outer(
 
         let mut combined_columns: Vec<ColumnDefinition> = outer_columns.to_vec();
         combined_columns.extend(all_subquery_columns.clone());
-        let mut candidate_rows: Vec<Vec<Value>> = Vec::new();
+        let joined_rows_len = joined_rows.len();
+        match &subquery.columns[0] {
+            Column::All => {
+                return Err(RustqlError::Internal(
+                    "Scalar subquery cannot use *".to_string(),
+                ));
+            }
+            Column::Expression { .. } => {
+                return Err(RustqlError::Internal(
+                    "Scalar subquery cannot use expressions".to_string(),
+                ));
+            }
+            Column::Function(agg) => {
+                let mut subquery_rows: Vec<Vec<Value>> = Vec::with_capacity(joined_rows_len);
+                let mut combined_row =
+                    Vec::with_capacity(outer_row.len() + all_subquery_columns.len());
+                for sub_row in joined_rows {
+                    reset_combined_row(&mut combined_row, outer_row, &sub_row);
+                    let include_row = if let Some(ref where_expr) = subquery.where_clause {
+                        evaluate_expression(Some(db), where_expr, &combined_columns, &combined_row)?
+                    } else {
+                        true
+                    };
+                    if include_row {
+                        subquery_rows.push(sub_row);
+                    }
+                }
+
+                let temp_table = Table::new(all_subquery_columns.clone(), subquery_rows, vec![]);
+                let filtered_rows: Vec<&Vec<Value>> = temp_table.rows.iter().collect();
+
+                return compute_aggregate(
+                    &agg.function,
+                    &agg.expr,
+                    &temp_table,
+                    &filtered_rows,
+                    agg.distinct,
+                );
+            }
+            Column::Named { name, .. } if !scalar_subquery_requires_materialization(subquery) => {
+                let col_idx = resolve_named_column_index(&combined_columns, name)?;
+                let mut result = None;
+                let mut combined_row =
+                    Vec::with_capacity(outer_row.len() + all_subquery_columns.len());
+                for sub_row in joined_rows {
+                    reset_combined_row(&mut combined_row, outer_row, &sub_row);
+                    let include_row = if let Some(ref where_expr) = subquery.where_clause {
+                        evaluate_expression(Some(db), where_expr, &combined_columns, &combined_row)?
+                    } else {
+                        true
+                    };
+                    if include_row {
+                        record_scalar_value(&mut result, combined_row[col_idx].clone())?;
+                    }
+                }
+                return Ok(result.unwrap_or(Value::Null));
+            }
+            Column::Subquery(nested) if !scalar_subquery_requires_materialization(subquery) => {
+                let mut result = None;
+                let mut combined_row =
+                    Vec::with_capacity(outer_row.len() + all_subquery_columns.len());
+                for sub_row in joined_rows {
+                    reset_combined_row(&mut combined_row, outer_row, &sub_row);
+                    let include_row = if let Some(ref where_expr) = subquery.where_clause {
+                        evaluate_expression(Some(db), where_expr, &combined_columns, &combined_row)?
+                    } else {
+                        true
+                    };
+                    if include_row {
+                        let value = eval_scalar_subquery_with_outer(
+                            db,
+                            nested,
+                            &combined_columns,
+                            &combined_row,
+                        )?;
+                        record_scalar_value(&mut result, value)?;
+                    }
+                }
+                return Ok(result.unwrap_or(Value::Null));
+            }
+            _ => {}
+        }
+
+        let mut candidate_rows: Vec<Vec<Value>> = Vec::with_capacity(joined_rows_len);
         for sub_row in joined_rows {
-            let mut combined_row: Vec<Value> = outer_row.to_vec();
-            combined_row.extend(sub_row);
+            let combined_row = combine_outer_inner_rows(outer_row, &sub_row);
             let include_row = if let Some(ref where_expr) = subquery.where_clause {
                 evaluate_expression(Some(db), where_expr, &combined_columns, &combined_row)?
             } else {
@@ -1542,38 +1834,13 @@ pub fn eval_scalar_subquery_with_outer(
             }
         }
 
-        let apply_order_and_slice = |rows: &mut Vec<Vec<Value>>| -> Result<(), RustqlError> {
-            if let Some(order_by) = &subquery.order_by {
-                rows.sort_by(|a, b| {
-                    for ob in order_by {
-                        let va = evaluate_value_expression(&ob.expr, &combined_columns, a)
-                            .unwrap_or(Value::Null);
-                        let vb = evaluate_value_expression(&ob.expr, &combined_columns, b)
-                            .unwrap_or(Value::Null);
-                        let ord = compare_values_for_sort(&va, &vb);
-                        if ord != std::cmp::Ordering::Equal {
-                            return if ob.asc { ord } else { ord.reverse() };
-                        }
-                    }
-                    std::cmp::Ordering::Equal
-                });
-            }
-            let start = subquery.offset.unwrap_or(0);
-            let end = if let Some(limit) = subquery.limit {
-                start.saturating_add(limit)
-            } else {
-                rows.len()
-            };
-            let end = end.min(rows.len());
-            if start >= rows.len() {
-                rows.clear();
-            } else {
-                rows.drain(0..start);
-                rows.truncate(end - start);
-            }
-            Ok(())
-        };
-        apply_order_and_slice(&mut candidate_rows)?;
+        apply_scalar_order_and_slice(
+            &mut candidate_rows,
+            subquery.order_by.as_deref(),
+            &combined_columns,
+            subquery.offset,
+            subquery.limit,
+        )?;
 
         return match &subquery.columns[0] {
             Column::All => Err(RustqlError::Internal(
@@ -1583,117 +1850,46 @@ pub fn eval_scalar_subquery_with_outer(
                 "Scalar subquery cannot use expressions".to_string(),
             )),
             Column::Named { name, .. } => {
-                let col_idx = combined_columns
-                    .iter()
-                    .position(|c| {
-                        c.name
-                            == (if name.contains('.') {
-                                name.split('.').next_back().unwrap_or(name)
-                            } else {
-                                name
-                            })
-                    })
-                    .ok_or_else(|| RustqlError::ColumnNotFound(name.clone()))?;
-                if candidate_rows.is_empty() {
-                    Ok(Value::Null)
-                } else if candidate_rows.len() == 1 {
-                    Ok(candidate_rows[0][col_idx].clone())
-                } else {
-                    Err(RustqlError::Internal(
+                let col_idx = resolve_named_column_index(&combined_columns, name)?;
+                match candidate_rows.len() {
+                    0 => Ok(Value::Null),
+                    1 => Ok(candidate_rows[0][col_idx].clone()),
+                    _ => Err(RustqlError::Internal(
                         "Scalar subquery returned more than one row".to_string(),
-                    ))
+                    )),
                 }
             }
             Column::Subquery(nested) => {
-                let mut results = Vec::new();
+                let mut result = None;
                 for combined_row in candidate_rows {
-                    let v = eval_scalar_subquery_with_outer(
+                    let value = eval_scalar_subquery_with_outer(
                         db,
                         nested,
                         &combined_columns,
                         &combined_row,
                     )?;
-                    results.push(v);
+                    record_scalar_value(&mut result, value)?;
                 }
-                if results.is_empty() {
-                    Ok(Value::Null)
-                } else if results.len() == 1 {
-                    Ok(results[0].clone())
-                } else {
-                    Err(RustqlError::Internal(
-                        "Scalar subquery returned more than one row".to_string(),
-                    ))
-                }
+                Ok(result.unwrap_or(Value::Null))
             }
-            Column::Function(agg) => {
-                let outer_col_count = outer_columns.len();
-
-                let mut subquery_rows: Vec<Vec<Value>> = Vec::new();
-                for combined_row in &candidate_rows {
-                    subquery_rows.push(combined_row[outer_col_count..].to_vec());
-                }
-
-                let filtered_rows: Vec<&Vec<Value>> = subquery_rows.iter().collect();
-
-                let temp_table =
-                    Table::new(all_subquery_columns.clone(), subquery_rows.clone(), vec![]);
-
-                compute_aggregate(
-                    &agg.function,
-                    &agg.expr,
-                    &temp_table,
-                    &filtered_rows,
-                    agg.distinct,
-                )
-            }
+            Column::Function(_) => Err(RustqlError::Internal(
+                "Scalar subquery cannot use aggregate functions".to_string(),
+            )),
         };
     }
 
     let table = db
-        .tables
-        .get(&subquery.from)
+        .get_table(&subquery.from)
         .ok_or_else(|| RustqlError::TableNotFound(subquery.from.clone()))?;
 
     let mut combined_columns: Vec<ColumnDefinition> = outer_columns.to_vec();
     combined_columns.extend(table.columns.clone());
 
-    let apply_order_and_slice = |rows: &mut Vec<Vec<Value>>| -> Result<(), RustqlError> {
-        if let Some(order_by) = &subquery.order_by {
-            rows.sort_by(|a, b| {
-                for ob in order_by {
-                    let va = evaluate_value_expression(&ob.expr, &combined_columns, a)
-                        .unwrap_or(Value::Null);
-                    let vb = evaluate_value_expression(&ob.expr, &combined_columns, b)
-                        .unwrap_or(Value::Null);
-                    let ord = compare_values_for_sort(&va, &vb);
-                    if ord != std::cmp::Ordering::Equal {
-                        return if ob.asc { ord } else { ord.reverse() };
-                    }
-                }
-                std::cmp::Ordering::Equal
-            });
-        }
-        let start = subquery.offset.unwrap_or(0);
-        let end = if let Some(limit) = subquery.limit {
-            start.saturating_add(limit)
-        } else {
-            rows.len()
-        };
-        let end = end.min(rows.len());
-        if start >= rows.len() {
-            rows.clear();
-        } else {
-            rows.drain(0..start);
-            rows.truncate(end - start);
-        }
-        Ok(())
-    };
-
     if let Column::Function(agg) = &subquery.columns[0] {
         let mut filtered_rows: Vec<&Vec<Value>> = Vec::new();
+        let mut combined_row = Vec::with_capacity(outer_row.len() + table.columns.len());
         for inner_row in &table.rows {
-            let mut combined_row: Vec<Value> = outer_row.to_vec();
-            combined_row.extend(inner_row.clone());
+            reset_combined_row(&mut combined_row, outer_row, inner_row);
 
             let include_row = if let Some(ref where_expr) = subquery.where_clause {
                 evaluate_expression(Some(db), where_expr, &combined_columns, &combined_row)?
@@ -1713,107 +1909,111 @@ pub fn eval_scalar_subquery_with_outer(
         );
     }
 
-    if let Column::Subquery(nested_subquery) = &subquery.columns[0] {
-        let mut candidate_rows: Vec<Vec<Value>> = Vec::new();
-        for inner_row in &table.rows {
-            let mut combined_row: Vec<Value> = outer_row.to_vec();
-            combined_row.extend(inner_row.clone());
-
-            let include_row = if let Some(ref where_expr) = subquery.where_clause {
-                evaluate_expression(Some(db), where_expr, &combined_columns, &combined_row)?
-            } else {
-                true
-            };
-            if include_row {
-                candidate_rows.push(combined_row);
+    match &subquery.columns[0] {
+        Column::All => Err(RustqlError::Internal(
+            "Scalar subquery cannot use *".to_string(),
+        )),
+        Column::Expression { .. } => Err(RustqlError::Internal(
+            "Scalar subquery cannot use expressions".to_string(),
+        )),
+        Column::Subquery(nested_subquery)
+            if !scalar_subquery_requires_materialization(subquery) =>
+        {
+            let mut result = None;
+            let mut combined_row = Vec::with_capacity(outer_row.len() + table.columns.len());
+            for inner_row in &table.rows {
+                reset_combined_row(&mut combined_row, outer_row, inner_row);
+                let include_row = if let Some(ref where_expr) = subquery.where_clause {
+                    evaluate_expression(Some(db), where_expr, &combined_columns, &combined_row)?
+                } else {
+                    true
+                };
+                if include_row {
+                    let value = eval_scalar_subquery_with_outer(
+                        db,
+                        nested_subquery,
+                        &combined_columns,
+                        &combined_row,
+                    )?;
+                    record_scalar_value(&mut result, value)?;
+                }
             }
+            Ok(result.unwrap_or(Value::Null))
         }
+        Column::Named { name, .. } if !scalar_subquery_requires_materialization(subquery) => {
+            let col_idx = resolve_named_column_index(&combined_columns, name)?;
+            let mut result = None;
+            let mut combined_row = Vec::with_capacity(outer_row.len() + table.columns.len());
+            for inner_row in &table.rows {
+                reset_combined_row(&mut combined_row, outer_row, inner_row);
+                let include_row = if let Some(ref where_expr) = subquery.where_clause {
+                    evaluate_expression(Some(db), where_expr, &combined_columns, &combined_row)?
+                } else {
+                    true
+                };
+                if include_row {
+                    record_scalar_value(&mut result, combined_row[col_idx].clone())?;
+                }
+            }
+            Ok(result.unwrap_or(Value::Null))
+        }
+        _ => {
+            let mut candidate_rows: Vec<Vec<Value>> = Vec::with_capacity(table.rows.len());
+            for inner_row in &table.rows {
+                let combined_row = combine_outer_inner_rows(outer_row, inner_row);
 
-        apply_order_and_slice(&mut candidate_rows)?;
+                let include_row = if let Some(ref where_expr) = subquery.where_clause {
+                    evaluate_expression(Some(db), where_expr, &combined_columns, &combined_row)?
+                } else {
+                    true
+                };
+                if include_row {
+                    candidate_rows.push(combined_row);
+                }
+            }
 
-        let mut results = Vec::new();
-        for combined_row in candidate_rows {
-            let nested_result = eval_scalar_subquery_with_outer(
-                db,
-                nested_subquery,
+            apply_scalar_order_and_slice(
+                &mut candidate_rows,
+                subquery.order_by.as_deref(),
                 &combined_columns,
-                &combined_row,
+                subquery.offset,
+                subquery.limit,
             )?;
-            results.push(nested_result);
-        }
 
-        match results.len() {
-            0 => Ok(Value::Null),
-            1 => Ok(results[0].clone()),
-            _ => Err(RustqlError::Internal(
-                "Scalar subquery returned more than one row".to_string(),
-            )),
-        }
-    } else {
-        let mut candidate_rows: Vec<Vec<Value>> = Vec::new();
-        for inner_row in &table.rows {
-            let mut combined_row: Vec<Value> = outer_row.to_vec();
-            combined_row.extend(inner_row.clone());
-
-            let include_row = if let Some(ref where_expr) = subquery.where_clause {
-                evaluate_expression(Some(db), where_expr, &combined_columns, &combined_row)?
-            } else {
-                true
-            };
-            if include_row {
-                candidate_rows.push(combined_row);
-            }
-        }
-
-        apply_order_and_slice(&mut candidate_rows)?;
-
-        let mut results = Vec::new();
-        for combined_row in &candidate_rows {
-            let val = match &subquery.columns[0] {
-                Column::All => {
-                    return Err(RustqlError::Internal(
-                        "Scalar subquery cannot use *".to_string(),
-                    ));
-                }
-                Column::Expression { .. } => {
-                    return Err(RustqlError::Internal(
-                        "Scalar subquery cannot use expressions".to_string(),
-                    ));
-                }
-                Column::Function(_) => {
-                    return Err(RustqlError::Internal(
-                        "Scalar subquery cannot use aggregate functions".to_string(),
-                    ));
-                }
-                Column::Subquery(_) => {
-                    return Err(RustqlError::Internal(
-                        "Scalar subquery cannot use nested subqueries".to_string(),
-                    ));
+            match &subquery.columns[0] {
+                Column::All => Err(RustqlError::Internal(
+                    "Scalar subquery cannot use *".to_string(),
+                )),
+                Column::Expression { .. } => Err(RustqlError::Internal(
+                    "Scalar subquery cannot use expressions".to_string(),
+                )),
+                Column::Function(_) => Err(RustqlError::Internal(
+                    "Scalar subquery cannot use aggregate functions".to_string(),
+                )),
+                Column::Subquery(nested_subquery) => {
+                    let mut result = None;
+                    for combined_row in candidate_rows {
+                        let value = eval_scalar_subquery_with_outer(
+                            db,
+                            nested_subquery,
+                            &combined_columns,
+                            &combined_row,
+                        )?;
+                        record_scalar_value(&mut result, value)?;
+                    }
+                    Ok(result.unwrap_or(Value::Null))
                 }
                 Column::Named { name, .. } => {
-                    let col_idx = combined_columns
-                        .iter()
-                        .position(|c| {
-                            c.name
-                                == (if name.contains('.') {
-                                    name.split('.').next_back().unwrap_or(name)
-                                } else {
-                                    name
-                                })
-                        })
-                        .ok_or_else(|| RustqlError::ColumnNotFound(name.clone()))?;
-                    combined_row[col_idx].clone()
+                    let col_idx = resolve_named_column_index(&combined_columns, name)?;
+                    match candidate_rows.len() {
+                        0 => Ok(Value::Null),
+                        1 => Ok(candidate_rows[0][col_idx].clone()),
+                        _ => Err(RustqlError::Internal(
+                            "Scalar subquery returned more than one row".to_string(),
+                        )),
+                    }
                 }
-            };
-            results.push(val);
-        }
-
-        match results.len() {
-            0 => Ok(Value::Null),
-            1 => Ok(results[0].clone()),
-            _ => Err(RustqlError::Internal(
-                "Scalar subquery returned more than one row".to_string(),
-            )),
+            }
         }
     }
 }

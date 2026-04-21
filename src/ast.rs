@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Statement {
     Select(SelectStatement),
     Insert(InsertStatement),
@@ -21,6 +21,7 @@ pub enum Statement {
     ReleaseSavepoint(String),
     RollbackToSavepoint(String),
     Explain(SelectStatement),
+    ExplainAnalyze(SelectStatement),
     Describe(String),
     ShowTables,
     Analyze(String),
@@ -28,7 +29,7 @@ pub enum Statement {
     Do { statements: Vec<Statement> },
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum SetOperation {
     Union,
     UnionAll,
@@ -38,7 +39,7 @@ pub enum SetOperation {
     ExceptAll,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SelectStatement {
     pub ctes: Vec<Cte>,
     pub distinct: bool,
@@ -61,13 +62,13 @@ pub struct SelectStatement {
     pub from_values: Option<(Vec<Vec<Expression>>, String, Vec<String>)>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FetchClause {
     pub count: usize,
     pub with_ties: bool,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum GroupByClause {
     Simple(Vec<Expression>),
     GroupingSets(Vec<Vec<Expression>>),
@@ -92,21 +93,21 @@ impl GroupByClause {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TableFunction {
     pub name: String,
     pub args: Vec<Expression>,
     pub alias: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Cte {
     pub name: String,
     pub query: SelectStatement,
     pub recursive: bool,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Join {
     pub join_type: JoinType,
     pub table: String,
@@ -117,7 +118,7 @@ pub struct Join {
     pub subquery: Option<(Box<SelectStatement>, String)>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum JoinType {
     Inner,
     Left,
@@ -127,7 +128,7 @@ pub enum JoinType {
     Natural,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Column {
     All,
     Named {
@@ -142,7 +143,7 @@ pub enum Column {
     },
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AggregateFunction {
     pub function: AggregateFunctionType,
     pub expr: Box<Expression>,
@@ -153,7 +154,7 @@ pub struct AggregateFunction {
     pub filter: Option<Box<Expression>>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum AggregateFunctionType {
     Count,
     Sum,
@@ -171,7 +172,7 @@ pub enum AggregateFunctionType {
     PercentileDisc,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InsertStatement {
     pub table: String,
     pub columns: Option<Vec<String>>,
@@ -181,19 +182,19 @@ pub struct InsertStatement {
     pub returning: Option<Vec<Column>>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OnConflictClause {
     pub columns: Vec<String>,
     pub action: OnConflictAction,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum OnConflictAction {
     DoNothing,
     DoUpdate { assignments: Vec<Assignment> },
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UpdateStatement {
     pub table: String,
     pub assignments: Vec<Assignment>,
@@ -202,19 +203,19 @@ pub struct UpdateStatement {
     pub returning: Option<Vec<Column>>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UpdateFrom {
     pub table: String,
     pub joins: Vec<Join>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Assignment {
     pub column: String,
     pub value: Expression,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DeleteStatement {
     pub table: String,
     pub where_clause: Option<Expression>,
@@ -222,7 +223,7 @@ pub struct DeleteStatement {
     pub returning: Option<Vec<Column>>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DeleteUsing {
     pub table: String,
     pub alias: Option<String>,
@@ -241,7 +242,7 @@ pub enum TableConstraint {
     },
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CreateTableStatement {
     pub name: String,
     pub columns: Vec<ColumnDefinition>,
@@ -300,19 +301,19 @@ pub enum DataType {
     DateTime,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DropTableStatement {
     pub name: String,
     pub if_exists: bool,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AlterTableStatement {
     pub table: String,
     pub operation: AlterOperation,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum AlterOperation {
     AddColumn(ColumnDefinition),
     DropColumn(String),
@@ -322,7 +323,7 @@ pub enum AlterOperation {
     DropConstraint(String),
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CreateIndexStatement {
     pub name: String,
     pub table: String,
@@ -331,13 +332,13 @@ pub struct CreateIndexStatement {
     pub where_clause: Option<Expression>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DropIndexStatement {
     pub name: String,
     pub if_exists: bool,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WindowDefinition {
     pub name: String,
     pub partition_by: Vec<Expression>,
@@ -345,7 +346,7 @@ pub struct WindowDefinition {
     pub frame: Option<WindowFrame>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MergeStatement {
     pub target_table: String,
     pub source: MergeSource,
@@ -353,7 +354,7 @@ pub struct MergeStatement {
     pub when_clauses: Vec<MergeWhenClause>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum MergeSource {
     Table {
         name: String,
@@ -365,7 +366,7 @@ pub enum MergeSource {
     },
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum MergeWhenClause {
     Matched {
         condition: Option<Expression>,
@@ -377,13 +378,13 @@ pub enum MergeWhenClause {
     },
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum MergeMatchedAction {
     Update { assignments: Vec<Assignment> },
     Delete,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum MergeNotMatchedAction {
     Insert {
         columns: Option<Vec<String>>,
@@ -391,7 +392,7 @@ pub enum MergeNotMatchedAction {
     },
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Expression {
     BinaryOp {
         left: Box<Expression>,
@@ -452,7 +453,7 @@ pub enum Expression {
     },
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ScalarFunctionType {
     Upper,
     Lower,
@@ -522,7 +523,7 @@ pub enum ScalarFunctionType {
     RegexpReplace,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum WindowFunctionType {
     RowNumber,
     Rank,
@@ -538,20 +539,20 @@ pub enum WindowFunctionType {
     CumeDist,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WindowFrame {
     pub mode: WindowFrameMode,
     pub start: WindowFrameBound,
     pub end: WindowFrameBound,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum WindowFrameMode {
     Rows,
     Range,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum WindowFrameBound {
     UnboundedPreceding,
     Preceding(usize),
@@ -560,7 +561,7 @@ pub enum WindowFrameBound {
     UnboundedFollowing,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum BinaryOperator {
     Equal,
     NotEqual,
@@ -581,7 +582,7 @@ pub enum BinaryOperator {
     Concat,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum UnaryOperator {
     Not,
     Minus,
@@ -589,19 +590,17 @@ pub enum UnaryOperator {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Value {
-    #[allow(dead_code)]
     Null,
     Integer(i64),
     Float(f64),
     Text(String),
-    #[allow(dead_code)]
     Boolean(bool),
     Date(String),
     Time(String),
     DateTime(String),
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OrderByExpr {
     pub expr: Expression,
     pub asc: bool,

@@ -2,12 +2,14 @@ use crate::ast::*;
 use crate::database::Table;
 use crate::error::RustqlError;
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use super::SelectResult;
 use super::expr::{
     apply_arithmetic, compare_values_for_sort, evaluate_value_expression, format_value,
 };
+
+pub(crate) const DEFAULT_PERCENTILE_FRACTION: f64 = 0.5;
 
 fn remember_distinct(seen: &mut BTreeSet<Value>, val: &Value) -> bool {
     seen.insert(val.clone())
@@ -465,7 +467,7 @@ fn compute_aggregate_inner(
             Ok(best.map(|(val, _, _)| val).unwrap_or(Value::Null))
         }
         AggregateFunctionType::PercentileCont => {
-            let frac = percentile.unwrap_or(0.5);
+            let frac = percentile.unwrap_or(DEFAULT_PERCENTILE_FRACTION);
             let mut values: Vec<f64> = Vec::new();
             let mut seen_vals: BTreeSet<Value> = BTreeSet::new();
             for row in rows {
@@ -507,7 +509,7 @@ fn compute_aggregate_inner(
             }
         }
         AggregateFunctionType::PercentileDisc => {
-            let frac = percentile.unwrap_or(0.5);
+            let frac = percentile.unwrap_or(DEFAULT_PERCENTILE_FRACTION);
             let mut values: Vec<Value> = Vec::new();
             let mut seen_vals: BTreeSet<Value> = BTreeSet::new();
             for row in rows {
@@ -663,9 +665,7 @@ pub(crate) fn execute_select_with_grouping_result(
     table: &Table,
     rows: Vec<&Vec<Value>>,
 ) -> Result<SelectResult, RustqlError> {
-    let raw_group_by = stmt.group_by.clone().ok_or_else(|| {
-        RustqlError::AggregateError("GROUP BY execution requires a GROUP BY clause".to_string())
-    })?;
+    let raw_group_by = stmt.group_by.clone().unwrap();
 
     match &raw_group_by {
         GroupByClause::GroupingSets(sets) => {
@@ -760,6 +760,7 @@ pub(crate) fn execute_select_with_grouping_result(
     }
 
     let headers: Vec<String> = column_specs.iter().map(|(h, _)| h.clone()).collect();
+    let projected_lookup = build_grouped_projection_lookup(&column_specs);
 
     let mut grouped_outputs: Vec<(Vec<Value>, Vec<Value>)> = Vec::new();
 
@@ -770,6 +771,7 @@ pub(crate) fn execute_select_with_grouping_result(
                 continue;
             }
         }
+        let group_by_lookup = build_grouped_column_lookup(&group_by_normalized_with_indices);
         let mut projected_row: Vec<Value> = Vec::with_capacity(column_specs.len());
         for (_, col_spec) in &column_specs {
             match col_spec {
@@ -783,11 +785,8 @@ pub(crate) fn execute_select_with_grouping_result(
                     } else {
                         name.as_str()
                     };
-                    if let Some((_, group_idx)) = group_by_normalized_with_indices
-                        .iter()
-                        .find(|(normalized, _)| normalized == column_name)
-                    {
-                        projected_row.push(group_rows[0][*group_idx].clone());
+                    if let Some(&group_idx) = group_by_lookup.get(column_name) {
+                        projected_row.push(group_rows[0][group_idx].clone());
                     } else {
                         return Err(RustqlError::Internal(format!(
                             "Column '{}' must appear in GROUP BY clause",
@@ -800,9 +799,9 @@ pub(crate) fn execute_select_with_grouping_result(
                         expr,
                         table,
                         &group_rows,
-                        &column_specs,
                         &projected_row,
-                        &group_by_normalized_with_indices,
+                        &projected_lookup,
+                        &group_by_lookup,
                         false,
                     )?;
                     projected_row.push(value);
@@ -818,9 +817,9 @@ pub(crate) fn execute_select_with_grouping_result(
                     &order_expr.expr,
                     table,
                     &group_rows,
-                    &column_specs,
                     &projected_row,
-                    &group_by_normalized_with_indices,
+                    &projected_lookup,
+                    &group_by_lookup,
                     true,
                 )?;
                 order_values.push(value);
@@ -876,40 +875,15 @@ pub fn evaluate_group_order_expression(
     expr: &Expression,
     table: &Table,
     group_rows: &[&Vec<Value>],
-    column_specs: &[(String, Column)],
     projected_row: &[Value],
-    group_by_indices: &[(String, usize)],
+    projected_lookup: &HashMap<String, usize>,
+    group_by_lookup: &HashMap<String, usize>,
     allow_ordinal: bool,
 ) -> Result<Value, RustqlError> {
     match expr {
         Expression::Column(name) => {
-            for (idx, (header, col_spec)) in column_specs.iter().enumerate() {
-                if header == name {
-                    return Ok(projected_row[idx].clone());
-                }
-                if let Column::Named {
-                    name: original_name,
-                    alias,
-                } = col_spec
-                    && (alias.as_ref().map(|a| a == name).unwrap_or(false)
-                        || original_name == name
-                        || original_name
-                            .split('.')
-                            .next_back()
-                            .map(|n| n == name)
-                            .unwrap_or(false))
-                {
-                    return Ok(projected_row[idx].clone());
-                }
-                if let Column::Function(agg) = col_spec {
-                    let default_alias = agg
-                        .alias
-                        .clone()
-                        .unwrap_or_else(|| format!("{:?}(*)", agg.function));
-                    if default_alias == *name {
-                        return Ok(projected_row[idx].clone());
-                    }
-                }
+            if let Some(&idx) = projected_lookup.get(name) {
+                return Ok(projected_row[idx].clone());
             }
 
             let normalized = if name.contains('.') {
@@ -918,12 +892,10 @@ pub fn evaluate_group_order_expression(
                 name.as_str()
             };
 
-            if let Some((_, idx)) = group_by_indices
-                .iter()
-                .find(|(normalized_name, _)| normalized_name == normalized)
+            if let Some(&idx) = group_by_lookup.get(normalized)
                 && let Some(first_row) = group_rows.first()
             {
-                return Ok(first_row[*idx].clone());
+                return Ok(first_row[idx].clone());
             }
 
             Err(RustqlError::ColumnNotFound(format!(
@@ -951,18 +923,18 @@ pub fn evaluate_group_order_expression(
                     left,
                     table,
                     group_rows,
-                    column_specs,
                     projected_row,
-                    group_by_indices,
+                    projected_lookup,
+                    group_by_lookup,
                     false,
                 )?;
                 let right_val = evaluate_group_order_expression(
                     right,
                     table,
                     group_rows,
-                    column_specs,
                     projected_row,
-                    group_by_indices,
+                    projected_lookup,
+                    group_by_lookup,
                     false,
                 )?;
                 apply_arithmetic(&left_val, &right_val, op)
@@ -1018,7 +990,7 @@ fn resolve_frame_bounds(
 #[allow(clippy::too_many_arguments)]
 fn compute_windowed_aggregate(
     agg_type: &AggregateFunctionType,
-    rows: &[Vec<Value>],
+    rows: &[&Vec<Value>],
     sorted_indices: &[usize],
     columns: &[ColumnDefinition],
     args: &[Expression],
@@ -1034,7 +1006,7 @@ fn compute_windowed_aggregate(
 
     let mut values: Vec<Value> = Vec::new();
     for &row_idx in &sorted_indices[frame_start..=frame_end] {
-        let val = evaluate_value_expression(expr, columns, &rows[row_idx]).unwrap_or(Value::Null);
+        let val = evaluate_value_expression(expr, columns, rows[row_idx]).unwrap_or(Value::Null);
         values.push(val);
     }
 
@@ -1248,22 +1220,31 @@ fn compute_windowed_aggregate(
             }
         }
         AggregateFunctionType::Mode => {
-            let mut counts: Vec<(Value, usize)> = Vec::new();
+            let mut counts: BTreeMap<Value, (usize, usize)> = BTreeMap::new();
+            let mut seen_order = 0usize;
             for val in values {
                 if matches!(&val, Value::Null) {
                     continue;
                 }
-                if let Some(entry) = counts.iter_mut().find(|(v, _)| *v == val) {
-                    entry.1 += 1;
-                } else {
-                    counts.push((val, 1));
-                }
+                let entry = counts.entry(val).or_insert((0, seen_order));
+                entry.0 += 1;
+                seen_order += 1;
             }
             if counts.is_empty() {
                 return Value::Null;
             }
-            counts.sort_by_key(|item| std::cmp::Reverse(item.1));
-            counts[0].0.clone()
+            let mut best: Option<(Value, usize, usize)> = None;
+            for (val, (count, first_seen)) in counts {
+                match best {
+                    None => best = Some((val, count, first_seen)),
+                    Some((_, best_count, best_seen)) => {
+                        if count > best_count || (count == best_count && first_seen < best_seen) {
+                            best = Some((val, count, first_seen));
+                        }
+                    }
+                }
+            }
+            best.map(|(val, _, _)| val).unwrap_or(Value::Null)
         }
         AggregateFunctionType::PercentileCont => {
             let mut nums: Vec<f64> = Vec::new();
@@ -1278,7 +1259,7 @@ fn compute_windowed_aggregate(
                 return Value::Null;
             }
             nums.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
-            let frac = 0.5;
+            let frac = DEFAULT_PERCENTILE_FRACTION;
             let n = nums.len();
             if n == 1 {
                 return Value::Float(nums[0]);
@@ -1302,7 +1283,7 @@ fn compute_windowed_aggregate(
                 return Value::Null;
             }
             sorted_vals.sort();
-            let frac = 0.5;
+            let frac = DEFAULT_PERCENTILE_FRACTION;
             let idx = ((frac * sorted_vals.len() as f64).ceil() as usize).saturating_sub(1);
             let idx = idx.min(sorted_vals.len() - 1);
             sorted_vals[idx].clone()
@@ -1310,11 +1291,13 @@ fn compute_windowed_aggregate(
     }
 }
 
-pub fn evaluate_window_functions(
-    rows: &mut [Vec<Value>],
+pub fn evaluate_window_function_outputs(
+    rows: &[&Vec<Value>],
     columns: &[ColumnDefinition],
     select_columns: &[Column],
-) -> Result<(), RustqlError> {
+) -> Result<Vec<Vec<Value>>, RustqlError> {
+    let mut outputs = vec![Vec::new(); rows.len()];
+
     for col in select_columns {
         if let Column::Expression {
             expr:
@@ -1328,6 +1311,17 @@ pub fn evaluate_window_functions(
             ..
         } = col
         {
+            let order_values: Vec<Vec<Value>> = rows
+                .iter()
+                .map(|row| {
+                    order_by
+                        .iter()
+                        .map(|ob| {
+                            evaluate_value_expression(&ob.expr, columns, row).unwrap_or(Value::Null)
+                        })
+                        .collect()
+                })
+                .collect();
             let mut partition_groups: BTreeMap<Vec<Value>, Vec<usize>> = BTreeMap::new();
             for (idx, row) in rows.iter().enumerate() {
                 let key: Vec<Value> = partition_by
@@ -1341,24 +1335,13 @@ pub fn evaluate_window_functions(
 
             for indices in partition_groups.values() {
                 let mut sorted_indices = indices.clone();
-                sorted_indices.sort_by(|&a, &b| {
-                    for ob in order_by {
-                        let va = evaluate_value_expression(&ob.expr, columns, &rows[a])
-                            .unwrap_or(Value::Null);
-                        let vb = evaluate_value_expression(&ob.expr, columns, &rows[b])
-                            .unwrap_or(Value::Null);
-                        let cmp = compare_values_for_sort(&va, &vb);
-                        if cmp != Ordering::Equal {
-                            return if ob.asc { cmp } else { cmp.reverse() };
-                        }
-                    }
-                    Ordering::Equal
-                });
+                sorted_indices
+                    .sort_by(|&a, &b| compare_window_order_rows(&order_values, order_by, a, b));
 
                 match function {
                     WindowFunctionType::RowNumber => {
                         for (rank, &idx) in sorted_indices.iter().enumerate() {
-                            rows[idx].push(Value::Integer(rank as i64 + 1));
+                            outputs[idx].push(Value::Integer(rank as i64 + 1));
                         }
                     }
                     WindowFunctionType::Rank => {
@@ -1366,23 +1349,11 @@ pub fn evaluate_window_functions(
                         for (i, &idx) in sorted_indices.iter().enumerate() {
                             if i > 0 {
                                 let prev_idx = sorted_indices[i - 1];
-                                let same = order_by.iter().all(|ob| {
-                                    let va = evaluate_value_expression(
-                                        &ob.expr,
-                                        columns,
-                                        &rows[prev_idx],
-                                    )
-                                    .unwrap_or(Value::Null);
-                                    let vb =
-                                        evaluate_value_expression(&ob.expr, columns, &rows[idx])
-                                            .unwrap_or(Value::Null);
-                                    va == vb
-                                });
-                                if !same {
+                                if !window_order_values_equal(&order_values, prev_idx, idx) {
                                     current_rank = i as i64 + 1;
                                 }
                             }
-                            rows[idx].push(Value::Integer(current_rank));
+                            outputs[idx].push(Value::Integer(current_rank));
                         }
                     }
                     WindowFunctionType::DenseRank => {
@@ -1390,23 +1361,11 @@ pub fn evaluate_window_functions(
                         for (i, &idx) in sorted_indices.iter().enumerate() {
                             if i > 0 {
                                 let prev_idx = sorted_indices[i - 1];
-                                let same = order_by.iter().all(|ob| {
-                                    let va = evaluate_value_expression(
-                                        &ob.expr,
-                                        columns,
-                                        &rows[prev_idx],
-                                    )
-                                    .unwrap_or(Value::Null);
-                                    let vb =
-                                        evaluate_value_expression(&ob.expr, columns, &rows[idx])
-                                            .unwrap_or(Value::Null);
-                                    va == vb
-                                });
-                                if !same {
+                                if !window_order_values_equal(&order_values, prev_idx, idx) {
                                     current_rank += 1;
                                 }
                             }
-                            rows[idx].push(Value::Integer(current_rank));
+                            outputs[idx].push(Value::Integer(current_rank));
                         }
                     }
                     WindowFunctionType::Aggregate(agg_type) => {
@@ -1422,7 +1381,7 @@ pub fn evaluate_window_functions(
                                 has_order_by,
                                 pos,
                             );
-                            rows[idx].push(val);
+                            outputs[idx].push(val);
                         }
                     }
                     WindowFunctionType::Lag => {
@@ -1430,7 +1389,7 @@ pub fn evaluate_window_functions(
                             match evaluate_value_expression(
                                 &args[1],
                                 columns,
-                                &rows[sorted_indices[0]],
+                                rows[sorted_indices[0]],
                             ) {
                                 Ok(Value::Integer(n)) => n as usize,
                                 _ => 1,
@@ -1439,7 +1398,7 @@ pub fn evaluate_window_functions(
                             1
                         };
                         let default_val = if args.len() > 2 {
-                            evaluate_value_expression(&args[2], columns, &rows[sorted_indices[0]])
+                            evaluate_value_expression(&args[2], columns, rows[sorted_indices[0]])
                                 .unwrap_or(Value::Null)
                         } else {
                             Value::Null
@@ -1448,14 +1407,14 @@ pub fn evaluate_window_functions(
                             if i >= offset {
                                 let source_idx = sorted_indices[i - offset];
                                 let val = if !args.is_empty() {
-                                    evaluate_value_expression(&args[0], columns, &rows[source_idx])
+                                    evaluate_value_expression(&args[0], columns, rows[source_idx])
                                         .unwrap_or(Value::Null)
                                 } else {
                                     Value::Null
                                 };
-                                rows[idx].push(val);
+                                outputs[idx].push(val);
                             } else {
-                                rows[idx].push(default_val.clone());
+                                outputs[idx].push(default_val.clone());
                             }
                         }
                     }
@@ -1464,7 +1423,7 @@ pub fn evaluate_window_functions(
                             match evaluate_value_expression(
                                 &args[1],
                                 columns,
-                                &rows[sorted_indices[0]],
+                                rows[sorted_indices[0]],
                             ) {
                                 Ok(Value::Integer(n)) => n as usize,
                                 _ => 1,
@@ -1473,7 +1432,7 @@ pub fn evaluate_window_functions(
                             1
                         };
                         let default_val = if args.len() > 2 {
-                            evaluate_value_expression(&args[2], columns, &rows[sorted_indices[0]])
+                            evaluate_value_expression(&args[2], columns, rows[sorted_indices[0]])
                                 .unwrap_or(Value::Null)
                         } else {
                             Value::Null
@@ -1483,14 +1442,14 @@ pub fn evaluate_window_functions(
                             if i + offset < len {
                                 let source_idx = sorted_indices[i + offset];
                                 let val = if !args.is_empty() {
-                                    evaluate_value_expression(&args[0], columns, &rows[source_idx])
+                                    evaluate_value_expression(&args[0], columns, rows[source_idx])
                                         .unwrap_or(Value::Null)
                                 } else {
                                     Value::Null
                                 };
-                                rows[idx].push(val);
+                                outputs[idx].push(val);
                             } else {
-                                rows[idx].push(default_val.clone());
+                                outputs[idx].push(default_val.clone());
                             }
                         }
                     }
@@ -1499,7 +1458,7 @@ pub fn evaluate_window_functions(
                             match evaluate_value_expression(
                                 &args[0],
                                 columns,
-                                &rows[sorted_indices[0]],
+                                rows[sorted_indices[0]],
                             ) {
                                 Ok(Value::Integer(v)) => v.max(1) as usize,
                                 _ => 1,
@@ -1510,7 +1469,7 @@ pub fn evaluate_window_functions(
                         let total = sorted_indices.len();
                         for (i, &idx) in sorted_indices.iter().enumerate() {
                             let bucket = (i * n / total) + 1;
-                            rows[idx].push(Value::Integer(bucket as i64));
+                            outputs[idx].push(Value::Integer(bucket as i64));
                         }
                     }
                     WindowFunctionType::FirstValue => {
@@ -1524,12 +1483,12 @@ pub fn evaluate_window_functions(
                             );
                             let source_idx = sorted_indices[frame_start];
                             let val = if !args.is_empty() {
-                                evaluate_value_expression(&args[0], columns, &rows[source_idx])
+                                evaluate_value_expression(&args[0], columns, rows[source_idx])
                                     .unwrap_or(Value::Null)
                             } else {
                                 Value::Null
                             };
-                            rows[idx].push(val);
+                            outputs[idx].push(val);
                         }
                     }
                     WindowFunctionType::LastValue => {
@@ -1543,12 +1502,12 @@ pub fn evaluate_window_functions(
                             );
                             let source_idx = sorted_indices[frame_end];
                             let val = if !args.is_empty() {
-                                evaluate_value_expression(&args[0], columns, &rows[source_idx])
+                                evaluate_value_expression(&args[0], columns, rows[source_idx])
                                     .unwrap_or(Value::Null)
                             } else {
                                 Value::Null
                             };
-                            rows[idx].push(val);
+                            outputs[idx].push(val);
                         }
                     }
                     WindowFunctionType::NthValue => {
@@ -1556,7 +1515,7 @@ pub fn evaluate_window_functions(
                             match evaluate_value_expression(
                                 &args[1],
                                 columns,
-                                &rows[sorted_indices[0]],
+                                rows[sorted_indices[0]],
                             ) {
                                 Ok(Value::Integer(v)) => v.max(1) as usize,
                                 _ => 1,
@@ -1576,14 +1535,14 @@ pub fn evaluate_window_functions(
                             if n <= frame_len {
                                 let source_idx = sorted_indices[frame_start + n - 1];
                                 let val = if !args.is_empty() {
-                                    evaluate_value_expression(&args[0], columns, &rows[source_idx])
+                                    evaluate_value_expression(&args[0], columns, rows[source_idx])
                                         .unwrap_or(Value::Null)
                                 } else {
                                     Value::Null
                                 };
-                                rows[idx].push(val);
+                                outputs[idx].push(val);
                             } else {
-                                rows[idx].push(Value::Null);
+                                outputs[idx].push(Value::Null);
                             }
                         }
                     }
@@ -1591,32 +1550,19 @@ pub fn evaluate_window_functions(
                         let total = sorted_indices.len();
                         if total <= 1 {
                             for &idx in &sorted_indices {
-                                rows[idx].push(Value::Float(0.0));
+                                outputs[idx].push(Value::Float(0.0));
                             }
                         } else {
                             let mut current_rank = 1i64;
                             for (i, &idx) in sorted_indices.iter().enumerate() {
                                 if i > 0 {
                                     let prev_idx = sorted_indices[i - 1];
-                                    let same = order_by.iter().all(|ob| {
-                                        let va = evaluate_value_expression(
-                                            &ob.expr,
-                                            columns,
-                                            &rows[prev_idx],
-                                        )
-                                        .unwrap_or(Value::Null);
-                                        let vb = evaluate_value_expression(
-                                            &ob.expr, columns, &rows[idx],
-                                        )
-                                        .unwrap_or(Value::Null);
-                                        va == vb
-                                    });
-                                    if !same {
+                                    if !window_order_values_equal(&order_values, prev_idx, idx) {
                                         current_rank = i as i64 + 1;
                                     }
                                 }
                                 let pct = (current_rank - 1) as f64 / (total - 1) as f64;
-                                rows[idx].push(Value::Float(pct));
+                                outputs[idx].push(Value::Float(pct));
                             }
                         }
                     }
@@ -1626,29 +1572,18 @@ pub fn evaluate_window_functions(
                         while i < sorted_indices.len() {
                             let mut j = i + 1;
                             while j < sorted_indices.len() {
-                                let same = order_by.iter().all(|ob| {
-                                    let va = evaluate_value_expression(
-                                        &ob.expr,
-                                        columns,
-                                        &rows[sorted_indices[i]],
-                                    )
-                                    .unwrap_or(Value::Null);
-                                    let vb = evaluate_value_expression(
-                                        &ob.expr,
-                                        columns,
-                                        &rows[sorted_indices[j]],
-                                    )
-                                    .unwrap_or(Value::Null);
-                                    va == vb
-                                });
-                                if !same {
+                                if !window_order_values_equal(
+                                    &order_values,
+                                    sorted_indices[i],
+                                    sorted_indices[j],
+                                ) {
                                     break;
                                 }
                                 j += 1;
                             }
                             let cd = j as f64 / total as f64;
                             for k in i..j {
-                                rows[sorted_indices[k]].push(Value::Float(cd));
+                                outputs[sorted_indices[k]].push(Value::Float(cd));
                             }
                             i = j;
                         }
@@ -1656,6 +1591,74 @@ pub fn evaluate_window_functions(
                 }
             }
         }
+    }
+    Ok(outputs)
+}
+
+fn compare_window_order_rows(
+    order_values: &[Vec<Value>],
+    order_by: &[OrderByExpr],
+    left_row: usize,
+    right_row: usize,
+) -> Ordering {
+    for (idx, order_expr) in order_by.iter().enumerate() {
+        let cmp =
+            compare_values_for_sort(&order_values[left_row][idx], &order_values[right_row][idx]);
+        if cmp != Ordering::Equal {
+            return if order_expr.asc { cmp } else { cmp.reverse() };
+        }
+    }
+    Ordering::Equal
+}
+
+fn window_order_values_equal(
+    order_values: &[Vec<Value>],
+    left_row: usize,
+    right_row: usize,
+) -> bool {
+    order_values[left_row] == order_values[right_row]
+}
+
+fn remember_grouped_lookup_name(lookup: &mut HashMap<String, usize>, name: &str, index: usize) {
+    lookup.entry(name.to_string()).or_insert(index);
+}
+
+fn build_grouped_projection_lookup(column_specs: &[(String, Column)]) -> HashMap<String, usize> {
+    let mut lookup = HashMap::new();
+    for (index, (header, col_spec)) in column_specs.iter().enumerate() {
+        remember_grouped_lookup_name(&mut lookup, header, index);
+        if let Column::Named { name, alias } = col_spec {
+            if let Some(alias) = alias {
+                remember_grouped_lookup_name(&mut lookup, alias, index);
+            }
+            remember_grouped_lookup_name(&mut lookup, name, index);
+            remember_grouped_lookup_name(
+                &mut lookup,
+                name.split('.').next_back().unwrap_or(name),
+                index,
+            );
+        }
+    }
+    lookup
+}
+
+fn build_grouped_column_lookup(group_by_indices: &[(String, usize)]) -> HashMap<String, usize> {
+    let mut lookup = HashMap::new();
+    for (name, index) in group_by_indices {
+        remember_grouped_lookup_name(&mut lookup, name, *index);
+    }
+    lookup
+}
+
+pub fn evaluate_window_functions(
+    rows: &mut [Vec<Value>],
+    columns: &[ColumnDefinition],
+    select_columns: &[Column],
+) -> Result<(), RustqlError> {
+    let row_refs: Vec<&Vec<Value>> = rows.iter().collect();
+    let outputs = evaluate_window_function_outputs(&row_refs, columns, select_columns)?;
+    for (row, extra_values) in rows.iter_mut().zip(outputs) {
+        row.extend(extra_values);
     }
     Ok(())
 }
@@ -1723,6 +1726,7 @@ fn execute_multi_grouping_sets_result(
     }
 
     let headers: Vec<String> = column_specs.iter().map(|(h, _)| h.clone()).collect();
+    let projected_lookup = build_grouped_projection_lookup(&column_specs);
 
     let mut all_output_rows: Vec<Vec<Value>> = Vec::new();
 
@@ -1737,8 +1741,6 @@ fn execute_multi_grouping_sets_result(
                     .unwrap_or((expr.clone(), None))
             })
             .collect();
-
-        let active_exprs: Vec<&Expression> = set.iter().collect();
 
         let mut groups: BTreeMap<Vec<Value>, Vec<&Vec<Value>>> = BTreeMap::new();
         for row in &rows {
@@ -1759,6 +1761,7 @@ fn execute_multi_grouping_sets_result(
             .iter()
             .filter_map(|(_, col_info)| col_info.clone())
             .collect();
+        let group_by_lookup = build_grouped_column_lookup(&group_by_normalized_with_indices);
 
         for group_rows in groups.values() {
             if let Some(ref having_expr) = stmt.having {
@@ -1781,27 +1784,8 @@ fn execute_multi_grouping_sets_result(
                         } else {
                             name.as_str()
                         };
-                        let is_active = all_gb_info.iter().any(|(expr, _)| {
-                            if let Expression::Column(cn) = expr {
-                                let cn_norm = if cn.contains('.') {
-                                    cn.split('.').next_back().unwrap_or(cn)
-                                } else {
-                                    cn.as_str()
-                                };
-                                cn_norm == column_name && active_exprs.iter().any(|e| e == &expr)
-                            } else {
-                                false
-                            }
-                        });
-                        if is_active {
-                            if let Some((_, group_idx)) = group_by_normalized_with_indices
-                                .iter()
-                                .find(|(normalized, _)| normalized == column_name)
-                            {
-                                projected_row.push(group_rows[0][*group_idx].clone());
-                            } else {
-                                projected_row.push(Value::Null);
-                            }
+                        if let Some(&group_idx) = group_by_lookup.get(column_name) {
+                            projected_row.push(group_rows[0][group_idx].clone());
                         } else {
                             projected_row.push(Value::Null);
                         }
@@ -1811,9 +1795,9 @@ fn execute_multi_grouping_sets_result(
                             expr,
                             table,
                             group_rows,
-                            &column_specs,
                             &projected_row,
-                            &group_by_normalized_with_indices,
+                            &projected_lookup,
+                            &group_by_lookup,
                             false,
                         )?;
                         projected_row.push(value);

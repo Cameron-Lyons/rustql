@@ -1,6 +1,9 @@
 use crate::ast::{Statement, Value};
 use crate::database::Database;
-use crate::{CommandTag, Engine, EngineOptions, QueryResult, RowBatch, StorageMode};
+use crate::{
+    CommandResult, CommandTag, Engine, EngineOptions, ExplainAnalyzeResult, QueryResult, RowBatch,
+    StorageMode,
+};
 use crate::{lexer, parser};
 use std::sync::{Mutex, OnceLock};
 
@@ -43,6 +46,18 @@ pub fn process_query(sql: &str) -> Result<String, String> {
         .join("\n"))
 }
 
+pub fn execute_sql(sql: &str) -> Result<QueryResult, String> {
+    let harness = harness().lock().unwrap_or_else(|err| err.into_inner());
+    let mut session = harness.engine.session();
+    session.execute_one(sql).map_err(|err| err.to_string())
+}
+
+pub fn execute_script_results(sql: &str) -> Result<Vec<QueryResult>, String> {
+    let harness = harness().lock().unwrap_or_else(|err| err.into_inner());
+    let mut session = harness.engine.session();
+    session.execute_script(sql).map_err(|err| err.to_string())
+}
+
 pub fn execute_statement(statement: Statement) -> Result<QueryResult, String> {
     let harness = harness().lock().unwrap_or_else(|err| err.into_inner());
     let mut session = harness.engine.session();
@@ -54,6 +69,20 @@ pub fn execute_statement(statement: Statement) -> Result<QueryResult, String> {
 pub fn execute(statement: Statement) -> Result<String, String> {
     let result = execute_statement(statement.clone())?;
     Ok(render_result_for_statement(&statement, &result))
+}
+
+pub fn query_rows(sql: &str) -> Result<RowBatch, String> {
+    match execute_sql(sql)? {
+        QueryResult::Rows(rows) => Ok(rows),
+        other => Err(format!("Expected row result, got {other:?}")),
+    }
+}
+
+pub fn command_result(sql: &str) -> Result<CommandResult, String> {
+    match execute_sql(sql)? {
+        QueryResult::Command(command) => Ok(command),
+        other => Err(format!("Expected command result, got {other:?}")),
+    }
 }
 
 pub fn snapshot_database() -> Database {
@@ -74,6 +103,7 @@ pub fn render_result(result: &QueryResult) -> String {
         QueryResult::Rows(rows) => render_rows(rows),
         QueryResult::Command(command) => render_command(command.tag, command.affected),
         QueryResult::Explain(plan) => format!("Query Plan:\n{}", plan),
+        QueryResult::ExplainAnalyze(result) => render_explain_analyze(result),
     }
 }
 
@@ -84,7 +114,15 @@ fn render_result_for_statement(statement: &Statement, result: &QueryResult) -> S
             render_command_for_statement(statement, command.tag, command.affected)
         }
         QueryResult::Explain(plan) => format!("Query Plan:\n{}", plan),
+        QueryResult::ExplainAnalyze(result) => render_explain_analyze(result),
     }
+}
+
+fn render_explain_analyze(result: &ExplainAnalyzeResult) -> String {
+    format!(
+        "Query Plan:\n{}\nPlanning Time: {:.3} ms\nExecution Time: {:.3} ms\nActual Rows: {}",
+        result.plan, result.planning_ms, result.execution_ms, result.actual_rows
+    )
 }
 
 fn render_command_for_statement(statement: &Statement, tag: CommandTag, affected: u64) -> String {
@@ -141,7 +179,8 @@ fn render_command_for_statement(statement: &Statement, tag: CommandTag, affected
         Statement::Describe(_)
         | Statement::ShowTables
         | Statement::Select(_)
-        | Statement::Explain(_) => render_command(tag, affected),
+        | Statement::Explain(_)
+        | Statement::ExplainAnalyze(_) => render_command(tag, affected),
     }
 }
 

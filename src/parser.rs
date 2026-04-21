@@ -2,12 +2,6 @@ use crate::ast::*;
 use crate::error::RustqlError;
 use crate::lexer::{SourceSpan, SpannedToken, Token};
 
-mod entry;
-mod token_format;
-
-pub use entry::{parse, parse_script, parse_script_spanned, parse_spanned};
-use token_format::{token_to_sql, token_to_string};
-
 type ParseOverClauseResult =
     Result<(Vec<Expression>, Vec<OrderByExpr>, Option<WindowFrame>), RustqlError>;
 
@@ -57,11 +51,6 @@ impl Parser {
             }
             (err, _) => err,
         }
-    }
-
-    #[allow(dead_code)]
-    fn peek_token(&self) -> &Token {
-        self.tokens.get(self.current + 1).unwrap_or(&Token::Eof)
     }
 
     fn consume(&mut self, expected: Token) -> Result<(), RustqlError> {
@@ -3729,13 +3718,23 @@ impl Parser {
 
     fn parse_explain(&mut self) -> Result<Statement, RustqlError> {
         self.consume(Token::Explain)?;
+        let analyze = if *self.current_token() == Token::Analyze {
+            self.advance();
+            true
+        } else {
+            false
+        };
         let select_stmt = if *self.current_token() == Token::With {
             self.parse_with_select()?
         } else {
             self.parse_select_statement(Vec::new())?
         };
         if let Statement::Select(select_stmt) = select_stmt {
-            Ok(Statement::Explain(select_stmt))
+            if analyze {
+                Ok(Statement::ExplainAnalyze(select_stmt))
+            } else {
+                Ok(Statement::Explain(select_stmt))
+            }
         } else {
             Err(RustqlError::ParseError(
                 "EXPLAIN must be followed by a SELECT statement".to_string(),
@@ -3958,5 +3957,436 @@ impl Parser {
         }
         self.consume(Token::End)?;
         Ok(Statement::Do { statements })
+    }
+}
+
+fn token_to_string(tok: &Token) -> String {
+    match tok {
+        Token::Identifier(s) => s.clone(),
+        Token::Number(n) => n.to_string(),
+        Token::Float(f) => f.to_string(),
+        Token::StringLiteral(s) => format!("'{}'", s),
+        Token::Equal => "=".to_string(),
+        Token::NotEqual => "<>".to_string(),
+        Token::LessThan => "<".to_string(),
+        Token::LessThanOrEqual => "<=".to_string(),
+        Token::GreaterThan => ">".to_string(),
+        Token::GreaterThanOrEqual => ">=".to_string(),
+        Token::Plus => "+".to_string(),
+        Token::Minus => "-".to_string(),
+        Token::Star => "*".to_string(),
+        Token::Divide => "/".to_string(),
+        Token::And => "AND".to_string(),
+        Token::Or => "OR".to_string(),
+        Token::Not => "NOT".to_string(),
+        Token::Null => "NULL".to_string(),
+        Token::Is => "IS".to_string(),
+        Token::In => "IN".to_string(),
+        Token::Like => "LIKE".to_string(),
+        Token::ILike => "ILIKE".to_string(),
+        Token::Between => "BETWEEN".to_string(),
+        Token::Comma => ",".to_string(),
+        Token::Intersect => "INTERSECT".to_string(),
+        Token::Except => "EXCEPT".to_string(),
+        Token::Constraint => "CONSTRAINT".to_string(),
+        Token::Nullif => "NULLIF".to_string(),
+        Token::Greatest => "GREATEST".to_string(),
+        Token::Least => "LEAST".to_string(),
+        Token::Lpad => "LPAD".to_string(),
+        Token::Rpad => "RPAD".to_string(),
+        Token::Reverse => "REVERSE".to_string(),
+        Token::Repeat => "REPEAT".to_string(),
+        Token::Log => "LOG".to_string(),
+        Token::Exp => "EXP".to_string(),
+        Token::Sign => "SIGN".to_string(),
+        Token::DateTrunc => "DATE_TRUNC".to_string(),
+        Token::Extract => "EXTRACT".to_string(),
+        Token::Ltrim => "LTRIM".to_string(),
+        Token::Rtrim => "RTRIM".to_string(),
+        Token::Ascii => "ASCII".to_string(),
+        Token::Chr => "CHR".to_string(),
+        Token::Sin => "SIN".to_string(),
+        Token::Cos => "COS".to_string(),
+        Token::Tan => "TAN".to_string(),
+        Token::Asin => "ASIN".to_string(),
+        Token::Acos => "ACOS".to_string(),
+        Token::Atan => "ATAN".to_string(),
+        Token::Atan2 => "ATAN2".to_string(),
+        Token::Random => "RANDOM".to_string(),
+        Token::Degrees => "DEGREES".to_string(),
+        Token::Radians => "RADIANS".to_string(),
+        Token::Quarter => "QUARTER".to_string(),
+        Token::Week => "WEEK".to_string(),
+        Token::DayOfWeek => "DAYOFWEEK".to_string(),
+        Token::Any => "ANY".to_string(),
+        Token::Filter => "FILTER".to_string(),
+        Token::Lateral => "LATERAL".to_string(),
+        Token::Grouping => "GROUPING".to_string(),
+        Token::Sets => "SETS".to_string(),
+        Token::Cube => "CUBE".to_string(),
+        Token::Rollup => "ROLLUP".to_string(),
+        Token::Fetch => "FETCH".to_string(),
+        Token::First => "FIRST".to_string(),
+        Token::Next => "NEXT".to_string(),
+        Token::Only => "ONLY".to_string(),
+        Token::Ties => "TIES".to_string(),
+        Token::Row => "ROW".to_string(),
+        Token::DoubleColon => "::".to_string(),
+        Token::GenerateSeries => "GENERATE_SERIES".to_string(),
+        Token::Window => "WINDOW".to_string(),
+        Token::Merge => "MERGE".to_string(),
+        Token::Matched => "MATCHED".to_string(),
+        Token::Generated => "GENERATED".to_string(),
+        Token::Always => "ALWAYS".to_string(),
+        Token::Stored => "STORED".to_string(),
+        Token::Pi => "PI".to_string(),
+        Token::Trunc => "TRUNC".to_string(),
+        Token::Log10 => "LOG10".to_string(),
+        Token::Log2 => "LOG2".to_string(),
+        Token::Cbrt => "CBRT".to_string(),
+        Token::Gcd => "GCD".to_string(),
+        Token::Lcm => "LCM".to_string(),
+        Token::Initcap => "INITCAP".to_string(),
+        Token::SplitPart => "SPLIT_PART".to_string(),
+        Token::Translate => "TRANSLATE".to_string(),
+        Token::RegexpMatch => "REGEXP_MATCH".to_string(),
+        Token::RegexpReplace => "REGEXP_REPLACE".to_string(),
+        _ => format!("{:?}", tok),
+    }
+}
+
+fn token_to_sql(tok: &Token) -> String {
+    match tok {
+        Token::Identifier(s) => s.clone(),
+        Token::Number(n) => n.to_string(),
+        Token::Float(f) => f.to_string(),
+        Token::StringLiteral(s) => format!("'{}'", s),
+        Token::LeftParen => "(".to_string(),
+        Token::RightParen => ")".to_string(),
+        Token::Comma => ",".to_string(),
+        Token::Semicolon => ";".to_string(),
+        Token::Dot => ".".to_string(),
+        Token::Star => "*".to_string(),
+        Token::Plus => "+".to_string(),
+        Token::Minus => "-".to_string(),
+        Token::Divide => "/".to_string(),
+        Token::Equal => "=".to_string(),
+        Token::NotEqual => "<>".to_string(),
+        Token::LessThan => "<".to_string(),
+        Token::LessThanOrEqual => "<=".to_string(),
+        Token::GreaterThan => ">".to_string(),
+        Token::GreaterThanOrEqual => ">=".to_string(),
+        Token::Concat => "||".to_string(),
+        Token::Select => "SELECT".to_string(),
+        Token::Exists => "EXISTS".to_string(),
+        Token::Distinct => "DISTINCT".to_string(),
+        Token::From => "FROM".to_string(),
+        Token::Where => "WHERE".to_string(),
+        Token::Insert => "INSERT".to_string(),
+        Token::Into => "INTO".to_string(),
+        Token::Values => "VALUES".to_string(),
+        Token::Update => "UPDATE".to_string(),
+        Token::Set => "SET".to_string(),
+        Token::Delete => "DELETE".to_string(),
+        Token::Create => "CREATE".to_string(),
+        Token::Table => "TABLE".to_string(),
+        Token::Drop => "DROP".to_string(),
+        Token::Alter => "ALTER".to_string(),
+        Token::Add => "ADD".to_string(),
+        Token::Column => "COLUMN".to_string(),
+        Token::Rename => "RENAME".to_string(),
+        Token::To => "TO".to_string(),
+        Token::And => "AND".to_string(),
+        Token::Or => "OR".to_string(),
+        Token::Not => "NOT".to_string(),
+        Token::Order => "ORDER".to_string(),
+        Token::By => "BY".to_string(),
+        Token::Asc => "ASC".to_string(),
+        Token::Desc => "DESC".to_string(),
+        Token::Limit => "LIMIT".to_string(),
+        Token::Offset => "OFFSET".to_string(),
+        Token::Group => "GROUP".to_string(),
+        Token::Having => "HAVING".to_string(),
+        Token::Count => "COUNT".to_string(),
+        Token::Sum => "SUM".to_string(),
+        Token::Avg => "AVG".to_string(),
+        Token::Min => "MIN".to_string(),
+        Token::Max => "MAX".to_string(),
+        Token::As => "AS".to_string(),
+        Token::Join => "JOIN".to_string(),
+        Token::Inner => "INNER".to_string(),
+        Token::Left => "LEFT".to_string(),
+        Token::Right => "RIGHT".to_string(),
+        Token::Full => "FULL".to_string(),
+        Token::On => "ON".to_string(),
+        Token::In => "IN".to_string(),
+        Token::Like => "LIKE".to_string(),
+        Token::Between => "BETWEEN".to_string(),
+        Token::Is => "IS".to_string(),
+        Token::Null => "NULL".to_string(),
+        Token::Boolean => "BOOLEAN".to_string(),
+        Token::Date => "DATE".to_string(),
+        Token::Time => "TIME".to_string(),
+        Token::DateTime => "DATETIME".to_string(),
+        Token::Foreign => "FOREIGN".to_string(),
+        Token::Key => "KEY".to_string(),
+        Token::References => "REFERENCES".to_string(),
+        Token::Cascade => "CASCADE".to_string(),
+        Token::Restrict => "RESTRICT".to_string(),
+        Token::No => "NO".to_string(),
+        Token::Action => "ACTION".to_string(),
+        Token::Union => "UNION".to_string(),
+        Token::All => "ALL".to_string(),
+        Token::Primary => "PRIMARY".to_string(),
+        Token::Unique => "UNIQUE".to_string(),
+        Token::Default => "DEFAULT".to_string(),
+        Token::Index => "INDEX".to_string(),
+        Token::Case => "CASE".to_string(),
+        Token::When => "WHEN".to_string(),
+        Token::Then => "THEN".to_string(),
+        Token::Else => "ELSE".to_string(),
+        Token::End => "END".to_string(),
+        Token::Upper => "UPPER".to_string(),
+        Token::Lower => "LOWER".to_string(),
+        Token::Length => "LENGTH".to_string(),
+        Token::Substring => "SUBSTRING".to_string(),
+        Token::Abs => "ABS".to_string(),
+        Token::Round => "ROUND".to_string(),
+        Token::Coalesce => "COALESCE".to_string(),
+        Token::Cross => "CROSS".to_string(),
+        Token::Natural => "NATURAL".to_string(),
+        Token::Check => "CHECK".to_string(),
+        Token::With => "WITH".to_string(),
+        Token::Over => "OVER".to_string(),
+        Token::Partition => "PARTITION".to_string(),
+        Token::RowNumber => "ROW_NUMBER".to_string(),
+        Token::Rank => "RANK".to_string(),
+        Token::DenseRank => "DENSE_RANK".to_string(),
+        Token::Stddev => "STDDEV".to_string(),
+        Token::Variance => "VARIANCE".to_string(),
+        Token::Lag => "LAG".to_string(),
+        Token::Lead => "LEAD".to_string(),
+        Token::Ntile => "NTILE".to_string(),
+        Token::GroupConcat => "GROUP_CONCAT".to_string(),
+        Token::StringAgg => "STRING_AGG".to_string(),
+        Token::BoolAnd => "BOOL_AND".to_string(),
+        Token::BoolOr => "BOOL_OR".to_string(),
+        Token::Every => "EVERY".to_string(),
+        Token::Median => "MEDIAN".to_string(),
+        Token::Mode => "MODE".to_string(),
+        Token::PercentileCont => "PERCENTILE_CONT".to_string(),
+        Token::PercentileDisc => "PERCENTILE_DISC".to_string(),
+        Token::FirstValue => "FIRST_VALUE".to_string(),
+        Token::LastValue => "LAST_VALUE".to_string(),
+        Token::NthValue => "NTH_VALUE".to_string(),
+        Token::PercentRank => "PERCENT_RANK".to_string(),
+        Token::CumeDist => "CUME_DIST".to_string(),
+        Token::Separator => "SEPARATOR".to_string(),
+        Token::Within => "WITHIN".to_string(),
+        Token::Rows => "ROWS".to_string(),
+        Token::RangeFrame => "RANGE".to_string(),
+        Token::Unbounded => "UNBOUNDED".to_string(),
+        Token::Preceding => "PRECEDING".to_string(),
+        Token::Following => "FOLLOWING".to_string(),
+        Token::Current => "CURRENT".to_string(),
+        Token::Cast => "CAST".to_string(),
+        Token::ConcatFn => "CONCAT".to_string(),
+        Token::Trim => "TRIM".to_string(),
+        Token::Replace => "REPLACE".to_string(),
+        Token::Position => "POSITION".to_string(),
+        Token::Instr => "INSTR".to_string(),
+        Token::Ceil => "CEIL".to_string(),
+        Token::Ceiling => "CEILING".to_string(),
+        Token::Floor => "FLOOR".to_string(),
+        Token::Sqrt => "SQRT".to_string(),
+        Token::Power => "POWER".to_string(),
+        Token::Mod => "MOD".to_string(),
+        Token::Now => "NOW".to_string(),
+        Token::Year => "YEAR".to_string(),
+        Token::Month => "MONTH".to_string(),
+        Token::Day => "DAY".to_string(),
+        Token::DateAdd => "DATE_ADD".to_string(),
+        Token::Datediff => "DATEDIFF".to_string(),
+        Token::Truncate => "TRUNCATE".to_string(),
+        Token::View => "VIEW".to_string(),
+        Token::ILike => "ILIKE".to_string(),
+        Token::Intersect => "INTERSECT".to_string(),
+        Token::Except => "EXCEPT".to_string(),
+        Token::Constraint => "CONSTRAINT".to_string(),
+        Token::Nullif => "NULLIF".to_string(),
+        Token::Greatest => "GREATEST".to_string(),
+        Token::Least => "LEAST".to_string(),
+        Token::Lpad => "LPAD".to_string(),
+        Token::Rpad => "RPAD".to_string(),
+        Token::Reverse => "REVERSE".to_string(),
+        Token::Repeat => "REPEAT".to_string(),
+        Token::Log => "LOG".to_string(),
+        Token::Exp => "EXP".to_string(),
+        Token::Sign => "SIGN".to_string(),
+        Token::DateTrunc => "DATE_TRUNC".to_string(),
+        Token::Extract => "EXTRACT".to_string(),
+        Token::Conflict => "CONFLICT".to_string(),
+        Token::Do => "DO".to_string(),
+        Token::Nothing => "NOTHING".to_string(),
+        Token::Autoincrement => "AUTOINCREMENT".to_string(),
+        Token::Analyze => "ANALYZE".to_string(),
+        Token::Begin => "BEGIN".to_string(),
+        Token::Commit => "COMMIT".to_string(),
+        Token::Rollback => "ROLLBACK".to_string(),
+        Token::Transaction => "TRANSACTION".to_string(),
+        Token::Explain => "EXPLAIN".to_string(),
+        Token::Describe => "DESCRIBE".to_string(),
+        Token::Show => "SHOW".to_string(),
+        Token::Tables => "TABLES".to_string(),
+        Token::Savepoint => "SAVEPOINT".to_string(),
+        Token::Release => "RELEASE".to_string(),
+        Token::If => "IF".to_string(),
+        Token::Using => "USING".to_string(),
+        Token::Returning => "RETURNING".to_string(),
+        Token::Recursive => "RECURSIVE".to_string(),
+        Token::Ltrim => "LTRIM".to_string(),
+        Token::Rtrim => "RTRIM".to_string(),
+        Token::Ascii => "ASCII".to_string(),
+        Token::Chr => "CHR".to_string(),
+        Token::Sin => "SIN".to_string(),
+        Token::Cos => "COS".to_string(),
+        Token::Tan => "TAN".to_string(),
+        Token::Asin => "ASIN".to_string(),
+        Token::Acos => "ACOS".to_string(),
+        Token::Atan => "ATAN".to_string(),
+        Token::Atan2 => "ATAN2".to_string(),
+        Token::Random => "RANDOM".to_string(),
+        Token::Degrees => "DEGREES".to_string(),
+        Token::Radians => "RADIANS".to_string(),
+        Token::Quarter => "QUARTER".to_string(),
+        Token::Week => "WEEK".to_string(),
+        Token::DayOfWeek => "DAYOFWEEK".to_string(),
+        Token::Any => "ANY".to_string(),
+        Token::Filter => "FILTER".to_string(),
+        Token::Lateral => "LATERAL".to_string(),
+        Token::Grouping => "GROUPING".to_string(),
+        Token::Sets => "SETS".to_string(),
+        Token::Cube => "CUBE".to_string(),
+        Token::Rollup => "ROLLUP".to_string(),
+        Token::Fetch => "FETCH".to_string(),
+        Token::First => "FIRST".to_string(),
+        Token::Next => "NEXT".to_string(),
+        Token::Only => "ONLY".to_string(),
+        Token::Ties => "TIES".to_string(),
+        Token::Row => "ROW".to_string(),
+        Token::DoubleColon => "::".to_string(),
+        Token::GenerateSeries => "GENERATE_SERIES".to_string(),
+        _ => format!("{:?}", tok),
+    }
+}
+
+pub fn parse(tokens: Vec<Token>) -> Result<Statement, RustqlError> {
+    let mut parser = Parser::new(tokens);
+    parser
+        .parse_statement()
+        .map_err(|err| parser.with_current_location(err))
+}
+
+pub fn parse_spanned(tokens: Vec<SpannedToken>) -> Result<Statement, RustqlError> {
+    let mut parser = Parser::new_spanned(tokens);
+    parser
+        .parse_statement()
+        .map_err(|err| parser.with_current_location(err))
+}
+
+pub fn parse_script(tokens: Vec<Token>) -> Result<Vec<Statement>, RustqlError> {
+    let mut parser = Parser::new(tokens);
+    let mut statements = Vec::new();
+
+    while *parser.current_token() != Token::Eof {
+        if *parser.current_token() == Token::Semicolon {
+            parser.advance();
+            continue;
+        }
+
+        let statement = parser
+            .parse_statement()
+            .map_err(|err| parser.with_current_location(err))?;
+        statements.push(statement);
+
+        if *parser.current_token() == Token::Semicolon {
+            parser.advance();
+        }
+    }
+
+    Ok(statements)
+}
+
+pub fn parse_script_spanned(tokens: Vec<SpannedToken>) -> Result<Vec<Statement>, RustqlError> {
+    let mut parser = Parser::new_spanned(tokens);
+    let mut statements = Vec::new();
+
+    while *parser.current_token() != Token::Eof {
+        if *parser.current_token() == Token::Semicolon {
+            parser.advance();
+            continue;
+        }
+
+        let statement = parser
+            .parse_statement()
+            .map_err(|err| parser.with_current_location(err))?;
+        statements.push(statement);
+
+        if *parser.current_token() == Token::Semicolon {
+            parser.advance();
+        }
+    }
+
+    Ok(statements)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_script;
+
+    struct Lcg(u64);
+
+    impl Lcg {
+        fn new(seed: u64) -> Self {
+            Self(seed)
+        }
+
+        fn next_u64(&mut self) -> u64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            self.0
+        }
+    }
+
+    fn fuzz_sql(seed: u64) -> String {
+        const ALPHABET: &[u8] =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_ ',;()*=<>!+-/\n\t";
+
+        let mut rng = Lcg::new(seed);
+        let len = (rng.next_u64() % 128) as usize;
+        let mut sql = String::with_capacity(len);
+        for _ in 0..len {
+            let index = (rng.next_u64() as usize) % ALPHABET.len();
+            sql.push(ALPHABET[index] as char);
+        }
+        sql
+    }
+
+    #[test]
+    fn parser_fuzz_inputs_do_not_panic() {
+        for case in 0..512u64 {
+            let sql = fuzz_sql(case.wrapping_mul(0x9E3779B97F4A7C15).wrapping_add(1));
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                if let Ok(tokens) = crate::lexer::tokenize(&sql) {
+                    let _ = parse_script(tokens);
+                }
+            }));
+            assert!(
+                result.is_ok(),
+                "parser panicked on fuzz case {case}: {sql:?}"
+            );
+        }
     }
 }

@@ -1,5 +1,5 @@
 use crate::ast::{ColumnDefinition, TableConstraint, Value};
-use crate::database::{Database, Index, RowId, Table};
+use crate::database::{CompositeIndex, Database, Index, RowId, Table};
 use crate::error::RustqlError;
 use std::collections::HashMap;
 
@@ -30,13 +30,16 @@ pub enum WalEntry {
         row_ids: Vec<RowId>,
         next_row_id: u64,
         constraints: Vec<TableConstraint>,
+        indexes: Vec<Index>,
+        composite_indexes: Vec<CompositeIndex>,
     },
     CreateIndex {
         name: String,
     },
     DropIndex {
         name: String,
-        index: Index,
+        index: Option<Index>,
+        composite_index: Box<Option<CompositeIndex>>,
     },
     AlterAddColumn {
         table: String,
@@ -159,23 +162,35 @@ impl WalLog {
                     row_ids,
                     next_row_id,
                     constraints,
+                    indexes,
+                    composite_indexes,
                 } => {
                     db.tables.insert(
                         name,
-                        Table {
-                            columns,
-                            rows,
-                            row_ids,
-                            next_row_id,
-                            constraints,
-                        },
+                        Table::with_rows_and_ids(columns, rows, row_ids, next_row_id, constraints),
                     );
+                    for index in indexes {
+                        db.indexes.insert(index.name.clone(), index);
+                    }
+                    for index in composite_indexes {
+                        db.composite_indexes.insert(index.name.clone(), index);
+                    }
                 }
                 WalEntry::CreateIndex { name } => {
                     db.indexes.remove(&name);
+                    db.composite_indexes.remove(&name);
                 }
-                WalEntry::DropIndex { name, index } => {
-                    db.indexes.insert(name, index);
+                WalEntry::DropIndex {
+                    name,
+                    index,
+                    composite_index,
+                } => {
+                    if let Some(index) = index {
+                        db.indexes.insert(name.clone(), index);
+                    }
+                    if let Some(index) = *composite_index {
+                        db.composite_indexes.insert(name, index);
+                    }
                 }
                 WalEntry::AlterAddColumn {
                     table,
@@ -304,23 +319,35 @@ fn rollback_single_entry(entry: WalEntry, db: &mut Database) {
             row_ids,
             next_row_id,
             constraints,
+            indexes,
+            composite_indexes,
         } => {
             db.tables.insert(
                 name,
-                Table {
-                    columns,
-                    rows,
-                    row_ids,
-                    next_row_id,
-                    constraints,
-                },
+                Table::with_rows_and_ids(columns, rows, row_ids, next_row_id, constraints),
             );
+            for index in indexes {
+                db.indexes.insert(index.name.clone(), index);
+            }
+            for index in composite_indexes {
+                db.composite_indexes.insert(index.name.clone(), index);
+            }
         }
         WalEntry::CreateIndex { name } => {
             db.indexes.remove(&name);
+            db.composite_indexes.remove(&name);
         }
-        WalEntry::DropIndex { name, index } => {
-            db.indexes.insert(name, index);
+        WalEntry::DropIndex {
+            name,
+            index,
+            composite_index,
+        } => {
+            if let Some(index) = index {
+                db.indexes.insert(name.clone(), index);
+            }
+            if let Some(index) = *composite_index {
+                db.composite_indexes.insert(name, index);
+            }
         }
         WalEntry::AlterAddColumn {
             table,
@@ -409,14 +436,57 @@ fn rollback_single_entry(entry: WalEntry, db: &mut Database) {
 }
 
 fn rebuild_all_indexes(db: &mut Database) {
+    let db_snapshot = db.clone();
+
     for index in db.indexes.values_mut() {
         index.entries.clear();
-        if let Some(table) = db.tables.get(&index.table)
+        if let Some(table) = db_snapshot.tables.get(&index.table)
             && let Some(col_idx) = table.columns.iter().position(|c| c.name == index.column)
         {
             for (row_id, row) in table.iter_rows_with_ids() {
+                if !crate::executor::ddl::row_matches_index_filter(
+                    &db_snapshot,
+                    table,
+                    index.filter_expr.as_ref(),
+                    row,
+                ) {
+                    continue;
+                }
                 let value = row.get(col_idx).cloned().unwrap_or(Value::Null);
                 index.entries.entry(value).or_default().push(row_id);
+            }
+        }
+    }
+
+    for index in db.composite_indexes.values_mut() {
+        index.entries.clear();
+        if let Some(table) = db_snapshot.tables.get(&index.table) {
+            let column_positions: Option<Vec<usize>> = index
+                .columns
+                .iter()
+                .map(|column| {
+                    table
+                        .columns
+                        .iter()
+                        .position(|candidate| candidate.name == *column)
+                })
+                .collect();
+            if let Some(column_positions) = column_positions {
+                for (row_id, row) in table.iter_rows_with_ids() {
+                    if !crate::executor::ddl::row_matches_index_filter(
+                        &db_snapshot,
+                        table,
+                        index.filter_expr.as_ref(),
+                        row,
+                    ) {
+                        continue;
+                    }
+                    let key = column_positions
+                        .iter()
+                        .map(|&col_idx| row.get(col_idx).cloned().unwrap_or(Value::Null))
+                        .collect();
+                    index.entries.entry(key).or_default().push(row_id);
+                }
             }
         }
     }

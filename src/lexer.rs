@@ -242,8 +242,6 @@ pub enum Token {
 
     Plus,
     Minus,
-    #[allow(dead_code)]
-    Multiply,
     Divide,
 
     Eof,

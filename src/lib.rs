@@ -17,7 +17,7 @@ mod wal;
 
 pub use database::Database;
 pub use engine::{
-    ColumnMeta, CommandResult, CommandTag, Engine, EngineOptions, PlanTree, QueryResult, Row,
-    RowBatch, Session, StorageMode,
+    ColumnMeta, CommandResult, CommandTag, Engine, EngineOptions, ExplainAnalyzeResult, PlanTree,
+    QueryResult, Row, RowBatch, Session, StorageMode,
 };
 pub use error::{ConstraintKind, RustqlError};

@@ -1,0 +1,79 @@
+# exact row/result coverage
+statement ok
+CREATE TABLE slt_exact_sales (id INTEGER, dept TEXT, amount INTEGER);
+
+statement ok
+INSERT INTO slt_exact_sales VALUES
+    (1, 'Books', 50),
+    (2, 'Books', 75),
+    (3, 'Electronics', 100),
+    (4, 'Electronics', 200);
+
+query exact
+SELECT dept, COUNT(*) AS cnt, SUM(amount) AS total
+FROM slt_exact_sales
+GROUP BY dept
+ORDER BY dept;
+----
+dept\tcnt\ttotal
+Books\t2\t125
+Electronics\t2\t300
+
+statement ok
+CREATE TABLE slt_exact_nulls (id INTEGER, note TEXT);
+
+statement ok
+INSERT INTO slt_exact_nulls VALUES (1, NULL), (2, 'filled');
+
+query exact
+SELECT id, note FROM slt_exact_nulls ORDER BY id;
+----
+id\tnote
+1\tNULL
+2\tfilled
+
+statement ok
+CREATE TABLE slt_exact_union_a (value INTEGER);
+
+statement ok
+CREATE TABLE slt_exact_union_b (value INTEGER);
+
+statement ok
+INSERT INTO slt_exact_union_a VALUES (1), (2);
+
+statement ok
+INSERT INTO slt_exact_union_b VALUES (2), (3);
+
+query exact
+SELECT value FROM slt_exact_union_a
+UNION
+SELECT value FROM slt_exact_union_b
+ORDER BY value;
+----
+value
+1
+2
+3
+
+statement ok
+CREATE TABLE slt_exact_users (id INTEGER, name TEXT);
+
+statement ok
+CREATE TABLE slt_exact_orders (id INTEGER, user_id INTEGER);
+
+statement ok
+INSERT INTO slt_exact_users VALUES (1, 'Alice'), (2, 'Bob');
+
+statement ok
+INSERT INTO slt_exact_orders VALUES (10, 1), (11, 1), (12, 2);
+
+query exact
+SELECT slt_exact_users.name, slt_exact_orders.id AS order_id
+FROM slt_exact_users
+JOIN slt_exact_orders ON slt_exact_users.id = slt_exact_orders.user_id
+ORDER BY order_id;
+----
+slt_exact_users.name\torder_id
+Alice\t10
+Alice\t11
+Bob\t12

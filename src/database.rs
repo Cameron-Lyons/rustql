@@ -1,7 +1,5 @@
 use crate::ast::*;
 use crate::error::RustqlError;
-#[allow(unused_imports)]
-use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 
@@ -31,8 +29,8 @@ pub struct Index {
     pub column: String,
     #[serde(with = "index_entries")]
     pub entries: BTreeMap<Value, Vec<RowId>>,
-    #[serde(default)]
-    pub filter_expr: Option<String>,
+    #[serde(default, with = "optional_filter_expression")]
+    pub filter_expr: Option<Expression>,
 }
 
 mod index_entries {
@@ -131,6 +129,8 @@ pub struct Table {
     pub next_row_id: u64,
     #[serde(default)]
     pub constraints: Vec<TableConstraint>,
+    #[serde(skip)]
+    row_id_positions: HashMap<RowId, usize>,
 }
 
 fn default_next_row_id() -> u64 {
@@ -138,20 +138,44 @@ fn default_next_row_id() -> u64 {
 }
 
 impl Table {
-    pub fn new(
+    pub fn with_rows_and_ids(
         columns: Vec<ColumnDefinition>,
         rows: Vec<Vec<Value>>,
+        row_ids: Vec<RowId>,
+        next_row_id: u64,
         constraints: Vec<TableConstraint>,
     ) -> Self {
         let mut table = Self {
             columns,
             rows,
-            row_ids: Vec::new(),
-            next_row_id: default_next_row_id(),
+            row_ids,
+            next_row_id,
             constraints,
+            row_id_positions: HashMap::new(),
         };
         table.ensure_row_ids();
         table
+    }
+
+    pub fn new(
+        columns: Vec<ColumnDefinition>,
+        rows: Vec<Vec<Value>>,
+        constraints: Vec<TableConstraint>,
+    ) -> Self {
+        Self::with_rows_and_ids(
+            columns,
+            rows,
+            Vec::new(),
+            default_next_row_id(),
+            constraints,
+        )
+    }
+
+    fn rebuild_row_id_positions(&mut self) {
+        self.row_id_positions.clear();
+        for (position, row_id) in self.row_ids.iter().copied().enumerate() {
+            self.row_id_positions.insert(row_id, position);
+        }
     }
 
     pub fn ensure_row_ids(&mut self) {
@@ -171,6 +195,7 @@ impl Table {
         if self.next_row_id == 0 {
             self.next_row_id = default_next_row_id();
         }
+        self.rebuild_row_id_positions();
     }
 
     pub fn iter_rows_with_ids(&self) -> impl Iterator<Item = (RowId, &Vec<Value>)> {
@@ -182,9 +207,11 @@ impl Table {
     }
 
     pub fn position_of_row_id(&self, row_id: RowId) -> Option<usize> {
-        self.row_ids
-            .iter()
-            .position(|candidate| *candidate == row_id)
+        self.row_id_positions.get(&row_id).copied().or_else(|| {
+            self.row_ids
+                .iter()
+                .position(|candidate| *candidate == row_id)
+        })
     }
 
     pub fn row_by_id(&self, row_id: RowId) -> Option<&Vec<Value>> {
@@ -203,6 +230,7 @@ impl Table {
         self.next_row_id += 1;
         self.rows.push(row);
         self.row_ids.push(row_id);
+        self.row_id_positions.insert(row_id, self.rows.len() - 1);
         row_id
     }
 
@@ -214,6 +242,7 @@ impl Table {
         if self.next_row_id <= row_id.0 {
             self.next_row_id = row_id.0 + 1;
         }
+        self.rebuild_row_id_positions();
     }
 
     pub fn remove_row_by_id(&mut self, row_id: RowId) -> Option<(usize, Vec<Value>)> {
@@ -221,6 +250,7 @@ impl Table {
         let position = self.position_of_row_id(row_id)?;
         self.row_ids.remove(position);
         let row = self.rows.remove(position);
+        self.rebuild_row_id_positions();
         Some((position, row))
     }
 
@@ -238,6 +268,37 @@ pub struct CompositeIndex {
     pub columns: Vec<String>,
     #[serde(with = "composite_index_entries")]
     pub entries: BTreeMap<Vec<Value>, Vec<RowId>>,
+    #[serde(default, with = "optional_filter_expression")]
+    pub filter_expr: Option<Expression>,
+}
+
+mod optional_filter_expression {
+    use super::*;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    #[derive(Serialize, Deserialize)]
+    #[serde(untagged)]
+    enum StoredFilter {
+        Expression(Expression),
+        LegacyDebugString(String),
+    }
+
+    pub fn serialize<S>(filter: &Option<Expression>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        filter.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<Expression>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Ok(match Option::<StoredFilter>::deserialize(deserializer)? {
+            Some(StoredFilter::Expression(expr)) => Some(expr),
+            Some(StoredFilter::LegacyDebugString(_)) | None => None,
+        })
+    }
 }
 
 mod composite_index_entries {
@@ -286,5 +347,166 @@ impl Database {
 
     pub fn save(&self) -> Result<(), RustqlError> {
         crate::storage::save_database(self)
+    }
+}
+
+pub trait DatabaseCatalog {
+    fn get_table(&self, name: &str) -> Option<&Table>;
+    fn get_index(&self, name: &str) -> Option<&Index>;
+    fn get_view(&self, name: &str) -> Option<&View>;
+    fn get_composite_index(&self, name: &str) -> Option<&CompositeIndex>;
+    fn indexes_iter(&self) -> Box<dyn Iterator<Item = &Index> + '_>;
+    fn composite_indexes_iter(&self) -> Box<dyn Iterator<Item = &CompositeIndex> + '_>;
+
+    fn contains_table(&self, name: &str) -> bool {
+        self.get_table(name).is_some()
+    }
+
+    fn contains_view(&self, name: &str) -> bool {
+        self.get_view(name).is_some()
+    }
+}
+
+impl DatabaseCatalog for Database {
+    fn get_table(&self, name: &str) -> Option<&Table> {
+        self.tables.get(name)
+    }
+
+    fn get_index(&self, name: &str) -> Option<&Index> {
+        self.indexes.get(name)
+    }
+
+    fn get_view(&self, name: &str) -> Option<&View> {
+        self.views.get(name)
+    }
+
+    fn get_composite_index(&self, name: &str) -> Option<&CompositeIndex> {
+        self.composite_indexes.get(name)
+    }
+
+    fn indexes_iter(&self) -> Box<dyn Iterator<Item = &Index> + '_> {
+        Box::new(self.indexes.values())
+    }
+
+    fn composite_indexes_iter(&self) -> Box<dyn Iterator<Item = &CompositeIndex> + '_> {
+        Box::new(self.composite_indexes.values())
+    }
+}
+
+impl DatabaseCatalog for std::sync::RwLockReadGuard<'_, Database> {
+    fn get_table(&self, name: &str) -> Option<&Table> {
+        self.tables.get(name)
+    }
+
+    fn get_index(&self, name: &str) -> Option<&Index> {
+        self.indexes.get(name)
+    }
+
+    fn get_view(&self, name: &str) -> Option<&View> {
+        self.views.get(name)
+    }
+
+    fn get_composite_index(&self, name: &str) -> Option<&CompositeIndex> {
+        self.composite_indexes.get(name)
+    }
+
+    fn indexes_iter(&self) -> Box<dyn Iterator<Item = &Index> + '_> {
+        Box::new(self.indexes.values())
+    }
+
+    fn composite_indexes_iter(&self) -> Box<dyn Iterator<Item = &CompositeIndex> + '_> {
+        Box::new(self.composite_indexes.values())
+    }
+}
+
+impl DatabaseCatalog for std::sync::RwLockWriteGuard<'_, Database> {
+    fn get_table(&self, name: &str) -> Option<&Table> {
+        self.tables.get(name)
+    }
+
+    fn get_index(&self, name: &str) -> Option<&Index> {
+        self.indexes.get(name)
+    }
+
+    fn get_view(&self, name: &str) -> Option<&View> {
+        self.views.get(name)
+    }
+
+    fn get_composite_index(&self, name: &str) -> Option<&CompositeIndex> {
+        self.composite_indexes.get(name)
+    }
+
+    fn indexes_iter(&self) -> Box<dyn Iterator<Item = &Index> + '_> {
+        Box::new(self.indexes.values())
+    }
+
+    fn composite_indexes_iter(&self) -> Box<dyn Iterator<Item = &CompositeIndex> + '_> {
+        Box::new(self.composite_indexes.values())
+    }
+}
+
+pub struct ScopedDatabase<'a> {
+    base: &'a dyn DatabaseCatalog,
+    temp_table_name: String,
+    temp_table: Table,
+}
+
+impl<'a> ScopedDatabase<'a> {
+    pub fn new(
+        base: &'a dyn DatabaseCatalog,
+        temp_table_name: String,
+        columns: Vec<ColumnDefinition>,
+    ) -> Self {
+        let temp_table =
+            Table::with_rows_and_ids(columns, vec![Vec::new()], vec![RowId(1)], 2, Vec::new());
+
+        Self {
+            base,
+            temp_table_name,
+            temp_table,
+        }
+    }
+
+    pub fn update_temp_row(&mut self, row: &[Value]) {
+        if self.temp_table.rows.is_empty() {
+            self.temp_table.rows.push(row.to_vec());
+        } else {
+            self.temp_table.rows[0].clear();
+            self.temp_table.rows[0].extend_from_slice(row);
+        }
+        self.temp_table.row_ids.clear();
+        self.temp_table.row_ids.push(RowId(1));
+        self.temp_table.next_row_id = 2;
+        self.temp_table.ensure_row_ids();
+    }
+}
+
+impl DatabaseCatalog for ScopedDatabase<'_> {
+    fn get_table(&self, name: &str) -> Option<&Table> {
+        if name == self.temp_table_name {
+            Some(&self.temp_table)
+        } else {
+            self.base.get_table(name)
+        }
+    }
+
+    fn get_index(&self, name: &str) -> Option<&Index> {
+        self.base.get_index(name)
+    }
+
+    fn get_view(&self, name: &str) -> Option<&View> {
+        self.base.get_view(name)
+    }
+
+    fn get_composite_index(&self, name: &str) -> Option<&CompositeIndex> {
+        self.base.get_composite_index(name)
+    }
+
+    fn indexes_iter(&self) -> Box<dyn Iterator<Item = &Index> + '_> {
+        self.base.indexes_iter()
+    }
+
+    fn composite_indexes_iter(&self) -> Box<dyn Iterator<Item = &CompositeIndex> + '_> {
+        self.base.composite_indexes_iter()
     }
 }

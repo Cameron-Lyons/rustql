@@ -1,9 +1,41 @@
 use crate::ast::*;
-use crate::database::{Database, Index, Table};
+use crate::database::{DatabaseCatalog, Table};
 use crate::error::RustqlError;
 use crate::executor::aggregate::format_aggregate_header;
+use crate::executor::ddl::{IndexUsage, find_index_usage};
+use crate::executor::expr::compare_values_same_type;
+use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt;
+
+const DEFAULT_GENERATE_SERIES_ROWS: usize = 100;
+const DEFAULT_LATERAL_ROWS: usize = 10;
+const FUNCTION_SCAN_ROW_COST: f64 = 0.2;
+const FILTER_ROW_COST: f64 = 0.1;
+const LIMIT_ROW_COST: f64 = 0.01;
+const DISTINCT_ON_ROW_COST: f64 = 0.05;
+const DISTINCT_ON_ROW_REDUCTION_DIVISOR: usize = 2;
+const AGGREGATE_GROUP_OUTPUT_SELECTIVITY: f64 = 0.1;
+const AGGREGATE_PER_STATE_COST: f64 = 0.1;
+const INDEX_SCAN_SEEK_COST_MULTIPLIER: f64 = 2.0;
+const INDEX_SCAN_ROW_COST: f64 = 0.5;
+const HASH_JOIN_BUILD_ROW_COST: f64 = 1.5;
+const HASH_JOIN_PROBE_ROW_COST: f64 = 0.5;
+const SORT_COMPLEXITY_COST: f64 = 0.5;
+const LATERAL_ROW_COST: f64 = 0.5;
+const LATERAL_FIXED_COST: f64 = 0.5;
+const SELECTIVITY_EQUAL: f64 = 0.1;
+const SELECTIVITY_NOT_EQUAL: f64 = 0.9;
+const SELECTIVITY_ORDERED_COMPARISON: f64 = 0.5;
+const SELECTIVITY_AND: f64 = 0.3;
+const SELECTIVITY_OR: f64 = 0.7;
+const SELECTIVITY_LIKE: f64 = 0.2;
+const SELECTIVITY_BETWEEN: f64 = 0.3;
+const SELECTIVITY_IS_NULL: f64 = 0.1;
+const SELECTIVITY_DEFAULT: f64 = 0.5;
+const SELECTIVITY_EQUAL_JOIN: f64 = 0.1;
+const SELECTIVITY_NON_EQUAL_JOIN: f64 = 0.01;
+const INDEX_RANGE_SELECTIVITY: f64 = 0.1;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum PlanNode {
@@ -118,11 +150,11 @@ pub struct ColumnStats {
 }
 
 pub struct QueryPlanner<'a> {
-    db: &'a Database,
+    db: &'a dyn DatabaseCatalog,
 }
 
 impl<'a> QueryPlanner<'a> {
-    pub fn new(db: &'a Database) -> Self {
+    pub fn new(db: &'a dyn DatabaseCatalog) -> Self {
         QueryPlanner { db }
     }
 
@@ -166,8 +198,7 @@ impl<'a> QueryPlanner<'a> {
             )?
         } else {
             let base_table = db
-                .tables
-                .get(&stmt.from)
+                .get_table(&stmt.from)
                 .ok_or_else(|| RustqlError::TableNotFound(stmt.from.clone()))?;
             let base_stats = self.collect_table_stats(&stmt.from, base_table, db);
             self.plan_table_access(
@@ -245,23 +276,17 @@ impl<'a> QueryPlanner<'a> {
         stats: &TableStats,
         output_label: Option<String>,
         where_clause: Option<&Expression>,
-        db: &Database,
+        db: &dyn DatabaseCatalog,
     ) -> Result<PlanNode, RustqlError> {
         if let Some(where_expr) = where_clause
             && let Some(index_usage) = self.find_best_index(table_name, where_expr, db)
         {
-            let index = db.indexes.get(&index_usage.index_name).ok_or_else(|| {
-                RustqlError::IndexError(format!(
-                    "Index '{}' does not exist",
-                    index_usage.index_name
-                ))
-            })?;
-            let estimated_rows = self.estimate_index_selectivity(&index_usage, index, stats);
+            let estimated_rows = self.estimate_index_selectivity(&index_usage, db, stats);
             let cost = self.estimate_index_scan_cost(stats.row_count, estimated_rows);
 
             return Ok(PlanNode::IndexScan {
                 table: table_name.to_string(),
-                index: index_usage.index_name,
+                index: index_usage.index_name().to_string(),
                 output_label: output_label.clone(),
                 filter: Some((*where_expr).clone()),
                 cost,
@@ -289,13 +314,15 @@ impl<'a> QueryPlanner<'a> {
     ) -> Result<PlanNode, RustqlError> {
         match function.name.as_str() {
             "generate_series" => {
-                let input_rows = self.estimate_generate_series_rows(function).unwrap_or(100);
+                let input_rows = self
+                    .estimate_generate_series_rows(function)
+                    .unwrap_or(DEFAULT_GENERATE_SERIES_ROWS);
                 let rows = if let Some(condition) = where_clause {
                     (input_rows as f64 * self.estimate_selectivity(condition, input_rows)) as usize
                 } else {
                     input_rows
                 };
-                let cost = input_rows as f64 * 0.2;
+                let cost = input_rows as f64 * FUNCTION_SCAN_ROW_COST;
 
                 Ok(PlanNode::FunctionScan {
                     function: function.clone(),
@@ -316,15 +343,14 @@ impl<'a> QueryPlanner<'a> {
         &self,
         left_plan: PlanNode,
         stmt: &SelectStatement,
-        db: &Database,
+        db: &dyn DatabaseCatalog,
         mut remaining_predicates: Vec<Expression>,
     ) -> Result<PlanNode, RustqlError> {
         let mut current_plan = left_plan;
         let base_label = stmt.from_alias.clone().unwrap_or_else(|| stmt.from.clone());
         let mut left_columns = self
             .db
-            .tables
-            .get(&stmt.from)
+            .get_table(&stmt.from)
             .map(|table| self.qualified_column_definitions(&table.columns, &base_label))
             .unwrap_or_default();
 
@@ -352,8 +378,7 @@ impl<'a> QueryPlanner<'a> {
             }
 
             let right_table = db
-                .tables
-                .get(&join.table)
+                .get_table(&join.table)
                 .ok_or_else(|| RustqlError::TableNotFound(join.table.clone()))?;
             let right_label = join
                 .table_alias
@@ -575,8 +600,8 @@ impl<'a> QueryPlanner<'a> {
         } else {
             joined_rows
         };
-        let cost =
-            self.estimate_cost(&left) + left_rows as f64 * (per_left_rows as f64 * 0.5 + 0.5);
+        let cost = self.estimate_cost(&left)
+            + left_rows as f64 * (per_left_rows as f64 * LATERAL_ROW_COST + LATERAL_FIXED_COST);
 
         PlanNode::LateralJoin {
             left: Box::new(left),
@@ -595,7 +620,7 @@ impl<'a> QueryPlanner<'a> {
         let input_cost = self.estimate_cost(&input);
         let selectivity = self.estimate_selectivity(&condition, input_rows);
         let filtered_rows = (input_rows as f64 * selectivity) as usize;
-        let cost = input_rows as f64 * 0.1; // Filter is relatively cheap
+        let cost = input_rows as f64 * FILTER_ROW_COST;
 
         PlanNode::Filter {
             input: Box::new(input),
@@ -633,7 +658,7 @@ impl<'a> QueryPlanner<'a> {
         } else {
             offset.saturating_add(limit).min(input_rows)
         };
-        let cost = self.estimate_cost(&input) + visited_rows as f64 * 0.01;
+        let cost = self.estimate_cost(&input) + visited_rows as f64 * LIMIT_ROW_COST;
 
         PlanNode::Limit {
             input: Box::new(input),
@@ -651,9 +676,9 @@ impl<'a> QueryPlanner<'a> {
         let output_rows = if input_rows == 0 {
             0
         } else {
-            (input_rows / 2).max(1)
+            (input_rows / DISTINCT_ON_ROW_REDUCTION_DIVISOR).max(1)
         };
-        let cost = self.estimate_cost(&input) + input_rows as f64 * 0.05;
+        let cost = self.estimate_cost(&input) + input_rows as f64 * DISTINCT_ON_ROW_COST;
 
         PlanNode::DistinctOn {
             input: Box::new(input),
@@ -678,7 +703,9 @@ impl<'a> QueryPlanner<'a> {
             .as_ref()
             .map(|sets| sets.len().max(1))
             .unwrap_or(1);
-        let output_rows = ((input_rows as f64 * 0.1).max(1.0) as usize) * grouping_multiplier;
+        let output_rows = ((input_rows as f64 * AGGREGATE_GROUP_OUTPUT_SELECTIVITY).max(1.0)
+            as usize)
+            * grouping_multiplier;
         let cost = self.estimate_aggregate_cost(input_rows, group_by.len(), aggregates.len());
 
         PlanNode::Aggregate {
@@ -725,11 +752,12 @@ impl<'a> QueryPlanner<'a> {
     }
 
     fn estimate_seq_scan_cost(&self, row_count: usize) -> f64 {
-        row_count as f64 * 1.0
+        row_count as f64
     }
 
     fn estimate_index_scan_cost(&self, total_rows: usize, selected_rows: usize) -> f64 {
-        (total_rows as f64).ln() * 2.0 + selected_rows as f64 * 0.5
+        (total_rows as f64).ln() * INDEX_SCAN_SEEK_COST_MULTIPLIER
+            + selected_rows as f64 * INDEX_SCAN_ROW_COST
     }
 
     fn estimate_hash_join_cost(&self, left: &PlanNode, right: &PlanNode) -> f64 {
@@ -738,8 +766,8 @@ impl<'a> QueryPlanner<'a> {
         let left_cost = self.estimate_cost(left);
         let right_cost = self.estimate_cost(right);
 
-        let build_cost = left_rows.min(right_rows) as f64 * 1.5;
-        let probe_cost = left_rows.max(right_rows) as f64 * 0.5;
+        let build_cost = left_rows.min(right_rows) as f64 * HASH_JOIN_BUILD_ROW_COST;
+        let probe_cost = left_rows.max(right_rows) as f64 * HASH_JOIN_PROBE_ROW_COST;
 
         left_cost + right_cost + build_cost + probe_cost
     }
@@ -754,7 +782,7 @@ impl<'a> QueryPlanner<'a> {
     }
 
     fn estimate_sort_cost(&self, row_count: usize) -> f64 {
-        row_count as f64 * (row_count as f64).ln() * 0.5
+        row_count as f64 * (row_count as f64).ln() * SORT_COMPLEXITY_COST
     }
 
     fn estimate_generate_series_rows(&self, function: &TableFunction) -> Option<usize> {
@@ -806,29 +834,31 @@ impl<'a> QueryPlanner<'a> {
         group_by_cols: usize,
         agg_count: usize,
     ) -> f64 {
-        input_rows as f64 * (1.0 + (group_by_cols + agg_count) as f64 * 0.1)
+        input_rows as f64 * (1.0 + (group_by_cols + agg_count) as f64 * AGGREGATE_PER_STATE_COST)
     }
 
     fn estimate_selectivity(&self, condition: &Expression, total_rows: usize) -> f64 {
         match condition {
-            Expression::BinaryOp { op, .. } => {
-                match op {
-                    BinaryOperator::Equal => 0.1, // Assume 10% selectivity for equality
-                    BinaryOperator::NotEqual => 0.9,
-                    BinaryOperator::LessThan | BinaryOperator::LessThanOrEqual => 0.5,
-                    BinaryOperator::GreaterThan | BinaryOperator::GreaterThanOrEqual => 0.5,
-                    BinaryOperator::And => 0.3, // AND reduces selectivity
-                    BinaryOperator::Or => 0.7,  // OR increases selectivity
-                    BinaryOperator::Like | BinaryOperator::ILike => 0.2,
-                    BinaryOperator::Between => 0.3,
-                    _ => 0.5,
+            Expression::BinaryOp { op, .. } => match op {
+                BinaryOperator::Equal => SELECTIVITY_EQUAL,
+                BinaryOperator::NotEqual => SELECTIVITY_NOT_EQUAL,
+                BinaryOperator::LessThan | BinaryOperator::LessThanOrEqual => {
+                    SELECTIVITY_ORDERED_COMPARISON
                 }
-            }
+                BinaryOperator::GreaterThan | BinaryOperator::GreaterThanOrEqual => {
+                    SELECTIVITY_ORDERED_COMPARISON
+                }
+                BinaryOperator::And => SELECTIVITY_AND,
+                BinaryOperator::Or => SELECTIVITY_OR,
+                BinaryOperator::Like | BinaryOperator::ILike => SELECTIVITY_LIKE,
+                BinaryOperator::Between => SELECTIVITY_BETWEEN,
+                _ => SELECTIVITY_DEFAULT,
+            },
             Expression::In { values, .. } => {
                 (values.len() as f64 / total_rows.max(1) as f64).min(1.0)
             }
-            Expression::IsNull { .. } => 0.1,
-            _ => 0.5,
+            Expression::IsNull { .. } => SELECTIVITY_IS_NULL,
+            _ => SELECTIVITY_DEFAULT,
         }
     }
 
@@ -839,27 +869,57 @@ impl<'a> QueryPlanner<'a> {
         condition: &Expression,
     ) -> usize {
         if self.is_equality_join(condition) {
-            ((left_rows * right_rows) as f64 * 0.1) as usize
+            ((left_rows * right_rows) as f64 * SELECTIVITY_EQUAL_JOIN) as usize
         } else {
-            ((left_rows * right_rows) as f64 * 0.01) as usize
+            ((left_rows * right_rows) as f64 * SELECTIVITY_NON_EQUAL_JOIN) as usize
         }
     }
 
     fn estimate_index_selectivity(
         &self,
         index_usage: &IndexUsage,
-        index: &Index,
+        db: &dyn DatabaseCatalog,
         stats: &TableStats,
     ) -> usize {
-        match &index_usage.operation {
-            IndexOperation::Equality(value) => {
-                index.entries.get(value).map(|v| v.len()).unwrap_or(0)
+        match index_usage {
+            IndexUsage::Equality { index_name, value } => db
+                .get_index(index_name)
+                .and_then(|index| index.entries.get(value))
+                .map(|rows| rows.len())
+                .unwrap_or(0),
+            IndexUsage::In { index_name, values } => db
+                .get_index(index_name)
+                .map(|index| {
+                    values
+                        .iter()
+                        .map(|value| index.entries.get(value).map(|rows| rows.len()).unwrap_or(0))
+                        .sum()
+                })
+                .unwrap_or(0),
+            IndexUsage::RangeGreater { .. }
+            | IndexUsage::RangeLess { .. }
+            | IndexUsage::RangeBetween { .. } => {
+                (stats.row_count as f64 * INDEX_RANGE_SELECTIVITY) as usize
             }
-            IndexOperation::Range { .. } => (stats.row_count as f64 * 0.1) as usize,
-            IndexOperation::In(values) => values
-                .iter()
-                .map(|v| index.entries.get(v).map(|rows| rows.len()).unwrap_or(0))
-                .sum(),
+            IndexUsage::CompositePrefix { index_name, values } => db
+                .get_composite_index(index_name)
+                .map(|index| {
+                    if values.len() == index.columns.len() {
+                        index
+                            .entries
+                            .get(values)
+                            .map(|rows| rows.len())
+                            .unwrap_or(0)
+                    } else {
+                        index
+                            .entries
+                            .iter()
+                            .filter(|(key, _)| key.starts_with(values))
+                            .map(|(_, rows)| rows.len())
+                            .sum()
+                    }
+                })
+                .unwrap_or(0),
         }
     }
 
@@ -871,11 +931,19 @@ impl<'a> QueryPlanner<'a> {
         }
     }
 
-    fn collect_table_stats(&self, table_name: &str, table: &Table, db: &Database) -> TableStats {
+    fn collect_table_stats(
+        &self,
+        table_name: &str,
+        table: &Table,
+        db: &dyn DatabaseCatalog,
+    ) -> TableStats {
         let row_count = table.rows.len();
         let mut column_stats = HashMap::new();
 
-        let has_index = db.indexes.values().any(|idx| idx.table == table_name);
+        let has_index = db.indexes_iter().any(|idx| idx.table == table_name)
+            || db
+                .composite_indexes_iter()
+                .any(|idx| idx.table == table_name);
 
         for (col_idx, col_def) in table.columns.iter().enumerate() {
             if !table.rows.is_empty() {
@@ -891,15 +959,15 @@ impl<'a> QueryPlanner<'a> {
                             null_count += 1;
                         } else {
                             distinct_values.insert(val.clone());
-                            if min_val
-                                .as_ref()
-                                .is_none_or(|current| self.compare_values(val, current) < 0)
+                            if min_val.is_none()
+                                || compare_values_same_type(val, min_val.as_ref().unwrap())
+                                    == Ordering::Less
                             {
                                 min_val = Some(val.clone());
                             }
-                            if max_val
-                                .as_ref()
-                                .is_none_or(|current| self.compare_values(val, current) > 0)
+                            if max_val.is_none()
+                                || compare_values_same_type(val, max_val.as_ref().unwrap())
+                                    == Ordering::Greater
                             {
                                 max_val = Some(val.clone());
                             }
@@ -926,106 +994,13 @@ impl<'a> QueryPlanner<'a> {
         }
     }
 
-    fn compare_values(&self, a: &Value, b: &Value) -> i32 {
-        match (a, b) {
-            (Value::Integer(i1), Value::Integer(i2)) => i1.cmp(i2) as i32,
-            (Value::Float(f1), Value::Float(f2)) => {
-                f1.partial_cmp(f2).unwrap_or(std::cmp::Ordering::Equal) as i32
-            }
-            (Value::Text(s1), Value::Text(s2)) => s1.cmp(s2) as i32,
-            (Value::Boolean(b1), Value::Boolean(b2)) => b1.cmp(b2) as i32,
-            _ => 0,
-        }
-    }
-
     fn find_best_index(
         &self,
         table_name: &str,
         where_expr: &Expression,
-        db: &Database,
+        db: &dyn DatabaseCatalog,
     ) -> Option<IndexUsage> {
-        self.find_index_usage_in_expression(table_name, where_expr, db)
-    }
-
-    fn find_index_usage_in_expression(
-        &self,
-        table_name: &str,
-        expr: &Expression,
-        db: &Database,
-    ) -> Option<IndexUsage> {
-        match expr {
-            Expression::BinaryOp { left, op, right } => {
-                if let Expression::Column(col_name) = left.as_ref() {
-                    let normalized_col = if col_name.contains('.') {
-                        col_name.split('.').next_back().unwrap_or(col_name)
-                    } else {
-                        col_name
-                    };
-
-                    if let Some(value) = self.extract_value(right) {
-                        for (idx_name, idx) in db.indexes.iter() {
-                            if idx.table == table_name && idx.column == normalized_col {
-                                return Some(IndexUsage {
-                                    index_name: idx_name.clone(),
-                                    column: normalized_col.to_string(),
-                                    operation: match op {
-                                        BinaryOperator::Equal => {
-                                            IndexOperation::Equality(value.clone())
-                                        }
-                                        BinaryOperator::LessThan
-                                        | BinaryOperator::LessThanOrEqual => {
-                                            IndexOperation::Range {
-                                                min: None,
-                                                max: Some(value.clone()),
-                                            }
-                                        }
-                                        BinaryOperator::GreaterThan
-                                        | BinaryOperator::GreaterThanOrEqual => {
-                                            IndexOperation::Range {
-                                                min: Some(value.clone()),
-                                                max: None,
-                                            }
-                                        }
-                                        _ => continue,
-                                    },
-                                    value: Some(value),
-                                });
-                            }
-                        }
-                    }
-                }
-                None
-            }
-            Expression::In { left, values } => {
-                if let Expression::Column(col_name) = left.as_ref() {
-                    let normalized_col = if col_name.contains('.') {
-                        col_name.split('.').next_back().unwrap_or(col_name)
-                    } else {
-                        col_name
-                    };
-
-                    for (idx_name, idx) in db.indexes.iter() {
-                        if idx.table == table_name && idx.column == normalized_col {
-                            return Some(IndexUsage {
-                                index_name: idx_name.clone(),
-                                column: normalized_col.to_string(),
-                                operation: IndexOperation::In(values.clone()),
-                                value: None,
-                            });
-                        }
-                    }
-                }
-                None
-            }
-            _ => None,
-        }
-    }
-
-    fn extract_value(&self, expr: &Expression) -> Option<Value> {
-        match expr {
-            Expression::Value(v) => Some(v.clone()),
-            _ => None,
-        }
+        find_index_usage(db, table_name, where_expr)
     }
 
     fn extract_conjuncts(&self, expr: &Expression) -> Vec<Expression> {
@@ -1194,7 +1169,7 @@ impl<'a> QueryPlanner<'a> {
             .as_ref()
             .map(|fetch| fetch.count.max(1))
             .or(stmt.limit.map(|limit| limit.max(1)))
-            .unwrap_or(10)
+            .unwrap_or(DEFAULT_LATERAL_ROWS)
     }
 
     fn infer_select_output_columns(
@@ -1301,11 +1276,11 @@ impl<'a> QueryPlanner<'a> {
                 .collect()
         } else if stmt.from.is_empty() {
             Vec::new()
-        } else if let Some(table) = self.db.tables.get(&stmt.from) {
+        } else if let Some(table) = self.db.get_table(&stmt.from) {
             table.columns.clone()
         } else if let Some(cte) = stmt.ctes.iter().find(|cte| cte.name == stmt.from) {
             self.infer_select_output_columns(&cte.query)?
-        } else if let Some(view) = self.db.views.get(&stmt.from) {
+        } else if let Some(view) = self.db.get_view(&stmt.from) {
             self.infer_select_output_columns(&self.parse_view_query(&view.query_sql)?)?
         } else {
             return Err(RustqlError::TableNotFound(stmt.from.clone()));
@@ -1314,9 +1289,9 @@ impl<'a> QueryPlanner<'a> {
         for join in &stmt.joins {
             if let Some((subquery, _)) = join.subquery.as_ref() {
                 columns.extend(self.infer_select_output_columns(subquery)?);
-            } else if let Some(table) = self.db.tables.get(&join.table) {
+            } else if let Some(table) = self.db.get_table(&join.table) {
                 columns.extend(table.columns.clone());
-            } else if let Some(view) = self.db.views.get(&join.table) {
+            } else if let Some(view) = self.db.get_view(&join.table) {
                 columns.extend(
                     self.infer_select_output_columns(&self.parse_view_query(&view.query_sql)?)?,
                 );
@@ -1561,42 +1536,25 @@ impl PlanNode {
     }
 }
 
-pub fn explain_query(db: &Database, stmt: &SelectStatement) -> Result<String, RustqlError> {
+pub fn explain_query(
+    db: &dyn DatabaseCatalog,
+    stmt: &SelectStatement,
+) -> Result<String, RustqlError> {
     let planner = QueryPlanner::new(db);
     let plan = planner.plan_select(stmt)?;
     Ok(format!("Query Plan:\n{}", plan))
 }
 
-pub fn plan_query(db: &Database, stmt: &SelectStatement) -> Result<PlanNode, RustqlError> {
+pub fn plan_query(
+    db: &dyn DatabaseCatalog,
+    stmt: &SelectStatement,
+) -> Result<PlanNode, RustqlError> {
     QueryPlanner::new(db).plan_select(stmt)
 }
 
 pub(crate) fn infer_select_output_columns(
-    db: &Database,
+    db: &dyn DatabaseCatalog,
     stmt: &SelectStatement,
 ) -> Result<Vec<ColumnDefinition>, RustqlError> {
     QueryPlanner::new(db).infer_select_output_columns(stmt)
-}
-
-#[derive(Debug, Clone)]
-struct IndexUsage {
-    index_name: String,
-    #[allow(dead_code)]
-    column: String,
-    operation: IndexOperation,
-    #[allow(dead_code)]
-    value: Option<Value>,
-}
-
-#[derive(Debug, Clone)]
-enum IndexOperation {
-    #[allow(dead_code)]
-    Equality(Value),
-    Range {
-        #[allow(dead_code)]
-        min: Option<Value>,
-        #[allow(dead_code)]
-        max: Option<Value>,
-    },
-    In(Vec<Value>),
 }

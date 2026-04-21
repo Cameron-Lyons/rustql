@@ -1,10 +1,11 @@
 use crate::ast::*;
-use crate::database::Database;
+use crate::database::DatabaseCatalog;
 use crate::error::RustqlError;
 use std::cmp::Ordering;
+use std::collections::HashMap;
 
 pub fn evaluate_expression(
-    db: Option<&Database>,
+    db: Option<&dyn DatabaseCatalog>,
     expr: &Expression,
     columns: &[ColumnDefinition],
     row: &[Value],
@@ -198,14 +199,14 @@ pub fn evaluate_value_expression(
     columns: &[ColumnDefinition],
     row: &[Value],
 ) -> Result<Value, RustqlError> {
-    evaluate_value_expression_with_db(expr, columns, row, None)
+    evaluate_value_expression_with_db(expr, columns, row, None::<&dyn DatabaseCatalog>)
 }
 
 pub fn evaluate_value_expression_with_db(
     expr: &Expression,
     columns: &[ColumnDefinition],
     row: &[Value],
-    db: Option<&Database>,
+    db: Option<&dyn DatabaseCatalog>,
 ) -> Result<Value, RustqlError> {
     match expr {
         Expression::Column(name) => {
@@ -1532,9 +1533,22 @@ pub fn compare_values(
             (Value::Text(l), Value::Text(r), op) => Ok(match op {
                 BinaryOperator::Equal => l == r,
                 BinaryOperator::NotEqual => l != r,
+                BinaryOperator::LessThan => l < r,
+                BinaryOperator::LessThanOrEqual => l <= r,
+                BinaryOperator::GreaterThan => l > r,
+                BinaryOperator::GreaterThanOrEqual => l >= r,
                 _ => {
                     return Err(RustqlError::TypeMismatch(
                         "Invalid operator for strings".to_string(),
+                    ));
+                }
+            }),
+            (Value::Boolean(l), Value::Boolean(r), op) => Ok(match op {
+                BinaryOperator::Equal => l == r,
+                BinaryOperator::NotEqual => l != r,
+                _ => {
+                    return Err(RustqlError::TypeMismatch(
+                        "Invalid operator for booleans".to_string(),
                     ));
                 }
             }),
@@ -1652,11 +1666,8 @@ pub fn apply_arithmetic(
     }
 }
 
-pub fn compare_values_for_sort(left: &Value, right: &Value) -> Ordering {
+pub fn compare_values_same_type(left: &Value, right: &Value) -> Ordering {
     match (left, right) {
-        (Value::Null, Value::Null) => Ordering::Equal,
-        (Value::Null, _) => Ordering::Less,
-        (_, Value::Null) => Ordering::Greater,
         (Value::Integer(l), Value::Integer(r)) => l.cmp(r),
         (Value::Float(l), Value::Float(r)) => {
             if l < r {
@@ -1667,33 +1678,14 @@ pub fn compare_values_for_sort(left: &Value, right: &Value) -> Ordering {
                 Ordering::Equal
             }
         }
-        (Value::Integer(l), Value::Float(r)) => {
-            let l = *l as f64;
-            if l < *r {
-                Ordering::Less
-            } else if l > *r {
-                Ordering::Greater
-            } else {
-                Ordering::Equal
-            }
-        }
-        (Value::Float(l), Value::Integer(r)) => {
-            let r = *r as f64;
-            if l < &r {
-                Ordering::Less
-            } else if l > &r {
-                Ordering::Greater
-            } else {
-                Ordering::Equal
-            }
-        }
         (Value::Text(l), Value::Text(r)) => l.cmp(r),
         (Value::Boolean(l), Value::Boolean(r)) => l.cmp(r),
-        (Value::Date(l), Value::Date(r)) => l.cmp(r),
-        (Value::Time(l), Value::Time(r)) => l.cmp(r),
-        (Value::DateTime(l), Value::DateTime(r)) => l.cmp(r),
         _ => Ordering::Equal,
     }
+}
+
+pub fn compare_values_for_sort(left: &Value, right: &Value) -> Ordering {
+    left.cmp(right)
 }
 
 pub fn parse_value_from_string(s: &str) -> Value {
@@ -1864,32 +1856,16 @@ fn execute_cast(val: Value, target_type: &DataType) -> Result<Value, RustqlError
 
 pub fn evaluate_select_order_expression(
     expr: &Expression,
-    columns: &[ColumnDefinition],
     row: &[Value],
-    column_specs: &[(String, Column)],
     projected_row: &[Value],
+    projected_lookup: &HashMap<String, usize>,
+    base_lookup: &HashMap<String, usize>,
     allow_ordinal: bool,
 ) -> Result<Value, RustqlError> {
     match expr {
         Expression::Column(name) => {
-            for (idx, (header, col_spec)) in column_specs.iter().enumerate() {
-                if header == name {
-                    return Ok(projected_row[idx].clone());
-                }
-                if let Column::Named {
-                    name: original_name,
-                    alias,
-                } = col_spec
-                    && (alias.as_ref().map(|a| a == name).unwrap_or(false)
-                        || original_name == name
-                        || original_name
-                            .split('.')
-                            .next_back()
-                            .map(|n| n == name)
-                            .unwrap_or(false))
-                {
-                    return Ok(projected_row[idx].clone());
-                }
+            if let Some(&idx) = projected_lookup.get(name) {
+                return Ok(projected_row[idx].clone());
             }
 
             let column_name = if name.contains('.') {
@@ -1898,9 +1874,9 @@ pub fn evaluate_select_order_expression(
                 name.as_str()
             };
 
-            let idx = columns
-                .iter()
-                .position(|c| c.name == column_name)
+            let idx = base_lookup
+                .get(column_name)
+                .copied()
                 .ok_or_else(|| RustqlError::ColumnNotFound(format!("{} (ORDER BY)", name)))?;
             Ok(row[idx].clone())
         }
@@ -1921,18 +1897,18 @@ pub fn evaluate_select_order_expression(
             | BinaryOperator::Divide => {
                 let left_val = evaluate_select_order_expression(
                     left,
-                    columns,
                     row,
-                    column_specs,
                     projected_row,
+                    projected_lookup,
+                    base_lookup,
                     false,
                 )?;
                 let right_val = evaluate_select_order_expression(
                     right,
-                    columns,
                     row,
-                    column_specs,
                     projected_row,
+                    projected_lookup,
+                    base_lookup,
                     false,
                 )?;
                 apply_arithmetic(&left_val, &right_val, op)
