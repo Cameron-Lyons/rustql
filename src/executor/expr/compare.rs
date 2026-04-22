@@ -184,26 +184,3 @@ pub fn compare_values_same_type(left: &Value, right: &Value) -> Ordering {
 pub fn compare_values_for_sort(left: &Value, right: &Value) -> Ordering {
     left.cmp(right)
 }
-
-pub fn parse_value_from_string(s: &str) -> Value {
-    let s = s.trim();
-    if s == "NULL" || s.is_empty() {
-        return Value::Null;
-    }
-    if let Ok(i) = s.parse::<i64>() {
-        return Value::Integer(i);
-    }
-    if let Ok(f) = s.parse::<f64>() {
-        return Value::Float(f);
-    }
-    if s == "true" || s == "1" {
-        return Value::Boolean(true);
-    }
-    if s == "false" || s == "0" {
-        return Value::Boolean(false);
-    }
-    if s.starts_with('\'') && s.ends_with('\'') {
-        return Value::Text(s[1..s.len() - 1].to_string());
-    }
-    Value::Text(s.to_string())
-}

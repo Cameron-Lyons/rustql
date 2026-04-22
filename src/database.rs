@@ -1,5 +1,4 @@
 use crate::ast::*;
-use crate::error::RustqlError;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 
@@ -339,14 +338,6 @@ impl Database {
         for table in self.tables.values_mut() {
             table.ensure_row_ids();
         }
-    }
-
-    pub fn load() -> Result<Self, RustqlError> {
-        crate::storage::load_database()
-    }
-
-    pub fn save(&self) -> Result<(), RustqlError> {
-        crate::storage::save_database(self)
     }
 }
 

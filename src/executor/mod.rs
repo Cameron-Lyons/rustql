@@ -1,8 +1,6 @@
-#[allow(dead_code)]
 pub(crate) mod aggregate;
 pub(crate) mod ddl;
 pub(crate) mod dml;
-#[allow(dead_code)]
 pub(crate) mod expr;
 pub(crate) mod select;
 
@@ -201,19 +199,6 @@ pub(crate) fn execute(
             Ok(command_result(CommandTag::Do, affected))
         }
     }
-}
-
-#[allow(dead_code)]
-pub(crate) fn reset_database_state(context: &ExecutionContext) {
-    {
-        let mut db = get_database_write(context);
-        db.tables.clear();
-        db.indexes.clear();
-        db.views.clear();
-        db.composite_indexes.clear();
-    }
-
-    context.with_wal_state_mut(|state| state.reset());
 }
 
 pub(crate) fn save_if_not_in_transaction(

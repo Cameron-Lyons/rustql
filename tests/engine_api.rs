@@ -1,6 +1,6 @@
 use rustql::{
-    CommandTag, ConstraintKind, Database, Engine, EngineOptions, QueryResult, RustqlError,
-    StorageMode, ast, lexer, parser, planner,
+    CommandTag, ConstraintKind, Engine, EngineOptions, QueryResult, RustqlError, StorageMode, ast,
+    lexer, parser, planner,
 };
 use std::collections::BTreeSet;
 use std::ffi::{OsStr, OsString};
@@ -206,23 +206,6 @@ fn engine_options_from_env_rejects_unknown_storage() {
             .to_string()
             .contains("Unsupported RUSTQL_STORAGE value")
     );
-}
-
-#[test]
-fn legacy_database_helpers_use_env_path_override() {
-    let _guard = test_guard();
-    let path = unique_temp_path("database_env", "json");
-    cleanup_storage_path(&path);
-    let _storage = EnvVarGuard::set("RUSTQL_STORAGE", "json");
-    let _path = EnvVarGuard::set("RUSTQL_STORAGE_PATH", &path);
-
-    Database::new().save().unwrap();
-    let loaded = Database::load().unwrap();
-
-    assert!(path.exists());
-    assert!(loaded.tables.is_empty());
-
-    cleanup_storage_path(&path);
 }
 
 #[test]

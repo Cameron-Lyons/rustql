@@ -35,23 +35,23 @@ runtime still has compatibility or fallback paths, and what remains open.
 | Area | Status | Current implementation | Remaining work |
 |------|--------|------------------------|----------------|
 | Public engine/session API | Done | `src/engine.rs` defines `EngineOptions`, `Engine`, `Session`, `QueryResult`, `CommandTag`, `ColumnMeta`, and `RowBatch`; `src/lib.rs` exports the typed API. The CLI opens an engine and renders typed results at the edge. | Keep README/API examples aligned with the typed API. |
-| Legacy `process_query` API | Done | No `process_query` function is exported from `src/`. The only remaining `process_query` helper lives in `tests/common/mod.rs` for compatibility-style test rendering. | Add a separate public compatibility module only if there is a supported migration need. |
+| Legacy `process_query` API | Done | No `process_query` function is exported from `src/` or kept in test helpers; `tests/common/mod.rs` uses the typed engine API and renders only at assertion boundaries. | Add a separate public compatibility module only if there is a supported migration need. |
 | Global runtime state | Done | `Engine` owns an `ExecutionContext` with per-engine `Database`, `WalState`, and optional storage. Tests cover isolated engines and transaction state. | None known. |
-| Typed execution boundary | Partial | Public execution returns typed `QueryResult` values, and CLI/test renderers convert to text outside the API boundary. `SELECT` results are converted to `RowBatch`. | Remove or quarantine old internal text helpers, including unused `parse_value_from_string` and aggregate string table formatting paths. |
-| Planner/executor pipeline | Partial | `PlanExecutor` and planner-backed `PlanNode` execution handle supported `SELECT` forms, and `EXPLAIN` returns planner nodes. | `can_execute_via_plan` still gates unsupported constructs and falls back to legacy select code for some CTE, subquery, set-op, and materialized-source paths. |
+| Typed execution boundary | Done | Public execution returns typed `QueryResult` values, and CLI/test renderers convert to text outside the API boundary. `SELECT` results are converted to `RowBatch`, and old internal text parsing/aggregate table-formatting helpers have been removed. | None known. |
+| Planner/executor pipeline | Done | `SELECT`, `EXPLAIN`, and `EXPLAIN ANALYZE` use planner-backed `PlanNode` execution through `PlanExecutor`; the old select fallback gate has been removed. | None known. |
 | Row IDs and index storage | Done | `src/database.rs` has `RowId`, per-table `row_ids`, and `next_row_id`. Regular and composite indexes store `Vec<RowId>`, and DML, WAL rollback, index maintenance, and storage normalization use stable row IDs. | Keep new table/index work on row IDs; do not persist vector positions as row identity. |
 | Transactions and WAL | Partial | `WalState` supports rollback and savepoints. B-tree storage writes a versioned `.wal` transaction journal for pending and committed states and recovers committed journals on load. JSON storage is intentionally debug/demo snapshot storage, not a durable transactional backend. | The B-tree journal is commit-recovery support, not a general replay log of every mutation. |
 | Storage format versioning | Done | B-tree files use magic/version headers and currently read legacy version 2 plus the current version 3. The B-tree journal also has a magic/version header. JSON storage remains raw JSON by design because it is not a durable storage format. | Add a JSON envelope only if JSON is promoted beyond debug/demo snapshot storage. |
 | Migration tooling | Open | There is no `src/bin` migration tool and no `rustql migrate` command. | Add a converter and validator only if v0 files need one-way migration into the current storage format. |
 | Type semantics | Partial | Mixed nonnumeric comparisons return type mismatch errors; integer/float comparisons are intentionally numeric-compatible; date/time casts exist. | Normalize date/time values on write, tighten casts that still accept arbitrary text, and document sort/coercion rules. |
-| Compatibility mode and shims | Deferred | No runtime compatibility mode and no public legacy module exist. | Reopen only if users need a supported transition window. |
+| Compatibility mode and shims | Deferred | No runtime compatibility mode, public legacy module, or hidden `Database::load/save` env shim exists. | Reopen only if users need a supported transition window. |
 | Test and CI gates | Partial | GitHub Actions runs MSRV check, fmt, clippy, build, tests, and a benchmark smoke profile. Tests cover API, planner, recovery, typed rows, and row IDs. | There are no separate v0/v1 jobs, ADRs, storage fuzz tests, or migration validation suite. |
 
 ## Current Priorities
 
 | Priority | Work | Reason |
 |----------|------|--------|
-| 1 | Finish or explicitly document planner fallback paths. | This is the largest remaining gap between the target architecture and runtime behavior. |
+| 1 | Keep planner-backed SELECT execution as the only runtime path. | New SELECT features should be implemented in the planner and `PlanExecutor` instead of adding side execution paths. |
 | 2 | Add migration/export tooling only if v0 users need it. | JSON is now documented as debug/demo snapshot storage; durable storage guarantees belong to B-tree. |
-| 3 | Remove stale internal compatibility helpers. | The public API is typed, but old text-format helpers still make the architecture harder to reason about. |
+| 3 | Keep stale internal compatibility helpers out. | The typed execution boundary is now cleaner; new compatibility helpers should be added only with an explicit migration need. |
 | 4 | Document and test type coercion rules. | Mixed-type comparisons are stricter now, but cast and date/time behavior still needs a crisp contract. |
