@@ -41,6 +41,44 @@ pub enum PlanNode {
         rows: usize,
     },
 
+    SubqueryScan {
+        alias: String,
+        input: Box<PlanNode>,
+        select: Box<SelectStatement>,
+        output_label: Option<String>,
+        cost: f64,
+        rows: usize,
+    },
+
+    ViewScan {
+        view: String,
+        input: Box<PlanNode>,
+        select: Box<SelectStatement>,
+        output_label: Option<String>,
+        cost: f64,
+        rows: usize,
+    },
+
+    CteScan {
+        cte: String,
+        input: Box<PlanNode>,
+        select: Box<SelectStatement>,
+        output_label: Option<String>,
+        cost: f64,
+        rows: usize,
+    },
+
+    RecursiveCteScan {
+        cte: String,
+        base: Box<PlanNode>,
+        base_select: Box<SelectStatement>,
+        recursive_select: Box<SelectStatement>,
+        union_all: bool,
+        output_label: Option<String>,
+        cost: f64,
+        rows: usize,
+    },
+
     NestedLoopJoin {
         left: Box<PlanNode>,
         right: Box<PlanNode>,
@@ -176,6 +214,56 @@ impl PlanNode {
                     writeln!(f, "{}  Filter: [WHERE clause]", indent_str)?;
                 }
                 writeln!(f, "{}  Cost: {:.2}, Rows: {}", indent_str, cost, rows)
+            }
+            PlanNode::SubqueryScan {
+                alias,
+                input,
+                cost,
+                rows,
+                ..
+            } => {
+                writeln!(f, "{}Subquery Scan on {}", indent_str, alias)?;
+                writeln!(f, "{}  Cost: {:.2}, Rows: {}", indent_str, cost, rows)?;
+                input.fmt_with_indent(f, indent + 1)
+            }
+            PlanNode::ViewScan {
+                view,
+                input,
+                cost,
+                rows,
+                ..
+            } => {
+                writeln!(f, "{}View Scan on {}", indent_str, view)?;
+                writeln!(f, "{}  Cost: {:.2}, Rows: {}", indent_str, cost, rows)?;
+                input.fmt_with_indent(f, indent + 1)
+            }
+            PlanNode::CteScan {
+                cte,
+                input,
+                cost,
+                rows,
+                ..
+            } => {
+                writeln!(f, "{}CTE Scan on {}", indent_str, cte)?;
+                writeln!(f, "{}  Cost: {:.2}, Rows: {}", indent_str, cost, rows)?;
+                input.fmt_with_indent(f, indent + 1)
+            }
+            PlanNode::RecursiveCteScan {
+                cte,
+                base,
+                union_all,
+                cost,
+                rows,
+                ..
+            } => {
+                let label = if *union_all {
+                    "Recursive CTE Scan (Union All)"
+                } else {
+                    "Recursive CTE Scan (Union)"
+                };
+                writeln!(f, "{}{} on {}", indent_str, label, cte)?;
+                writeln!(f, "{}  Cost: {:.2}, Rows: {}", indent_str, cost, rows)?;
+                base.fmt_with_indent(f, indent + 1)
             }
             PlanNode::IndexScan {
                 table,

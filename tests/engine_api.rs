@@ -1828,6 +1828,7 @@ fn explain_from_subquery_returns_plan() {
     match result {
         QueryResult::Explain(plan) => {
             assert!(matches!(plan, planner::PlanNode::Sort { .. }));
+            assert!(format!("{plan}").contains("Subquery Scan on filtered"));
         }
         other => panic!("expected explain result, got: {other:?}"),
     }
@@ -1871,6 +1872,7 @@ fn explain_join_subquery_returns_plan() {
                 plan,
                 planner::PlanNode::HashJoin { .. } | planner::PlanNode::NestedLoopJoin { .. }
             ));
+            assert!(format!("{plan}").contains("Subquery Scan on recent"));
         }
         other => panic!("expected explain result, got: {other:?}"),
     }
@@ -1946,6 +1948,66 @@ fn explain_cte_returns_plan() {
     match result {
         QueryResult::Explain(plan) => {
             assert!(matches!(plan, planner::PlanNode::Sort { .. }));
+            assert!(format!("{plan}").contains("CTE Scan on adults"));
+        }
+        other => panic!("expected explain result, got: {other:?}"),
+    }
+}
+
+#[test]
+fn explain_view_returns_view_scan_plan() {
+    let _guard = test_guard();
+    let engine = Engine::open(EngineOptions {
+        storage: StorageMode::Memory,
+    })
+    .unwrap();
+    let mut session = engine.session();
+
+    session
+        .execute_script(
+            "
+            CREATE TABLE users (id INTEGER, age INTEGER);
+            INSERT INTO users VALUES (1, 25), (2, 40);
+            CREATE VIEW adults AS SELECT id, age FROM users WHERE age >= 40;
+            ",
+        )
+        .unwrap();
+
+    let result = session
+        .execute_one("EXPLAIN SELECT id FROM adults")
+        .unwrap();
+
+    match result {
+        QueryResult::Explain(plan) => {
+            assert!(matches!(plan, planner::PlanNode::ViewScan { .. }));
+        }
+        other => panic!("expected explain result, got: {other:?}"),
+    }
+}
+
+#[test]
+fn explain_recursive_cte_returns_recursive_cte_scan_plan() {
+    let _guard = test_guard();
+    let engine = Engine::open(EngineOptions {
+        storage: StorageMode::Memory,
+    })
+    .unwrap();
+    let mut session = engine.session();
+
+    let result = session
+        .execute_one(
+            "EXPLAIN WITH RECURSIVE nums AS (
+                 SELECT 1 AS n
+                 UNION ALL
+                 SELECT n + 1 FROM nums WHERE n < 3
+             )
+             SELECT n FROM nums",
+        )
+        .unwrap();
+
+    match result {
+        QueryResult::Explain(plan) => {
+            assert!(matches!(plan, planner::PlanNode::RecursiveCteScan { .. }));
         }
         other => panic!("expected explain result, got: {other:?}"),
     }

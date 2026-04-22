@@ -37,7 +37,7 @@ A SQL database engine written in Rust with an interactive REPL. RustQL supports 
 - `FOREIGN KEY` with `ON DELETE` actions (`RESTRICT`, `CASCADE`, `SET NULL`, `NO ACTION`)
 
 **Transactions**
-- `BEGIN` / `COMMIT` / `ROLLBACK` with write-ahead log (WAL)
+- `BEGIN` / `COMMIT` / `ROLLBACK`; B-tree storage adds durable commit recovery
 
 **Other**
 - `EXPLAIN` &mdash; display query execution plan
@@ -91,15 +91,15 @@ let results = session.execute("SELECT * FROM users").unwrap();
 
 ## Storage modes
 
-| Mode | Description | Default |
-|------|-------------|---------|
-| `StorageMode::Memory` | In-memory engine state with no persistence | no |
-| `StorageMode::Json { path }` | Human-readable JSON persistence | `rustql_data.json` |
-| `StorageMode::BTree { path }` | Page-based B-tree storage with WAL recovery | no |
-| `StorageMode::Disk { path }` | Deprecated alias for B-tree storage | no |
+| Mode | Description | Default | Storage guarantee |
+|------|-------------|---------|-------------------|
+| `StorageMode::Memory` | In-memory engine state | no | No persistence. |
+| `StorageMode::Json { path }` | Human-readable snapshot storage for debugging, tests, and demos | `rustql_data.json` | Raw JSON database snapshot with atomic whole-file replacement. It has no format version, no durable transaction journal, and no recovery path for interrupted transactions. |
+| `StorageMode::BTree { path }` | Page-based B-tree storage | no | Versioned file format with a versioned `.wal` transaction journal. Committed journals are recovered on load. |
+| `StorageMode::Disk { path }` | Deprecated alias for B-tree storage | no | Same guarantee as `StorageMode::BTree`. |
 
-Use `EngineOptions::default()` to open the default JSON-backed engine at `rustql_data.json`.
-Set `RUSTQL_STORAGE=btree` for the B-tree-backed CLI store at `rustql_btree.dat`.
+Use `EngineOptions::default()` to open the compatibility default JSON-backed engine at `rustql_data.json`.
+Use `StorageMode::BTree` or set `RUSTQL_STORAGE=btree` for the durable CLI store at `rustql_btree.dat`.
 Set `RUSTQL_STORAGE_PATH=/path/to/file` to override the selected storage file.
 
 ## Project structure

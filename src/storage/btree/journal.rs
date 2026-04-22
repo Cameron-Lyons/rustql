@@ -84,7 +84,7 @@ impl BTreeRedoJournal {
         }
 
         let payload_len = target_bytes.len() - FILE_HEADER_SIZE;
-        if payload_len % BTREE_PAGE_SIZE != 0 {
+        if !payload_len.is_multiple_of(BTREE_PAGE_SIZE) {
             return Err(RustqlError::StorageError(
                 "Cannot build redo journal from target BTree file with partial page".to_string(),
             ));
@@ -158,7 +158,7 @@ impl BTreeRedoJournal {
         }
 
         let target_payload_len = self.target_file_len - FILE_HEADER_SIZE as u64;
-        if target_payload_len % self.page_size as u64 != 0 {
+        if !target_payload_len.is_multiple_of(self.page_size as u64) {
             return Err(RustqlError::StorageError(
                 "Redo journal target file length ends with a partial page".to_string(),
             ));
