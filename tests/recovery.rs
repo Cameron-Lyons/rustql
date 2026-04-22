@@ -1,11 +1,20 @@
-use rustql::testing::render_result;
+mod common;
+use common::render_result;
 use rustql::{Engine, EngineOptions, StorageMode};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+static TEST_MUTEX: Mutex<()> = Mutex::new(());
+
+fn test_guard() -> std::sync::MutexGuard<'static, ()> {
+    TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 #[test]
 fn test_persisted_state_after_reload() {
+    let _guard = test_guard();
     let path = unique_temp_path("db");
     cleanup_storage_files(&path);
 
@@ -33,6 +42,7 @@ fn test_persisted_state_after_reload() {
 
 #[test]
 fn test_rolled_back_changes_not_recovered_after_reload() {
+    let _guard = test_guard();
     let path = unique_temp_path("db");
     cleanup_storage_files(&path);
 
@@ -62,6 +72,7 @@ fn test_rolled_back_changes_not_recovered_after_reload() {
 
 #[test]
 fn test_partial_index_filter_persists_across_reload() {
+    let _guard = test_guard();
     let path = unique_temp_path("db");
     cleanup_storage_files(&path);
 
@@ -109,6 +120,7 @@ fn test_partial_index_filter_persists_across_reload() {
 
 #[test]
 fn json_engine_rejects_corrupt_storage_file() {
+    let _guard = test_guard();
     let path = unique_temp_path("json");
     cleanup_storage_files(&path);
     fs::write(&path, "{ this is not valid json").unwrap();
@@ -131,6 +143,7 @@ fn json_engine_rejects_corrupt_storage_file() {
 
 #[test]
 fn json_engine_rejects_empty_storage_file() {
+    let _guard = test_guard();
     let path = unique_temp_path("json");
     cleanup_storage_files(&path);
     fs::write(&path, "").unwrap();

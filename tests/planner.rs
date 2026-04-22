@@ -1,4 +1,5 @@
-use rustql::testing::{process_query, reset_database, snapshot_database};
+mod common;
+use common::{process_query, reset_database, snapshot_database};
 use rustql::*;
 use std::sync::Mutex;
 

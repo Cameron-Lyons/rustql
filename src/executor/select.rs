@@ -165,12 +165,15 @@ fn can_execute_via_plan(db: &dyn DatabaseCatalog, stmt: &SelectStatement) -> boo
         .iter()
         .any(|column| matches!(column, Column::Function(_)));
 
-    if stmt.from.is_empty() && stmt.from_function.is_none()
-        || !stmt.ctes.is_empty()
-        || stmt.from_subquery.is_some()
-        || stmt.from_values.is_some()
-        || stmt.set_op.is_some()
-    {
+    if stmt.from.is_empty() && stmt.from_function.is_none() {
+        return constant_select_supported_by_plan(stmt, has_aggregate_columns);
+    }
+
+    if !stmt.ctes.is_empty() || stmt.from_subquery.is_some() || stmt.set_op.is_some() {
+        return false;
+    }
+
+    if stmt.from_values.is_some() && !values_select_supported_by_plan(stmt) {
         return false;
     }
 
@@ -221,11 +224,89 @@ fn can_execute_via_plan(db: &dyn DatabaseCatalog, stmt: &SelectStatement) -> boo
             .having
             .as_ref()
             .is_none_or(expression_supported_by_plan)
-        && stmt.order_by.as_ref().is_none_or(|items| {
-            items
-                .iter()
-                .all(|item| matches!(&item.expr, Expression::Column(_)))
+        && stmt
+            .order_by
+            .as_ref()
+            .is_none_or(|items| order_by_supported_by_plan(stmt, items))
+}
+
+fn constant_select_supported_by_plan(stmt: &SelectStatement, has_aggregate_columns: bool) -> bool {
+    !has_aggregate_columns
+        && stmt.ctes.is_empty()
+        && stmt.from_subquery.is_none()
+        && stmt.from_values.is_none()
+        && stmt.set_op.is_none()
+        && stmt.joins.is_empty()
+        && stmt.group_by.is_none()
+        && stmt.having.is_none()
+        && stmt.distinct_on.is_none()
+        && stmt.order_by.is_none()
+        && stmt.where_clause.is_none()
+        && stmt.columns.iter().all(constant_column_supported_by_plan)
+}
+
+fn values_select_supported_by_plan(stmt: &SelectStatement) -> bool {
+    stmt.joins.is_empty()
+        && stmt.from_values.as_ref().is_some_and(|(rows, _, _)| {
+            rows.iter()
+                .flatten()
+                .all(values_expression_supported_by_plan)
         })
+}
+
+fn values_expression_supported_by_plan(expr: &Expression) -> bool {
+    constant_value_expression_supported_by_plan(expr)
+}
+
+fn constant_column_supported_by_plan(column: &Column) -> bool {
+    match column {
+        Column::Expression { expr, .. } => constant_value_expression_supported_by_plan(expr),
+        Column::Named { .. } | Column::Function(_) | Column::Subquery(_) | Column::All => false,
+    }
+}
+
+fn constant_value_expression_supported_by_plan(expr: &Expression) -> bool {
+    match expr {
+        Expression::Value(_) => true,
+        Expression::BinaryOp { left, right, .. } => {
+            constant_value_expression_supported_by_plan(left)
+                && constant_value_expression_supported_by_plan(right)
+        }
+        Expression::UnaryOp { expr, .. } => constant_value_expression_supported_by_plan(expr),
+        Expression::IsNull { expr, .. } => constant_value_expression_supported_by_plan(expr),
+        Expression::Case {
+            operand,
+            when_clauses,
+            else_clause,
+        } => {
+            operand
+                .as_deref()
+                .is_none_or(constant_value_expression_supported_by_plan)
+                && when_clauses.iter().all(|(condition, result)| {
+                    constant_value_expression_supported_by_plan(condition)
+                        && constant_value_expression_supported_by_plan(result)
+                })
+                && else_clause
+                    .as_deref()
+                    .is_none_or(constant_value_expression_supported_by_plan)
+        }
+        Expression::ScalarFunction { args, .. } => {
+            args.iter().all(constant_value_expression_supported_by_plan)
+        }
+        Expression::Cast { expr, .. } => constant_value_expression_supported_by_plan(expr),
+        Expression::IsDistinctFrom { left, right, .. } => {
+            constant_value_expression_supported_by_plan(left)
+                && constant_value_expression_supported_by_plan(right)
+        }
+        Expression::Column(_)
+        | Expression::Function(_)
+        | Expression::Subquery(_)
+        | Expression::Exists(_)
+        | Expression::In { .. }
+        | Expression::Any { .. }
+        | Expression::All { .. }
+        | Expression::WindowFunction { .. } => false,
+    }
 }
 
 fn group_by_supported_by_plan(group_by: &GroupByClause) -> bool {
@@ -250,7 +331,10 @@ fn column_supported_by_plan(column: &Column) -> bool {
                     .as_deref()
                     .is_none_or(predicate_expression_supported_by_plan)
         }
-        Column::Expression { expr, .. } => window_expression_supported_by_plan(expr),
+        Column::Expression { expr, .. } => {
+            window_expression_supported_by_plan(expr)
+                || projection_expression_supported_by_plan(expr)
+        }
         Column::Subquery(_) => false,
     }
 }
@@ -292,6 +376,19 @@ fn group_by_exprs_supported_by_plan(exprs: &[Expression]) -> bool {
         .all(|expr| matches!(expr, Expression::Column(_)))
 }
 
+fn order_by_supported_by_plan(stmt: &SelectStatement, items: &[OrderByExpr]) -> bool {
+    items
+        .iter()
+        .all(|item| order_by_expression_supported_by_plan(stmt, &item.expr))
+}
+
+fn order_by_expression_supported_by_plan(stmt: &SelectStatement, expr: &Expression) -> bool {
+    let resolved_expr = resolve_order_by_alias_for_plan(stmt, expr);
+    projection_expression_supported_by_plan(&resolved_expr)
+        && expression_references_column(&resolved_expr)
+        && !expression_references_select_alias(stmt, &resolved_expr)
+}
+
 fn window_expression_supported_by_plan(expr: &Expression) -> bool {
     matches!(expr, Expression::WindowFunction { .. })
 }
@@ -306,6 +403,7 @@ fn projection_expression_supported_by_plan(expr: &Expression) -> bool {
                     | BinaryOperator::Minus
                     | BinaryOperator::Multiply
                     | BinaryOperator::Divide
+                    | BinaryOperator::Concat
             ) && projection_expression_supported_by_plan(left)
                 && projection_expression_supported_by_plan(right)
         }
@@ -313,8 +411,129 @@ fn projection_expression_supported_by_plan(expr: &Expression) -> bool {
             op: UnaryOperator::Minus,
             expr,
         } => projection_expression_supported_by_plan(expr),
+        Expression::ScalarFunction { args, .. } => {
+            args.iter().all(projection_expression_supported_by_plan)
+        }
+        Expression::Cast { expr, .. } => projection_expression_supported_by_plan(expr),
+        Expression::Case {
+            operand,
+            when_clauses,
+            else_clause,
+        } => {
+            let else_supported = else_clause
+                .as_deref()
+                .is_none_or(projection_expression_supported_by_plan);
+            if let Some(operand) = operand {
+                projection_expression_supported_by_plan(operand)
+                    && when_clauses.iter().all(|(condition, result)| {
+                        projection_expression_supported_by_plan(condition)
+                            && projection_expression_supported_by_plan(result)
+                    })
+                    && else_supported
+            } else {
+                when_clauses.iter().all(|(condition, result)| {
+                    predicate_expression_supported_by_plan(condition)
+                        && projection_expression_supported_by_plan(result)
+                }) && else_supported
+            }
+        }
         _ => false,
     }
+}
+
+fn expression_references_column(expr: &Expression) -> bool {
+    match expr {
+        Expression::Column(_) => true,
+        Expression::BinaryOp { left, right, .. } => {
+            expression_references_column(left) || expression_references_column(right)
+        }
+        Expression::UnaryOp { expr, .. } => expression_references_column(expr),
+        Expression::ScalarFunction { args, .. } => args.iter().any(expression_references_column),
+        Expression::Cast { expr, .. } => expression_references_column(expr),
+        Expression::Case {
+            operand,
+            when_clauses,
+            else_clause,
+        } => {
+            operand.as_deref().is_some_and(expression_references_column)
+                || when_clauses.iter().any(|(condition, result)| {
+                    expression_references_column(condition) || expression_references_column(result)
+                })
+                || else_clause
+                    .as_deref()
+                    .is_some_and(expression_references_column)
+        }
+        _ => false,
+    }
+}
+
+fn resolve_order_by_alias_for_plan(stmt: &SelectStatement, expr: &Expression) -> Expression {
+    if let Expression::Column(name) = expr
+        && let Some(resolved) = select_alias_expression_for_plan(stmt, name)
+    {
+        return resolved;
+    }
+
+    expr.clone()
+}
+
+fn select_alias_expression_for_plan(stmt: &SelectStatement, name: &str) -> Option<Expression> {
+    stmt.columns.iter().find_map(|column| match column {
+        Column::Named {
+            name: column_name,
+            alias: Some(alias),
+        } if alias == name => Some(Expression::Column(column_name.clone())),
+        Column::Expression {
+            expr,
+            alias: Some(alias),
+        } if alias == name => Some(expr.clone()),
+        _ => None,
+    })
+}
+
+fn expression_references_select_alias(stmt: &SelectStatement, expr: &Expression) -> bool {
+    match expr {
+        Expression::Column(name) => select_alias_matches(stmt, name),
+        Expression::BinaryOp { left, right, .. } => {
+            expression_references_select_alias(stmt, left)
+                || expression_references_select_alias(stmt, right)
+        }
+        Expression::UnaryOp { expr, .. } => expression_references_select_alias(stmt, expr),
+        Expression::ScalarFunction { args, .. } => args
+            .iter()
+            .any(|expr| expression_references_select_alias(stmt, expr)),
+        Expression::Cast { expr, .. } => expression_references_select_alias(stmt, expr),
+        Expression::Case {
+            operand,
+            when_clauses,
+            else_clause,
+        } => {
+            operand
+                .as_deref()
+                .is_some_and(|expr| expression_references_select_alias(stmt, expr))
+                || when_clauses.iter().any(|(condition, result)| {
+                    expression_references_select_alias(stmt, condition)
+                        || expression_references_select_alias(stmt, result)
+                })
+                || else_clause
+                    .as_deref()
+                    .is_some_and(|expr| expression_references_select_alias(stmt, expr))
+        }
+        _ => false,
+    }
+}
+
+fn select_alias_matches(stmt: &SelectStatement, name: &str) -> bool {
+    stmt.columns.iter().any(|column| match column {
+        Column::Named {
+            alias: Some(alias), ..
+        }
+        | Column::Expression {
+            alias: Some(alias), ..
+        } => alias == name,
+        Column::Function(agg) => agg.alias.as_ref().is_some_and(|alias| alias == name),
+        _ => false,
+    })
 }
 
 fn expression_supported_by_plan(expr: &Expression) -> bool {
@@ -362,15 +581,15 @@ fn predicate_expression_supported_by_plan(expr: &Expression) -> bool {
             | BinaryOperator::LessThanOrEqual
             | BinaryOperator::GreaterThan
             | BinaryOperator::GreaterThanOrEqual => {
-                simple_value_expression_supported_by_plan(left)
-                    && simple_value_expression_supported_by_plan(right)
+                projection_expression_supported_by_plan(left)
+                    && projection_expression_supported_by_plan(right)
             }
             BinaryOperator::Between => {
-                simple_value_expression_supported_by_plan(left)
-                    && predicate_expression_supported_by_plan(right)
+                projection_expression_supported_by_plan(left)
+                    && between_bounds_supported_by_plan(right)
             }
             BinaryOperator::In => {
-                simple_value_expression_supported_by_plan(left)
+                projection_expression_supported_by_plan(left)
                     && projection_expression_supported_by_plan(right)
             }
             BinaryOperator::Plus
@@ -379,22 +598,32 @@ fn predicate_expression_supported_by_plan(expr: &Expression) -> bool {
             | BinaryOperator::Divide
             | BinaryOperator::Concat => false,
         },
-        Expression::In { left, .. } => simple_value_expression_supported_by_plan(left),
-        Expression::IsNull { expr, .. } => simple_value_expression_supported_by_plan(expr),
+        Expression::In { left, .. } => projection_expression_supported_by_plan(left),
+        Expression::IsNull { expr, .. } => projection_expression_supported_by_plan(expr),
         Expression::UnaryOp {
             op: UnaryOperator::Not,
             expr,
         } => predicate_expression_supported_by_plan(expr),
         Expression::IsDistinctFrom { left, right, .. } => {
-            simple_value_expression_supported_by_plan(left)
-                && simple_value_expression_supported_by_plan(right)
+            projection_expression_supported_by_plan(left)
+                && projection_expression_supported_by_plan(right)
         }
         _ => false,
     }
 }
 
-fn simple_value_expression_supported_by_plan(expr: &Expression) -> bool {
-    matches!(expr, Expression::Column(_) | Expression::Value(_))
+fn between_bounds_supported_by_plan(expr: &Expression) -> bool {
+    if let Expression::BinaryOp {
+        left,
+        op: BinaryOperator::And,
+        right,
+    } = expr
+    {
+        projection_expression_supported_by_plan(left)
+            && projection_expression_supported_by_plan(right)
+    } else {
+        false
+    }
 }
 
 fn execute_select_without_from(stmt: SelectStatement) -> Result<SelectResult, RustqlError> {
@@ -605,7 +834,7 @@ fn select_requires_source_materialization(
     db: &dyn DatabaseCatalog,
     stmt: &SelectStatement,
 ) -> bool {
-    stmt.from_values.is_some()
+    (stmt.from_values.is_some() && !can_execute_via_plan(db, stmt))
         || stmt.from_subquery.is_some()
         || stmt.joins.iter().any(join_requires_source_materialization)
         || !stmt.ctes.is_empty()
@@ -1018,8 +1247,9 @@ pub(crate) fn execute_select_internal(
         let main_table = db
             .get_table(&stmt.from)
             .ok_or_else(|| RustqlError::TableNotFound(stmt.from.clone()))?;
+        let from_label = stmt.from_alias.as_deref().unwrap_or(&stmt.from);
         let (joined_rows, all_cols) =
-            perform_multiple_joins(context, db, main_table, &stmt.from, &stmt.joins)?;
+            perform_multiple_joins(context, db, main_table, from_label, &stmt.joins)?;
         joined_rows_storage = Some(joined_rows);
         all_cols
     };
@@ -1563,16 +1793,14 @@ fn resolve_named_column_index(
     columns: &[ColumnDefinition],
     name: &str,
 ) -> Result<usize, RustqlError> {
+    if let Some(idx) = columns.iter().position(|c| c.name == name) {
+        return Ok(idx);
+    }
+
+    let unqualified = name.split('.').next_back().unwrap_or(name);
     columns
         .iter()
-        .position(|c| {
-            c.name
-                == (if name.contains('.') {
-                    name.split('.').next_back().unwrap_or(name)
-                } else {
-                    name
-                })
-        })
+        .position(|c| c.name.split('.').next_back().unwrap_or(&c.name) == unqualified)
         .ok_or_else(|| RustqlError::ColumnNotFound(name.to_string()))
 }
 

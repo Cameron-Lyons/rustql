@@ -1,6 +1,7 @@
+mod common;
+use common::{command_result, process_query, query_rows, reset_database};
 use rustql::CommandTag;
 use rustql::ast::Value;
-use rustql::testing::{command_result, process_query, query_rows, reset_database};
 use std::sync::Mutex;
 
 static TEST_MUTEX: Mutex<()> = Mutex::new(());

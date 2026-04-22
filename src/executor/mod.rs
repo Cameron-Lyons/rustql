@@ -311,5 +311,3 @@ fn execute_rollback_to_savepoint(
     context.with_wal_state_mut(|state| state.rollback_to_savepoint(&name, &mut db))?;
     Ok(command_result(CommandTag::RollbackToSavepoint, 0))
 }
-
-pub use expr::format_value;

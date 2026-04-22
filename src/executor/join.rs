@@ -12,7 +12,7 @@ pub fn perform_multiple_joins(
     context: Option<&ExecutionContext>,
     db: &dyn DatabaseCatalog,
     from_table: &Table,
-    from_table_name: &str,
+    from_table_label: &str,
     joins: &[Join],
 ) -> Result<(Vec<Vec<Value>>, Vec<ColumnDefinition>), RustqlError> {
     let mut current_rows: Vec<Cow<'_, [Value]>> = from_table
@@ -21,7 +21,7 @@ pub fn perform_multiple_joins(
         .map(|row| Cow::Borrowed(row.as_slice()))
         .collect();
     let mut all_columns = from_table.columns.clone();
-    let mut table_names = vec![from_table_name.to_string()];
+    let mut table_names = vec![from_table_label.to_string()];
     let mut table_column_counts = vec![from_table.columns.len()];
 
     for join in joins {
@@ -183,8 +183,8 @@ pub fn perform_multiple_joins(
             .get_table(&join.table)
             .ok_or_else(|| RustqlError::TableNotFound(join.table.clone()))?;
 
-        let join_table_name = join.table.clone();
-        table_names.push(join_table_name.clone());
+        let join_table_label = join.table_alias.as_deref().unwrap_or(&join.table);
+        table_names.push(join_table_label.to_string());
         table_column_counts.push(join_table.columns.len());
 
         let mut joined_rows: Vec<Cow<'_, [Value]>> = Vec::new();

@@ -1,10 +1,10 @@
-use crate::ast::{Statement, Value};
-use crate::database::Database;
-use crate::{
-    CommandResult, CommandTag, Engine, EngineOptions, ExplainAnalyzeResult, QueryResult, RowBatch,
-    StorageMode,
+#![allow(dead_code)]
+
+use rustql::ast::{Statement, Value};
+use rustql::{
+    CommandResult, CommandTag, Database, Engine, EngineOptions, ExplainAnalyzeResult, QueryResult,
+    RowBatch, StorageMode, lexer, parser,
 };
-use crate::{lexer, parser};
 use std::cell::RefCell;
 
 struct TestHarness {
@@ -62,13 +62,6 @@ pub fn execute_sql(sql: &str) -> Result<QueryResult, String> {
     })
 }
 
-pub fn execute_script_results(sql: &str) -> Result<Vec<QueryResult>, String> {
-    with_harness(|harness| {
-        let mut session = harness.engine.session();
-        session.execute_script(sql).map_err(|err| err.to_string())
-    })
-}
-
 pub fn execute_statement(statement: Statement) -> Result<QueryResult, String> {
     with_harness(|harness| {
         let mut session = harness.engine.session();
@@ -99,14 +92,6 @@ pub fn command_result(sql: &str) -> Result<CommandResult, String> {
 
 pub fn snapshot_database() -> Result<Database, String> {
     with_harness(|harness| Ok(harness.engine.snapshot_database()))
-}
-
-pub fn render_results(results: &[QueryResult]) -> String {
-    results
-        .iter()
-        .map(render_result)
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 pub fn render_result(result: &QueryResult) -> String {
@@ -141,25 +126,25 @@ fn render_command_for_statement(statement: &Statement, tag: CommandTag, affected
         Statement::CreateTable(stmt) => format!("Table '{}' created", stmt.name),
         Statement::DropTable(stmt) => format!("Table '{}' dropped", stmt.name),
         Statement::AlterTable(stmt) => match &stmt.operation {
-            crate::ast::AlterOperation::AddColumn(col) => {
+            rustql::ast::AlterOperation::AddColumn(col) => {
                 format!("Column '{}' added to table '{}'", col.name, stmt.table)
             }
-            crate::ast::AlterOperation::DropColumn(col) => {
+            rustql::ast::AlterOperation::DropColumn(col) => {
                 format!("Column '{}' dropped from table '{}'", col, stmt.table)
             }
-            crate::ast::AlterOperation::RenameColumn { old, new } => {
+            rustql::ast::AlterOperation::RenameColumn { old, new } => {
                 format!(
                     "Column '{}' renamed to '{}' in table '{}'",
                     old, new, stmt.table
                 )
             }
-            crate::ast::AlterOperation::RenameTable(new_name) => {
+            rustql::ast::AlterOperation::RenameTable(new_name) => {
                 format!("Table '{}' renamed to '{}'", stmt.table, new_name)
             }
-            crate::ast::AlterOperation::AddConstraint(_) => {
+            rustql::ast::AlterOperation::AddConstraint(_) => {
                 format!("Constraint added to table '{}'", stmt.table)
             }
-            crate::ast::AlterOperation::DropConstraint(name) => {
+            rustql::ast::AlterOperation::DropConstraint(name) => {
                 format!("Constraint '{}' dropped from table '{}'", name, stmt.table)
             }
         },

@@ -4,8 +4,7 @@ pub mod ast;
 pub mod database;
 pub mod engine;
 pub mod error;
-#[doc(hidden)]
-pub mod executor;
+mod executor;
 #[doc(hidden)]
 pub mod lexer;
 #[doc(hidden)]
@@ -16,8 +15,6 @@ mod plan_executor;
 pub mod planner;
 #[allow(dead_code)]
 mod storage;
-#[doc(hidden)]
-pub mod testing;
 #[allow(dead_code)]
 mod wal;
 

@@ -1,5 +1,6 @@
+mod common;
+use common::{execute, reset_database};
 use rustql::ast::*;
-use rustql::testing::{execute, reset_database};
 
 #[test]
 fn test_create_and_drop_table() {

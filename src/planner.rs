@@ -39,6 +39,11 @@ const INDEX_RANGE_SELECTIVITY: f64 = 0.1;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum PlanNode {
+    OneRow {
+        cost: f64,
+        rows: usize,
+    },
+
     SeqScan {
         table: String,
         output_label: Option<String>,
@@ -59,6 +64,14 @@ pub enum PlanNode {
     FunctionScan {
         function: TableFunction,
         output_label: Option<String>,
+        filter: Option<Expression>,
+        cost: f64,
+        rows: usize,
+    },
+
+    ValuesScan {
+        values: Vec<Vec<Expression>>,
+        columns: Vec<String>,
         filter: Option<Expression>,
         cost: f64,
         rows: usize,
@@ -159,6 +172,10 @@ impl<'a> QueryPlanner<'a> {
     }
 
     pub fn plan_select(&self, stmt: &SelectStatement) -> Result<PlanNode, RustqlError> {
+        if stmt.from.is_empty() && stmt.from_function.is_none() {
+            return Ok(self.plan_constant_select(stmt));
+        }
+
         let db = self.db;
         let join_tables: HashSet<String> = stmt.joins.iter().map(|j| j.table.clone()).collect();
 
@@ -190,7 +207,9 @@ impl<'a> QueryPlanner<'a> {
             Some(stmt.from_alias.clone().unwrap_or_else(|| stmt.from.clone()))
         };
 
-        let mut plan = if let Some(function) = stmt.from_function.as_ref() {
+        let mut plan = if let Some((values, _alias, column_aliases)) = stmt.from_values.as_ref() {
+            self.plan_values_access(values, column_aliases, base_filter.as_ref())
+        } else if let Some(function) = stmt.from_function.as_ref() {
             self.plan_table_function_access(
                 function,
                 base_output_label.clone(),
@@ -243,7 +262,12 @@ impl<'a> QueryPlanner<'a> {
             plan = self.plan_aggregate(plan, Vec::new(), None, aggregates, stmt.having.clone());
         }
 
-        if let Some(ref order_by) = stmt.order_by {
+        let planned_order_by = stmt
+            .order_by
+            .as_ref()
+            .map(|order_by| self.resolve_order_by_aliases(stmt, order_by));
+
+        if let Some(ref order_by) = planned_order_by {
             plan = self.plan_sort(plan, order_by.clone());
         }
 
@@ -262,11 +286,71 @@ impl<'a> QueryPlanner<'a> {
                 limit,
                 offset,
                 with_ties,
-                stmt.order_by.clone().unwrap_or_default(),
+                planned_order_by.clone().unwrap_or_default(),
             );
         }
 
         Ok(plan)
+    }
+
+    fn plan_constant_select(&self, stmt: &SelectStatement) -> PlanNode {
+        let mut plan = PlanNode::OneRow {
+            cost: 0.01,
+            rows: 1,
+        };
+
+        if let Some(ref where_clause) = stmt.where_clause {
+            plan = self.plan_filter(plan, where_clause.clone());
+        }
+
+        let (limit, with_ties) = match stmt.fetch.as_ref() {
+            Some(fetch) => (fetch.count, fetch.with_ties),
+            None => (stmt.limit.unwrap_or(usize::MAX), false),
+        };
+        let offset = stmt.offset.unwrap_or(0);
+        if limit != usize::MAX || offset != 0 {
+            plan = self.plan_limit(
+                plan,
+                limit,
+                offset,
+                with_ties,
+                stmt.order_by.clone().unwrap_or_default(),
+            );
+        }
+
+        plan
+    }
+
+    fn plan_values_access(
+        &self,
+        values: &[Vec<Expression>],
+        column_aliases: &[String],
+        where_clause: Option<&Expression>,
+    ) -> PlanNode {
+        let width = values.first().map_or(0, Vec::len);
+        let columns: Vec<String> = (0..width)
+            .map(|idx| {
+                column_aliases
+                    .get(idx)
+                    .cloned()
+                    .unwrap_or_else(|| format!("column{}", idx + 1))
+            })
+            .collect();
+        let input_rows = values.len();
+        let rows = if let Some(condition) = where_clause {
+            (input_rows as f64 * self.estimate_selectivity(condition, input_rows)) as usize
+        } else {
+            input_rows
+        };
+        let cost = input_rows as f64 * FUNCTION_SCAN_ROW_COST;
+
+        PlanNode::ValuesScan {
+            values: values.to_vec(),
+            columns,
+            filter: where_clause.cloned(),
+            cost,
+            rows,
+        }
     }
 
     fn plan_table_access(
@@ -546,6 +630,44 @@ impl<'a> QueryPlanner<'a> {
         name.split('.').next_back().unwrap_or(name)
     }
 
+    fn resolve_order_by_aliases(
+        &self,
+        stmt: &SelectStatement,
+        order_by: &[OrderByExpr],
+    ) -> Vec<OrderByExpr> {
+        order_by
+            .iter()
+            .map(|item| OrderByExpr {
+                expr: self.resolve_order_by_alias(stmt, &item.expr),
+                asc: item.asc,
+            })
+            .collect()
+    }
+
+    fn resolve_order_by_alias(&self, stmt: &SelectStatement, expr: &Expression) -> Expression {
+        if let Expression::Column(name) = expr
+            && let Some(resolved) = self.select_alias_expression(stmt, name)
+        {
+            return resolved;
+        }
+
+        expr.clone()
+    }
+
+    fn select_alias_expression(&self, stmt: &SelectStatement, name: &str) -> Option<Expression> {
+        stmt.columns.iter().find_map(|column| match column {
+            Column::Named {
+                name: column_name,
+                alias: Some(alias),
+            } if alias == name => Some(Expression::Column(column_name.clone())),
+            Column::Expression {
+                expr,
+                alias: Some(alias),
+            } if alias == name => Some(expr.clone()),
+            _ => None,
+        })
+    }
+
     fn plan_hash_join(&self, left: PlanNode, right: PlanNode, condition: Expression) -> PlanNode {
         let left_rows = self.estimate_rows(&left);
         let right_rows = self.estimate_rows(&right);
@@ -721,9 +843,11 @@ impl<'a> QueryPlanner<'a> {
 
     fn estimate_cost(&self, plan: &PlanNode) -> f64 {
         match plan {
+            PlanNode::OneRow { cost, .. } => *cost,
             PlanNode::SeqScan { cost, .. } => *cost,
             PlanNode::IndexScan { cost, .. } => *cost,
             PlanNode::FunctionScan { cost, .. } => *cost,
+            PlanNode::ValuesScan { cost, .. } => *cost,
             PlanNode::NestedLoopJoin { cost, .. } => *cost,
             PlanNode::HashJoin { cost, .. } => *cost,
             PlanNode::LateralJoin { cost, .. } => *cost,
@@ -737,9 +861,11 @@ impl<'a> QueryPlanner<'a> {
 
     fn estimate_rows(&self, plan: &PlanNode) -> usize {
         match plan {
+            PlanNode::OneRow { rows, .. } => *rows,
             PlanNode::SeqScan { rows, .. } => *rows,
             PlanNode::IndexScan { rows, .. } => *rows,
             PlanNode::FunctionScan { rows, .. } => *rows,
+            PlanNode::ValuesScan { rows, .. } => *rows,
             PlanNode::NestedLoopJoin { rows, .. } => *rows,
             PlanNode::HashJoin { rows, .. } => *rows,
             PlanNode::LateralJoin { rows, .. } => *rows,
@@ -1332,6 +1458,10 @@ impl PlanNode {
     fn fmt_with_indent(&self, f: &mut fmt::Formatter<'_>, indent: usize) -> fmt::Result {
         let indent_str = "  ".repeat(indent);
         match self {
+            PlanNode::OneRow { cost, rows } => {
+                writeln!(f, "{}Result", indent_str)?;
+                writeln!(f, "{}  Cost: {:.2}, Rows: {}", indent_str, cost, rows)
+            }
             PlanNode::SeqScan {
                 table,
                 filter,
@@ -1353,6 +1483,22 @@ impl PlanNode {
                 ..
             } => {
                 writeln!(f, "{}Function Scan on {}", indent_str, function.name)?;
+                if filter.is_some() {
+                    writeln!(f, "{}  Filter: [WHERE clause]", indent_str)?;
+                }
+                writeln!(f, "{}  Cost: {:.2}, Rows: {}", indent_str, cost, rows)
+            }
+            PlanNode::ValuesScan {
+                columns,
+                filter,
+                cost,
+                rows,
+                ..
+            } => {
+                writeln!(f, "{}Values Scan", indent_str)?;
+                if !columns.is_empty() {
+                    writeln!(f, "{}  Output: {}", indent_str, columns.join(", "))?;
+                }
                 if filter.is_some() {
                     writeln!(f, "{}  Filter: [WHERE clause]", indent_str)?;
                 }

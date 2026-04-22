@@ -1,5 +1,6 @@
-use rustql::testing::process_query;
-use rustql::testing::reset_database;
+mod common;
+use common::process_query;
+use common::reset_database;
 use std::sync::Once;
 
 static INIT: Once = Once::new();

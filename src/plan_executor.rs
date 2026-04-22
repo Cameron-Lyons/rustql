@@ -45,6 +45,10 @@ impl<'a> PlanExecutor<'a> {
 
     fn execute_plan_node(&self, plan: &PlanNode) -> Result<ExecutionResult, RustqlError> {
         match plan {
+            PlanNode::OneRow { .. } => Ok(ExecutionResult {
+                columns: Vec::new(),
+                rows: vec![Vec::new()],
+            }),
             PlanNode::SeqScan {
                 table,
                 output_label,
@@ -64,6 +68,12 @@ impl<'a> PlanExecutor<'a> {
                 filter,
                 ..
             } => self.execute_function_scan(function, output_label.as_deref(), filter.as_ref()),
+            PlanNode::ValuesScan {
+                values,
+                columns,
+                filter,
+                ..
+            } => self.execute_values_scan(values, columns, filter.as_ref()),
             PlanNode::Filter {
                 input, condition, ..
             } => {
@@ -151,6 +161,52 @@ impl<'a> PlanExecutor<'a> {
                 )
             }
         }
+    }
+
+    fn execute_values_scan(
+        &self,
+        values: &[Vec<Expression>],
+        columns: &[String],
+        filter: Option<&Expression>,
+    ) -> Result<ExecutionResult, RustqlError> {
+        let empty_columns: Vec<ColumnDefinition> = Vec::new();
+        let empty_row: Vec<Value> = Vec::new();
+        let output_columns: Vec<ColumnDefinition> = columns
+            .iter()
+            .map(|name| ColumnDefinition {
+                name: name.clone(),
+                data_type: DataType::Text,
+                nullable: true,
+                primary_key: false,
+                unique: false,
+                default_value: None,
+                foreign_key: None,
+                check: None,
+                auto_increment: false,
+                generated: None,
+            })
+            .collect();
+
+        let mut rows = Vec::with_capacity(values.len());
+        for value_row in values {
+            let row: Vec<Value> = value_row
+                .iter()
+                .map(|expr| self.evaluate_value_expression(expr, &empty_columns, &empty_row))
+                .collect::<Result<_, _>>()?;
+            let include = if let Some(filter_expr) = filter {
+                self.evaluate_expression(filter_expr, &output_columns, &row)?
+            } else {
+                true
+            };
+            if include {
+                rows.push(row);
+            }
+        }
+
+        Ok(ExecutionResult {
+            columns: columns.to_vec(),
+            rows,
+        })
     }
 
     fn execute_seq_scan(
@@ -570,23 +626,34 @@ impl<'a> PlanExecutor<'a> {
         input: ExecutionResult,
         order_by: &[OrderByExpr],
     ) -> Result<ExecutionResult, RustqlError> {
-        let mut rows = input.rows;
+        let column_defs = column_definitions_from_names(&input.columns);
+        let mut keyed_rows: Vec<(Vec<Value>, Vec<Value>)> = input
+            .rows
+            .into_iter()
+            .map(|row| {
+                let keys = order_by
+                    .iter()
+                    .map(|order_expr| {
+                        self.get_sort_value(&order_expr.expr, &input.columns, &column_defs, &row)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok((keys, row))
+            })
+            .collect::<Result<Vec<_>, RustqlError>>()?;
 
-        rows.sort_by(|a, b| {
-            for order_expr in order_by {
-                let a_val = self
-                    .get_sort_value(&order_expr.expr, &input.columns, a)
-                    .unwrap_or(Value::Null);
-                let b_val = self
-                    .get_sort_value(&order_expr.expr, &input.columns, b)
-                    .unwrap_or(Value::Null);
-                let cmp = compare_values_same_type(&a_val, &b_val);
+        keyed_rows.sort_by(|(a_keys, _), (b_keys, _)| {
+            for (idx, order_expr) in order_by.iter().enumerate() {
+                let a_val = a_keys.get(idx).unwrap_or(&Value::Null);
+                let b_val = b_keys.get(idx).unwrap_or(&Value::Null);
+                let cmp = compare_values_same_type(a_val, b_val);
                 if cmp != Ordering::Equal {
                     return if order_expr.asc { cmp } else { cmp.reverse() };
                 }
             }
             Ordering::Equal
         });
+
+        let rows = keyed_rows.into_iter().map(|(_, row)| row).collect();
 
         Ok(ExecutionResult {
             columns: input.columns,
@@ -612,13 +679,24 @@ impl<'a> PlanExecutor<'a> {
 
         if rows.len() > limit {
             let limit_with_ties = if with_ties && !order_by.is_empty() && limit > 0 {
-                let boundary_values =
-                    self.extract_order_values(order_by, &input.columns, &rows[limit - 1]);
+                let column_defs = column_definitions_from_names(&input.columns);
+                let boundary_values = self.extract_order_values(
+                    order_by,
+                    &input.columns,
+                    &column_defs,
+                    &rows[limit - 1],
+                )?;
                 let mut extended_limit = limit;
-                while extended_limit < rows.len()
-                    && self.extract_order_values(order_by, &input.columns, &rows[extended_limit])
-                        == boundary_values
-                {
+                while extended_limit < rows.len() {
+                    let values = self.extract_order_values(
+                        order_by,
+                        &input.columns,
+                        &column_defs,
+                        &rows[extended_limit],
+                    )?;
+                    if values != boundary_values {
+                        break;
+                    }
                     extended_limit += 1;
                 }
                 extended_limit
@@ -897,14 +975,16 @@ impl<'a> PlanExecutor<'a> {
         &self,
         expr: &Expression,
         columns: &[String],
+        column_defs: &[ColumnDefinition],
         row: &[Value],
-    ) -> Option<Value> {
+    ) -> Result<Value, RustqlError> {
         if let Expression::Column(col) = expr
             && let Some(idx) = find_result_column_index(columns, col)
         {
-            return row.get(idx).cloned();
+            return Ok(row.get(idx).cloned().unwrap_or(Value::Null));
         }
-        None
+
+        self.evaluate_value_expression(expr, column_defs, row)
     }
 
     fn evaluate_distinct_on_value(
@@ -927,14 +1007,12 @@ impl<'a> PlanExecutor<'a> {
         &self,
         order_by: &[OrderByExpr],
         columns: &[String],
+        column_defs: &[ColumnDefinition],
         row: &[Value],
-    ) -> Vec<Value> {
+    ) -> Result<Vec<Value>, RustqlError> {
         order_by
             .iter()
-            .map(|order_expr| {
-                self.get_sort_value(&order_expr.expr, columns, row)
-                    .unwrap_or(Value::Null)
-            })
+            .map(|order_expr| self.get_sort_value(&order_expr.expr, columns, column_defs, row))
             .collect()
     }
 

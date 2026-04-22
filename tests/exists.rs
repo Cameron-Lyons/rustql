@@ -1,5 +1,6 @@
+mod common;
+use common::execute;
 use rustql::ast::*;
-use rustql::testing::execute;
 
 #[test]
 fn test_where_exists_true() {

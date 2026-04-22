@@ -1,5 +1,6 @@
+mod common;
+use common::render_result;
 use rustql::ast::Value;
-use rustql::testing::render_result;
 use rustql::{Engine, EngineOptions, QueryResult, StorageMode};
 use std::fs;
 use std::path::{Path, PathBuf};

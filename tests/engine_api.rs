@@ -459,6 +459,413 @@ fn planned_arithmetic_with_null_returns_null() {
 }
 
 #[test]
+fn explain_expression_projection_uses_plan() {
+    let engine = Engine::open(EngineOptions {
+        storage: StorageMode::Memory,
+    })
+    .unwrap();
+    let mut session = engine.session();
+
+    session
+        .execute_script(
+            "
+            CREATE TABLE sales (price INTEGER, quantity INTEGER);
+            INSERT INTO sales VALUES (10, 2), (7, 3);
+            ",
+        )
+        .unwrap();
+
+    let result = session
+        .execute_one("EXPLAIN SELECT price * quantity AS total FROM sales")
+        .unwrap();
+
+    match result {
+        QueryResult::Explain(plan) => {
+            assert!(matches!(plan, planner::PlanNode::SeqScan { .. }));
+        }
+        other => panic!("expected explain result, got: {other:?}"),
+    }
+
+    let result = session
+        .execute_one("SELECT price * quantity AS total FROM sales")
+        .unwrap();
+
+    match result {
+        QueryResult::Rows(rows) => {
+            assert_eq!(rows.columns[0].name, "total");
+            assert_eq!(
+                rows.rows,
+                vec![vec![ast::Value::Integer(20)], vec![ast::Value::Integer(21)]]
+            );
+        }
+        other => panic!("expected rows, got {other:?}"),
+    }
+}
+
+#[test]
+fn explain_scalar_and_cast_projection_uses_plan() {
+    let engine = Engine::open(EngineOptions {
+        storage: StorageMode::Memory,
+    })
+    .unwrap();
+    let mut session = engine.session();
+
+    session
+        .execute_script(
+            "
+            CREATE TABLE people (name TEXT, age INTEGER);
+            INSERT INTO people VALUES ('Alice', 30), ('Bob', 41);
+            ",
+        )
+        .unwrap();
+
+    let result = session
+        .execute_one(
+            "EXPLAIN SELECT UPPER(name) AS upper_name, CAST(age AS TEXT) AS age_text FROM people",
+        )
+        .unwrap();
+
+    match result {
+        QueryResult::Explain(plan) => {
+            assert!(matches!(plan, planner::PlanNode::SeqScan { .. }));
+        }
+        other => panic!("expected explain result, got: {other:?}"),
+    }
+
+    let result = session
+        .execute_one("SELECT UPPER(name) AS upper_name, CAST(age AS TEXT) AS age_text FROM people")
+        .unwrap();
+
+    match result {
+        QueryResult::Rows(rows) => {
+            assert_eq!(rows.columns[0].name, "upper_name");
+            assert_eq!(rows.columns[1].name, "age_text");
+            assert_eq!(
+                rows.rows,
+                vec![
+                    vec![
+                        ast::Value::Text("ALICE".to_string()),
+                        ast::Value::Text("30".to_string())
+                    ],
+                    vec![
+                        ast::Value::Text("BOB".to_string()),
+                        ast::Value::Text("41".to_string())
+                    ]
+                ]
+            );
+        }
+        other => panic!("expected rows, got {other:?}"),
+    }
+}
+
+#[test]
+fn explain_case_projection_uses_plan() {
+    let engine = Engine::open(EngineOptions {
+        storage: StorageMode::Memory,
+    })
+    .unwrap();
+    let mut session = engine.session();
+
+    session
+        .execute_script(
+            "
+            CREATE TABLE employees (name TEXT, salary INTEGER);
+            INSERT INTO employees VALUES ('Alice', 80000), ('Bob', 40000), ('Charlie', 120000);
+            ",
+        )
+        .unwrap();
+
+    let result = session
+        .execute_one(
+            "EXPLAIN SELECT CASE
+                 WHEN salary > 100000 THEN 'high'
+                 WHEN salary > 50000 THEN 'medium'
+                 ELSE 'low'
+             END AS level FROM employees",
+        )
+        .unwrap();
+
+    match result {
+        QueryResult::Explain(plan) => {
+            assert!(matches!(plan, planner::PlanNode::SeqScan { .. }));
+        }
+        other => panic!("expected explain result, got: {other:?}"),
+    }
+
+    let result = session
+        .execute_one(
+            "SELECT CASE
+                 WHEN salary > 100000 THEN 'high'
+                 WHEN salary > 50000 THEN 'medium'
+                 ELSE 'low'
+             END AS level FROM employees",
+        )
+        .unwrap();
+
+    match result {
+        QueryResult::Rows(rows) => {
+            assert_eq!(
+                rows.rows,
+                vec![
+                    vec![ast::Value::Text("medium".to_string())],
+                    vec![ast::Value::Text("low".to_string())],
+                    vec![ast::Value::Text("high".to_string())]
+                ]
+            );
+        }
+        other => panic!("expected rows, got {other:?}"),
+    }
+}
+
+#[test]
+fn explain_scalar_and_cast_filter_uses_plan() {
+    let engine = Engine::open(EngineOptions {
+        storage: StorageMode::Memory,
+    })
+    .unwrap();
+    let mut session = engine.session();
+
+    session
+        .execute_script(
+            "
+            CREATE TABLE people (id INTEGER, name TEXT, age INTEGER);
+            INSERT INTO people VALUES (1, 'Alice', 30), (2, 'Bo', 30), (3, 'Carla', 41);
+            ",
+        )
+        .unwrap();
+
+    let result = session
+        .execute_one(
+            "EXPLAIN SELECT id FROM people
+             WHERE LENGTH(name) > 3 AND CAST(age AS TEXT) = '30'",
+        )
+        .unwrap();
+
+    match result {
+        QueryResult::Explain(plan) => {
+            assert!(matches!(
+                plan,
+                planner::PlanNode::SeqScan {
+                    filter: Some(_),
+                    ..
+                }
+            ));
+        }
+        other => panic!("expected explain result, got: {other:?}"),
+    }
+
+    let result = session
+        .execute_one("SELECT id FROM people WHERE LENGTH(name) > 3 AND CAST(age AS TEXT) = '30'")
+        .unwrap();
+
+    match result {
+        QueryResult::Rows(rows) => {
+            assert_eq!(rows.rows, vec![vec![ast::Value::Integer(1)]]);
+        }
+        other => panic!("expected rows, got {other:?}"),
+    }
+}
+
+#[test]
+fn explain_between_and_case_filter_uses_plan() {
+    let engine = Engine::open(EngineOptions {
+        storage: StorageMode::Memory,
+    })
+    .unwrap();
+    let mut session = engine.session();
+
+    session
+        .execute_script(
+            "
+            CREATE TABLE sales (id INTEGER, price INTEGER, quantity INTEGER, active INTEGER);
+            INSERT INTO sales VALUES (1, 10, 2, 1), (2, 5, 5, 1), (3, 7, 1, 0);
+            ",
+        )
+        .unwrap();
+
+    let result = session
+        .execute_one(
+            "EXPLAIN SELECT id FROM sales
+             WHERE price * quantity BETWEEN 20 AND 25
+               AND CASE WHEN active = 1 THEN quantity ELSE 0 END >= 2",
+        )
+        .unwrap();
+
+    match result {
+        QueryResult::Explain(plan) => {
+            assert!(matches!(
+                plan,
+                planner::PlanNode::SeqScan {
+                    filter: Some(_),
+                    ..
+                }
+            ));
+        }
+        other => panic!("expected explain result, got: {other:?}"),
+    }
+
+    let result = session
+        .execute_one(
+            "SELECT id FROM sales
+             WHERE price * quantity BETWEEN 20 AND 25
+               AND CASE WHEN active = 1 THEN quantity ELSE 0 END >= 2",
+        )
+        .unwrap();
+
+    match result {
+        QueryResult::Rows(rows) => {
+            assert_eq!(
+                rows.rows,
+                vec![vec![ast::Value::Integer(1)], vec![ast::Value::Integer(2)]]
+            );
+        }
+        other => panic!("expected rows, got {other:?}"),
+    }
+}
+
+#[test]
+fn explain_order_by_expression_uses_sort_plan() {
+    let engine = Engine::open(EngineOptions {
+        storage: StorageMode::Memory,
+    })
+    .unwrap();
+    let mut session = engine.session();
+
+    session
+        .execute_script(
+            "
+            CREATE TABLE sales (id INTEGER, price INTEGER, quantity INTEGER);
+            INSERT INTO sales VALUES (1, 10, 2), (2, 5, 5), (3, 7, 1);
+            ",
+        )
+        .unwrap();
+
+    let result = session
+        .execute_one("EXPLAIN SELECT id, price, quantity FROM sales ORDER BY price * quantity DESC")
+        .unwrap();
+
+    match result {
+        QueryResult::Explain(plan) => {
+            assert!(matches!(plan, planner::PlanNode::Sort { .. }));
+        }
+        other => panic!("expected explain result, got: {other:?}"),
+    }
+
+    let result = session
+        .execute_one("SELECT id, price, quantity FROM sales ORDER BY price * quantity DESC")
+        .unwrap();
+
+    match result {
+        QueryResult::Rows(rows) => {
+            assert_eq!(
+                rows.rows,
+                vec![
+                    vec![
+                        ast::Value::Integer(2),
+                        ast::Value::Integer(5),
+                        ast::Value::Integer(5)
+                    ],
+                    vec![
+                        ast::Value::Integer(1),
+                        ast::Value::Integer(10),
+                        ast::Value::Integer(2)
+                    ],
+                    vec![
+                        ast::Value::Integer(3),
+                        ast::Value::Integer(7),
+                        ast::Value::Integer(1)
+                    ]
+                ]
+            );
+        }
+        other => panic!("expected rows, got {other:?}"),
+    }
+}
+
+#[test]
+fn explain_order_by_scalar_expression_uses_sort_plan() {
+    let engine = Engine::open(EngineOptions {
+        storage: StorageMode::Memory,
+    })
+    .unwrap();
+    let mut session = engine.session();
+
+    session
+        .execute_script(
+            "
+            CREATE TABLE people (name TEXT);
+            INSERT INTO people VALUES ('Bo'), ('Eleanor'), ('Mia');
+            ",
+        )
+        .unwrap();
+
+    let result = session
+        .execute_one("EXPLAIN SELECT name FROM people ORDER BY LENGTH(name) DESC")
+        .unwrap();
+
+    match result {
+        QueryResult::Explain(plan) => {
+            assert!(matches!(plan, planner::PlanNode::Sort { .. }));
+        }
+        other => panic!("expected explain result, got: {other:?}"),
+    }
+
+    let result = session
+        .execute_one("SELECT name FROM people ORDER BY LENGTH(name) DESC")
+        .unwrap();
+
+    match result {
+        QueryResult::Rows(rows) => {
+            assert_eq!(
+                rows.rows,
+                vec![
+                    vec![ast::Value::Text("Eleanor".to_string())],
+                    vec![ast::Value::Text("Mia".to_string())],
+                    vec![ast::Value::Text("Bo".to_string())]
+                ]
+            );
+        }
+        other => panic!("expected rows, got {other:?}"),
+    }
+}
+
+#[test]
+fn order_by_projection_alias_remains_correct() {
+    let engine = Engine::open(EngineOptions {
+        storage: StorageMode::Memory,
+    })
+    .unwrap();
+    let mut session = engine.session();
+
+    session
+        .execute_script(
+            "
+            CREATE TABLE sales (price INTEGER, quantity INTEGER);
+            INSERT INTO sales VALUES (10, 2), (5, 5), (7, 1);
+            ",
+        )
+        .unwrap();
+
+    let result = session
+        .execute_one("SELECT price * quantity AS total FROM sales ORDER BY total DESC")
+        .unwrap();
+
+    match result {
+        QueryResult::Rows(rows) => {
+            assert_eq!(
+                rows.rows,
+                vec![
+                    vec![ast::Value::Integer(25)],
+                    vec![ast::Value::Integer(20)],
+                    vec![ast::Value::Integer(7)]
+                ]
+            );
+        }
+        other => panic!("expected rows, got {other:?}"),
+    }
+}
+
+#[test]
 fn explicit_json_storage_persists_between_engines() {
     let _guard = test_guard();
     let path = unique_temp_path("engine_json", "json");
@@ -568,6 +975,25 @@ fn execute_select_returns_typed_rows() {
             assert_eq!(rows.rows.len(), 2);
         }
         other => panic!("expected rows result, got: {other:?}"),
+    }
+}
+
+#[test]
+fn explain_constant_select_returns_one_row_plan() {
+    let _guard = test_guard();
+    let engine = Engine::open(EngineOptions {
+        storage: StorageMode::Memory,
+    })
+    .unwrap();
+    let mut session = engine.session();
+
+    let result = session.execute_one("EXPLAIN SELECT 1 AS value").unwrap();
+
+    match result {
+        QueryResult::Explain(plan) => {
+            assert!(matches!(plan, planner::PlanNode::OneRow { .. }));
+        }
+        other => panic!("expected explain result, got: {other:?}"),
     }
 }
 
@@ -1367,6 +1793,7 @@ fn explain_from_values_returns_plan() {
     match result {
         QueryResult::Explain(plan) => {
             assert!(matches!(plan, planner::PlanNode::Limit { .. }));
+            assert!(format!("{plan}").contains("Values Scan"));
         }
         other => panic!("expected explain result, got: {other:?}"),
     }
