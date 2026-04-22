@@ -1,5 +1,5 @@
 mod common;
-use common::{process_query, reset_database};
+use common::*;
 use std::sync::Mutex;
 
 static TEST_MUTEX: Mutex<()> = Mutex::new(());
@@ -11,8 +11,8 @@ fn setup_test() -> std::sync::MutexGuard<'static, ()> {
 }
 
 fn setup_sales_table() {
-    process_query("CREATE TABLE sales (id INTEGER, category TEXT, amount INTEGER)").unwrap();
-    process_query(
+    execute_sql("CREATE TABLE sales (id INTEGER, category TEXT, amount INTEGER)").unwrap();
+    execute_sql(
         "INSERT INTO sales VALUES \
          (1, 'A', 50), \
          (2, 'A', 150), \
@@ -30,7 +30,7 @@ fn test_having_with_count() {
     setup_sales_table();
 
     let result =
-        process_query("SELECT category, COUNT(*) FROM sales GROUP BY category HAVING COUNT(*) > 1")
+        execute_sql("SELECT category, COUNT(*) FROM sales GROUP BY category HAVING COUNT(*) > 1")
             .unwrap();
     assert!(result.contains("A"));
     assert!(result.contains("B"));
@@ -42,7 +42,7 @@ fn test_having_with_sum() {
     let _guard = setup_test();
     setup_sales_table();
 
-    let result = process_query(
+    let result = execute_sql(
         "SELECT category, SUM(amount) FROM sales GROUP BY category HAVING SUM(amount) > 100",
     )
     .unwrap();
@@ -56,10 +56,9 @@ fn test_having_filters_all_groups() {
     let _guard = setup_test();
     setup_sales_table();
 
-    let result = process_query(
-        "SELECT category, COUNT(*) FROM sales GROUP BY category HAVING COUNT(*) > 100",
-    )
-    .unwrap();
+    let result =
+        execute_sql("SELECT category, COUNT(*) FROM sales GROUP BY category HAVING COUNT(*) > 100")
+            .unwrap();
     assert!(!result.contains("A\t"));
     assert!(!result.contains("B\t"));
     assert!(!result.contains("C\t"));
@@ -70,7 +69,7 @@ fn test_having_with_and() {
     let _guard = setup_test();
     setup_sales_table();
 
-    let result = process_query(
+    let result = execute_sql(
         "SELECT category, COUNT(*) AS cnt, SUM(amount) AS total \
          FROM sales GROUP BY category \
          HAVING COUNT(*) > 1 AND SUM(amount) > 300",
@@ -85,7 +84,7 @@ fn test_having_with_or() {
     let _guard = setup_test();
     setup_sales_table();
 
-    let result = process_query(
+    let result = execute_sql(
         "SELECT category, COUNT(*) AS cnt, SUM(amount) AS total \
          FROM sales GROUP BY category \
          HAVING COUNT(*) > 2 OR SUM(amount) > 100",
@@ -100,7 +99,7 @@ fn test_having_with_min() {
     let _guard = setup_test();
     setup_sales_table();
 
-    let result = process_query(
+    let result = execute_sql(
         "SELECT category, MIN(amount) FROM sales GROUP BY category HAVING MIN(amount) > 30",
     )
     .unwrap();
@@ -114,7 +113,7 @@ fn test_having_with_max() {
     let _guard = setup_test();
     setup_sales_table();
 
-    let result = process_query(
+    let result = execute_sql(
         "SELECT category, MAX(amount) FROM sales GROUP BY category HAVING MAX(amount) < 200",
     )
     .unwrap();

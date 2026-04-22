@@ -1,5 +1,5 @@
 mod common;
-use common::{process_query, reset_database};
+use common::*;
 use std::sync::Mutex;
 
 static TEST_MUTEX: Mutex<()> = Mutex::new(());
@@ -14,19 +14,19 @@ fn setup_test<'a>() -> std::sync::MutexGuard<'a, ()> {
 fn test_unique_constraint() {
     let _guard = setup_test();
 
-    process_query("CREATE TABLE users (id INTEGER, email TEXT UNIQUE, name TEXT)").unwrap();
+    execute_sql("CREATE TABLE users (id INTEGER, email TEXT UNIQUE, name TEXT)").unwrap();
 
     // First insert should succeed
-    let result = process_query("INSERT INTO users VALUES (1, 'alice@example.com', 'Alice')");
+    let result = execute_sql("INSERT INTO users VALUES (1, 'alice@example.com', 'Alice')");
     assert!(result.is_ok());
 
     // Duplicate email should fail
-    let result = process_query("INSERT INTO users VALUES (2, 'alice@example.com', 'Bob')");
+    let result = execute_sql("INSERT INTO users VALUES (2, 'alice@example.com', 'Bob')");
     assert!(result.is_err());
     assert!(result.unwrap_err().contains("Unique constraint violation"));
 
     // Different email should succeed
-    let result = process_query("INSERT INTO users VALUES (3, 'bob@example.com', 'Bob')");
+    let result = execute_sql("INSERT INTO users VALUES (3, 'bob@example.com', 'Bob')");
     assert!(result.is_ok());
 }
 
@@ -34,20 +34,20 @@ fn test_unique_constraint() {
 fn test_unique_allows_null() {
     let _guard = setup_test();
 
-    process_query("CREATE TABLE users (id INTEGER, email TEXT UNIQUE, name TEXT)").unwrap();
+    execute_sql("CREATE TABLE users (id INTEGER, email TEXT UNIQUE, name TEXT)").unwrap();
 
     // Multiple NULL values should be allowed (UNIQUE allows NULL)
-    let result = process_query("INSERT INTO users VALUES (1, NULL, 'Alice')");
+    let result = execute_sql("INSERT INTO users VALUES (1, NULL, 'Alice')");
     assert!(result.is_ok());
 
-    let result = process_query("INSERT INTO users VALUES (2, NULL, 'Bob')");
+    let result = execute_sql("INSERT INTO users VALUES (2, NULL, 'Bob')");
     assert!(result.is_ok());
 
     // But duplicate non-NULL values should fail
-    let result = process_query("INSERT INTO users VALUES (3, 'test@example.com', 'Charlie')");
+    let result = execute_sql("INSERT INTO users VALUES (3, 'test@example.com', 'Charlie')");
     assert!(result.is_ok());
 
-    let result = process_query("INSERT INTO users VALUES (4, 'test@example.com', 'David')");
+    let result = execute_sql("INSERT INTO users VALUES (4, 'test@example.com', 'David')");
     assert!(result.is_err());
     assert!(result.unwrap_err().contains("Unique constraint violation"));
 }
@@ -56,21 +56,21 @@ fn test_unique_allows_null() {
 fn test_unique_with_update() {
     let _guard = setup_test();
 
-    process_query("CREATE TABLE users (id INTEGER, email TEXT UNIQUE, name TEXT)").unwrap();
-    process_query("INSERT INTO users VALUES (1, 'alice@example.com', 'Alice')").unwrap();
-    process_query("INSERT INTO users VALUES (2, 'bob@example.com', 'Bob')").unwrap();
+    execute_sql("CREATE TABLE users (id INTEGER, email TEXT UNIQUE, name TEXT)").unwrap();
+    execute_sql("INSERT INTO users VALUES (1, 'alice@example.com', 'Alice')").unwrap();
+    execute_sql("INSERT INTO users VALUES (2, 'bob@example.com', 'Bob')").unwrap();
 
     // Update to duplicate email should fail
-    let result = process_query("UPDATE users SET email = 'alice@example.com' WHERE id = 2");
+    let result = execute_sql("UPDATE users SET email = 'alice@example.com' WHERE id = 2");
     assert!(result.is_err());
     assert!(result.unwrap_err().contains("Unique constraint violation"));
 
     // Update to unique email should succeed
-    let result = process_query("UPDATE users SET email = 'charlie@example.com' WHERE id = 2");
+    let result = execute_sql("UPDATE users SET email = 'charlie@example.com' WHERE id = 2");
     assert!(result.is_ok());
 
     // Update to NULL should succeed (multiple NULLs allowed)
-    let result = process_query("UPDATE users SET email = NULL WHERE id = 2");
+    let result = execute_sql("UPDATE users SET email = NULL WHERE id = 2");
     assert!(result.is_ok());
 }
 
@@ -79,13 +79,13 @@ fn test_unique_with_primary_key() {
     let _guard = setup_test();
 
     // A column can be both PRIMARY KEY and UNIQUE (though PRIMARY KEY already implies uniqueness)
-    process_query("CREATE TABLE users (id INTEGER PRIMARY KEY UNIQUE, name TEXT)").unwrap();
+    execute_sql("CREATE TABLE users (id INTEGER PRIMARY KEY UNIQUE, name TEXT)").unwrap();
 
-    let result = process_query("INSERT INTO users VALUES (1, 'Alice')");
+    let result = execute_sql("INSERT INTO users VALUES (1, 'Alice')");
     assert!(result.is_ok());
 
     // Duplicate primary key should fail
-    let result = process_query("INSERT INTO users VALUES (1, 'Bob')");
+    let result = execute_sql("INSERT INTO users VALUES (1, 'Bob')");
     assert!(result.is_err());
     assert!(
         result
@@ -98,13 +98,13 @@ fn test_unique_with_primary_key() {
 fn test_describe_shows_unique() {
     let _guard = setup_test();
 
-    process_query("CREATE TABLE users (id INTEGER, email TEXT UNIQUE, name TEXT)").unwrap();
+    execute_sql("CREATE TABLE users (id INTEGER, email TEXT UNIQUE, name TEXT)").unwrap();
 
-    let result = process_query("DESCRIBE users").unwrap();
+    let result = execute_sql("DESCRIBE users").unwrap();
     assert!(result.contains("Unique"));
     assert!(result.contains("email"));
     // Check that email shows as unique
-    let lines: Vec<&str> = result.lines().collect();
+    let lines: Vec<String> = result.lines().collect();
     let email_line = lines.iter().find(|line| line.contains("email"));
     assert!(email_line.is_some());
     assert!(email_line.unwrap().contains("YES")); // Should show YES in Unique column

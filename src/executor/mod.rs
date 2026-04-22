@@ -4,13 +4,13 @@ pub(crate) mod ddl;
 pub(crate) mod dml;
 #[allow(dead_code)]
 pub(crate) mod expr;
-pub(crate) mod join;
 pub(crate) mod select;
 
 use crate::ast::*;
 use crate::database::Database;
 use crate::engine::{
     ColumnMeta, CommandResult, CommandTag, ExplainAnalyzeResult, QueryResult, RowBatch,
+    plan_tree_from_node,
 };
 use crate::error::RustqlError;
 use crate::plan_executor::PlanExecutor;
@@ -35,6 +35,7 @@ impl ExecutionContext {
         }
     }
 
+    #[cfg_attr(not(feature = "testing-api"), allow(dead_code))]
     pub(crate) fn database_snapshot(&self) -> Database {
         self.database
             .read()
@@ -263,7 +264,7 @@ fn execute_explain(
     stmt: SelectStatement,
 ) -> Result<QueryResult, RustqlError> {
     let plan = select::explain_select(context, stmt)?;
-    Ok(QueryResult::Explain(plan))
+    Ok(QueryResult::Explain(plan_tree_from_node(plan)))
 }
 
 fn execute_explain_analyze(
@@ -283,7 +284,7 @@ fn execute_explain_analyze(
     let execution_ms = execution_start.elapsed().as_secs_f64() * 1000.0;
 
     Ok(QueryResult::ExplainAnalyze(ExplainAnalyzeResult {
-        plan,
+        plan: plan_tree_from_node(plan),
         planning_ms,
         execution_ms,
         actual_rows: result.rows.len(),

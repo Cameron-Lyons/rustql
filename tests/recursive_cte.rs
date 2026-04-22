@@ -1,6 +1,6 @@
 mod common;
-use common::process_query;
 use common::reset_database;
+use common::*;
 use std::sync::Once;
 
 static INIT: Once = Once::new();
@@ -14,7 +14,7 @@ fn setup() {
 #[test]
 fn test_recursive_cte_numbers() {
     setup();
-    let result = process_query(
+    let result = execute_sql(
         "WITH RECURSIVE nums AS (
             SELECT 1 AS n
             UNION ALL
@@ -33,7 +33,7 @@ fn test_recursive_cte_numbers() {
 #[test]
 fn test_recursive_cte_sequence() {
     setup();
-    let result = process_query(
+    let result = execute_sql(
         "WITH RECURSIVE seq AS (
             SELECT 10 AS val
             UNION ALL
@@ -53,7 +53,7 @@ fn test_recursive_cte_sequence() {
 #[test]
 fn test_recursive_cte_fibonacci() {
     setup();
-    let result = process_query(
+    let result = execute_sql(
         "WITH RECURSIVE fib AS (
             SELECT 1 AS n, 0 AS a, 1 AS b
             UNION ALL
@@ -73,7 +73,7 @@ fn test_recursive_cte_fibonacci() {
 #[test]
 fn test_recursive_cte_with_limit() {
     setup();
-    let result = process_query(
+    let result = execute_sql(
         "WITH RECURSIVE nums AS (
             SELECT 1 AS n
             UNION ALL
@@ -82,14 +82,14 @@ fn test_recursive_cte_with_limit() {
         SELECT n FROM nums LIMIT 5",
     )
     .unwrap();
-    let lines: Vec<&str> = result.lines().filter(|l| !l.starts_with('-')).collect();
+    let lines: Vec<String> = result.lines().filter(|l| !l.starts_with('-')).collect();
     assert!(lines.len() <= 7);
 }
 
 #[test]
 fn test_recursive_cte_iteration_limit_errors() {
     setup();
-    let err = process_query(
+    let err = execute_sql(
         "WITH RECURSIVE nums AS (
             SELECT 1 AS n
             UNION ALL

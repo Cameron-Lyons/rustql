@@ -1,5 +1,5 @@
 mod common;
-use common::{execute, reset_database};
+use common::*;
 use rustql::ast::{ColumnDefinition, CreateTableStatement, DataType, Statement, Value};
 
 #[test]

@@ -1,10 +1,8 @@
 #![allow(dead_code)]
 
+pub use rustql::CommandTag;
 use rustql::ast::{Statement, Value};
-use rustql::{
-    CommandResult, CommandTag, Database, Engine, EngineOptions, ExplainAnalyzeResult, QueryResult,
-    RowBatch, StorageMode, lexer, parser,
-};
+use rustql::{CommandResult, Database, Engine, EngineOptions, QueryResult, RowBatch, StorageMode};
 use std::cell::RefCell;
 
 struct TestHarness {
@@ -40,18 +38,10 @@ pub fn reset_database() {
     });
 }
 
-pub fn process_query(sql: &str) -> Result<String, String> {
+pub fn execute_script(sql: &str) -> Result<Vec<QueryResult>, String> {
     with_harness(|harness| {
         let mut session = harness.engine.session();
-        let statements = parser::parse_script(lexer::tokenize(sql).map_err(|err| err.to_string())?)
-            .map_err(|err| err.to_string())?;
-        let results = session.execute_script(sql).map_err(|err| err.to_string())?;
-        Ok(statements
-            .iter()
-            .zip(results.iter())
-            .map(|(statement, result)| render_result_for_statement(statement, result))
-            .collect::<Vec<_>>()
-            .join("\n"))
+        session.execute_script(sql).map_err(|err| err.to_string())
     })
 }
 
@@ -71,9 +61,8 @@ pub fn execute_statement(statement: Statement) -> Result<QueryResult, String> {
     })
 }
 
-pub fn execute(statement: Statement) -> Result<String, String> {
-    let result = execute_statement(statement.clone())?;
-    Ok(render_result_for_statement(&statement, &result))
+pub fn execute(statement: Statement) -> Result<QueryResult, String> {
+    execute_statement(statement)
 }
 
 pub fn query_rows(sql: &str) -> Result<RowBatch, String> {
@@ -94,143 +83,364 @@ pub fn snapshot_database() -> Result<Database, String> {
     with_harness(|harness| Ok(harness.engine.snapshot_database()))
 }
 
-pub fn render_result(result: &QueryResult) -> String {
+pub fn assert_command(result: QueryResult, expected_tag: CommandTag, expected_affected: u64) {
+    let command = result.expect_command();
+    assert_eq!(command.tag, expected_tag);
+    assert_eq!(command.affected, expected_affected);
+}
+
+pub fn assert_command_sql(sql: &str, expected_tag: CommandTag, expected_affected: u64) {
+    assert_command(execute_sql(sql).unwrap(), expected_tag, expected_affected);
+}
+
+pub fn assert_rows(sql: &str, expected_columns: &[&str], expected_rows: Vec<Vec<Value>>) {
+    let rows = query_rows(sql).unwrap();
+    rows.assert_columns(expected_columns);
+    assert_eq!(rows.rows, expected_rows);
+}
+
+pub trait QueryResultAssertions {
+    fn expect_rows(&self) -> &RowBatch;
+    fn expect_command(&self) -> &CommandResult;
+    fn contains<N: QueryResultNeedle>(&self, needle: N) -> bool;
+    fn matches(&self, needle: &str) -> std::vec::IntoIter<String>;
+    fn lines(&self) -> std::vec::IntoIter<String>;
+    fn output_text(&self) -> String;
+    fn to_lowercase(&self) -> String;
+    fn is_empty(&self) -> bool;
+}
+
+impl QueryResultAssertions for QueryResult {
+    fn expect_rows(&self) -> &RowBatch {
+        match self {
+            QueryResult::Rows(rows) => rows,
+            other => panic!("expected row result, got {other:?}"),
+        }
+    }
+
+    fn expect_command(&self) -> &CommandResult {
+        match self {
+            QueryResult::Command(command) => command,
+            other => panic!("expected command result, got {other:?}"),
+        }
+    }
+
+    fn contains<N: QueryResultNeedle>(&self, needle: N) -> bool {
+        match self {
+            QueryResult::Rows(rows) => rows.contains(needle),
+            QueryResult::Command(command) => needle.matches_command(command),
+            QueryResult::Explain(plan) => {
+                needle.matches_plan("Query Plan") || needle.matches_plan(&plan.to_string())
+            }
+            QueryResult::ExplainAnalyze(result) => {
+                needle.matches_plan("Query Plan")
+                    || needle.matches_plan("Planning Time")
+                    || needle.matches_plan("Execution Time")
+                    || needle.matches_plan("Actual Rows")
+                    || needle.matches_plan(&result.plan.to_string())
+                    || needle.matches_usize(result.actual_rows)
+                    || needle.matches_float(result.planning_ms)
+                    || needle.matches_float(result.execution_ms)
+                    || query_output_lines(self)
+                        .iter()
+                        .any(|line| needle.matches_line(line))
+            }
+        }
+    }
+
+    fn matches(&self, needle: &str) -> std::vec::IntoIter<String> {
+        query_output_lines(self)
+            .into_iter()
+            .filter(|line| line.contains(needle))
+            .collect::<Vec<_>>()
+            .into_iter()
+    }
+
+    fn lines(&self) -> std::vec::IntoIter<String> {
+        rendered_lines(self).into_iter()
+    }
+
+    fn output_text(&self) -> String {
+        rendered_lines(self).join("\n")
+    }
+
+    fn to_lowercase(&self) -> String {
+        self.output_text().to_lowercase()
+    }
+
+    fn is_empty(&self) -> bool {
+        match self {
+            QueryResult::Rows(rows) => rows.columns.is_empty() && rows.rows.is_empty(),
+            QueryResult::Command(_) | QueryResult::Explain(_) | QueryResult::ExplainAnalyze(_) => {
+                false
+            }
+        }
+    }
+}
+
+pub trait RowBatchAssertions {
+    fn assert_columns(&self, expected: &[&str]);
+    fn contains<N: QueryResultNeedle>(&self, needle: N) -> bool;
+}
+
+impl RowBatchAssertions for RowBatch {
+    fn assert_columns(&self, expected: &[&str]) {
+        let actual = self
+            .columns
+            .iter()
+            .map(|column| column.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected);
+    }
+
+    fn contains<N: QueryResultNeedle>(&self, needle: N) -> bool {
+        self.columns
+            .iter()
+            .any(|column| needle.matches_column(column.name.as_str()))
+            || self
+                .rows
+                .iter()
+                .flatten()
+                .any(|value| needle.matches_value(value))
+    }
+}
+
+pub trait QueryResultNeedle {
+    fn matches_column(&self, column: &str) -> bool;
+    fn matches_value(&self, value: &Value) -> bool;
+    fn matches_command(&self, command: &CommandResult) -> bool;
+    fn matches_plan(&self, plan: &str) -> bool;
+    fn matches_line(&self, line: &str) -> bool {
+        self.matches_plan(line)
+    }
+
+    fn matches_usize(&self, value: usize) -> bool;
+    fn matches_float(&self, value: f64) -> bool;
+}
+
+impl QueryResultNeedle for &str {
+    fn matches_column(&self, column: &str) -> bool {
+        column == *self
+    }
+
+    fn matches_value(&self, value: &Value) -> bool {
+        match value {
+            Value::Null => *self == "NULL",
+            Value::Integer(value) => self.parse::<i64>().is_ok_and(|expected| expected == *value),
+            Value::Float(value) => self.matches_float(*value),
+            Value::Boolean(value) => self
+                .parse::<bool>()
+                .is_ok_and(|expected| expected == *value),
+            Value::Text(value)
+            | Value::Date(value)
+            | Value::Time(value)
+            | Value::DateTime(value) => value.contains(*self),
+        }
+    }
+
+    fn matches_command(&self, command: &CommandResult) -> bool {
+        command_tag_name(command.tag) == *self || self.matches_usize(command.affected as usize)
+    }
+
+    fn matches_plan(&self, plan: &str) -> bool {
+        plan.contains(*self)
+    }
+
+    fn matches_usize(&self, value: usize) -> bool {
+        self.parse::<usize>()
+            .is_ok_and(|expected| expected == value)
+    }
+
+    fn matches_float(&self, value: f64) -> bool {
+        self.parse::<f64>().is_ok_and(|expected| {
+            (value - expected).abs() < f64::EPSILON || value.to_string().contains(*self)
+        })
+    }
+}
+
+impl QueryResultNeedle for String {
+    fn matches_column(&self, column: &str) -> bool {
+        self.as_str().matches_column(column)
+    }
+
+    fn matches_value(&self, value: &Value) -> bool {
+        self.as_str().matches_value(value)
+    }
+
+    fn matches_command(&self, command: &CommandResult) -> bool {
+        self.as_str().matches_command(command)
+    }
+
+    fn matches_plan(&self, plan: &str) -> bool {
+        self.as_str().matches_plan(plan)
+    }
+
+    fn matches_usize(&self, value: usize) -> bool {
+        self.as_str().matches_usize(value)
+    }
+
+    fn matches_float(&self, value: f64) -> bool {
+        self.as_str().matches_float(value)
+    }
+}
+
+impl QueryResultNeedle for &String {
+    fn matches_column(&self, column: &str) -> bool {
+        self.as_str().matches_column(column)
+    }
+
+    fn matches_value(&self, value: &Value) -> bool {
+        self.as_str().matches_value(value)
+    }
+
+    fn matches_command(&self, command: &CommandResult) -> bool {
+        self.as_str().matches_command(command)
+    }
+
+    fn matches_plan(&self, plan: &str) -> bool {
+        self.as_str().matches_plan(plan)
+    }
+
+    fn matches_usize(&self, value: usize) -> bool {
+        self.as_str().matches_usize(value)
+    }
+
+    fn matches_float(&self, value: f64) -> bool {
+        self.as_str().matches_float(value)
+    }
+}
+
+impl QueryResultNeedle for char {
+    fn matches_column(&self, column: &str) -> bool {
+        column.contains(*self)
+    }
+
+    fn matches_value(&self, value: &Value) -> bool {
+        match value {
+            Value::Text(value)
+            | Value::Date(value)
+            | Value::Time(value)
+            | Value::DateTime(value) => value.contains(*self),
+            other => other.to_string().contains(*self),
+        }
+    }
+
+    fn matches_command(&self, command: &CommandResult) -> bool {
+        command_tag_name(command.tag).contains(*self)
+            || command.affected.to_string().contains(*self)
+    }
+
+    fn matches_plan(&self, plan: &str) -> bool {
+        plan.contains(*self)
+    }
+
+    fn matches_usize(&self, value: usize) -> bool {
+        value.to_string().contains(*self)
+    }
+
+    fn matches_float(&self, value: f64) -> bool {
+        value.to_string().contains(*self)
+    }
+}
+
+pub fn query_output_lines(result: &QueryResult) -> Vec<String> {
     match result {
-        QueryResult::Rows(rows) => render_rows(rows),
-        QueryResult::Command(command) => render_command(command.tag, command.affected),
-        QueryResult::Explain(plan) => format!("Query Plan:\n{}", plan),
-        QueryResult::ExplainAnalyze(result) => render_explain_analyze(result),
+        QueryResult::Rows(rows) => row_batch_lines(rows),
+        QueryResult::Command(command) => vec![format!(
+            "{} {}",
+            command_tag_name(command.tag),
+            command.affected
+        )],
+        QueryResult::Explain(plan) => vec!["Query Plan:".to_string(), plan.to_string()],
+        QueryResult::ExplainAnalyze(result) => vec![
+            "Query Plan:".to_string(),
+            result.plan.to_string(),
+            format!("Planning Time: {:.3} ms", result.planning_ms),
+            format!("Execution Time: {:.3} ms", result.execution_ms),
+            format!("Actual Rows: {}", result.actual_rows),
+        ],
     }
 }
 
-fn render_result_for_statement(statement: &Statement, result: &QueryResult) -> String {
-    match result {
-        QueryResult::Rows(rows) => render_rows(rows),
-        QueryResult::Command(command) => {
-            render_command_for_statement(statement, command.tag, command.affected)
-        }
-        QueryResult::Explain(plan) => format!("Query Plan:\n{}", plan),
-        QueryResult::ExplainAnalyze(result) => render_explain_analyze(result),
-    }
-}
+fn row_batch_lines(rows: &RowBatch) -> Vec<String> {
+    let mut output = Vec::with_capacity(rows.rows.len() + 1);
+    output.push(
+        rows.columns
+            .iter()
+            .map(|column| column.name.as_str())
+            .collect::<Vec<_>>()
+            .join("\t"),
+    );
 
-fn render_explain_analyze(result: &ExplainAnalyzeResult) -> String {
-    format!(
-        "Query Plan:\n{}\nPlanning Time: {:.3} ms\nExecution Time: {:.3} ms\nActual Rows: {}",
-        result.plan, result.planning_ms, result.execution_ms, result.actual_rows
-    )
-}
-
-fn render_command_for_statement(statement: &Statement, tag: CommandTag, affected: u64) -> String {
-    match statement {
-        Statement::CreateTable(stmt) => format!("Table '{}' created", stmt.name),
-        Statement::DropTable(stmt) => format!("Table '{}' dropped", stmt.name),
-        Statement::AlterTable(stmt) => match &stmt.operation {
-            rustql::ast::AlterOperation::AddColumn(col) => {
-                format!("Column '{}' added to table '{}'", col.name, stmt.table)
-            }
-            rustql::ast::AlterOperation::DropColumn(col) => {
-                format!("Column '{}' dropped from table '{}'", col, stmt.table)
-            }
-            rustql::ast::AlterOperation::RenameColumn { old, new } => {
-                format!(
-                    "Column '{}' renamed to '{}' in table '{}'",
-                    old, new, stmt.table
-                )
-            }
-            rustql::ast::AlterOperation::RenameTable(new_name) => {
-                format!("Table '{}' renamed to '{}'", stmt.table, new_name)
-            }
-            rustql::ast::AlterOperation::AddConstraint(_) => {
-                format!("Constraint added to table '{}'", stmt.table)
-            }
-            rustql::ast::AlterOperation::DropConstraint(name) => {
-                format!("Constraint '{}' dropped from table '{}'", name, stmt.table)
-            }
-        },
-        Statement::CreateIndex(stmt) => {
-            format!(
-                "Index '{}' created on {}.{}",
-                stmt.name,
-                stmt.table,
-                stmt.columns.join(", ")
-            )
-        }
-        Statement::DropIndex(stmt) => format!("Index '{}' dropped", stmt.name),
-        Statement::Insert(_) => format!("{} row(s) inserted", affected),
-        Statement::Update(_) => format!("{} row(s) updated", affected),
-        Statement::Delete(_) => format!("{} row(s) deleted", affected),
-        Statement::BeginTransaction => "Transaction begun".to_string(),
-        Statement::CommitTransaction => "Transaction committed".to_string(),
-        Statement::RollbackTransaction => "Transaction rolled back".to_string(),
-        Statement::Savepoint(name) => format!("Savepoint '{}' created", name),
-        Statement::ReleaseSavepoint(name) => format!("Savepoint '{}' released", name),
-        Statement::RollbackToSavepoint(name) => format!("Rolled back to savepoint '{}'", name),
-        Statement::Analyze(table_name) => format!("Table: {}\nRow count: {}", table_name, affected),
-        Statement::TruncateTable { table_name } => format!("Table '{}' truncated", table_name),
-        Statement::CreateView { name, .. } => format!("View '{}' created", name),
-        Statement::DropView { name, .. } => format!("View '{}' dropped", name),
-        Statement::Merge(_) => format!("{} row(s) affected", affected),
-        Statement::Do { .. } => render_command(tag, affected),
-        Statement::Describe(_)
-        | Statement::ShowTables
-        | Statement::Select(_)
-        | Statement::Explain(_)
-        | Statement::ExplainAnalyze(_) => render_command(tag, affected),
-    }
-}
-
-fn render_command(tag: CommandTag, affected: u64) -> String {
-    match tag {
-        CommandTag::CreateTable => "Table created".to_string(),
-        CommandTag::DropTable => "Table dropped".to_string(),
-        CommandTag::AlterTable => "Table altered".to_string(),
-        CommandTag::CreateIndex => "Index created".to_string(),
-        CommandTag::DropIndex => "Index dropped".to_string(),
-        CommandTag::Insert => format!("{} row(s) inserted", affected),
-        CommandTag::Update => format!("{} row(s) updated", affected),
-        CommandTag::Delete => format!("{} row(s) deleted", affected),
-        CommandTag::BeginTransaction => "Transaction begun".to_string(),
-        CommandTag::CommitTransaction => "Transaction committed".to_string(),
-        CommandTag::RollbackTransaction => "Transaction rolled back".to_string(),
-        CommandTag::Savepoint => "Savepoint created".to_string(),
-        CommandTag::ReleaseSavepoint => "Savepoint released".to_string(),
-        CommandTag::RollbackToSavepoint => "Rolled back to savepoint".to_string(),
-        CommandTag::Analyze => format!("ANALYZE {}", affected),
-        CommandTag::TruncateTable => "Table truncated".to_string(),
-        CommandTag::CreateView => "View created".to_string(),
-        CommandTag::DropView => "View dropped".to_string(),
-        CommandTag::Merge => format!("{} row(s) affected", affected),
-        CommandTag::Do => format!("DO {}", affected),
-    }
-}
-
-fn render_rows(rows: &RowBatch) -> String {
-    let mut output = String::new();
-
-    for (idx, column) in rows.columns.iter().enumerate() {
-        if idx > 0 {
-            output.push('\t');
-        }
-        output.push_str(&column.name);
-    }
-    output.push('\n');
-    output.push_str(&"-".repeat(40));
-    output.push('\n');
-
-    for row in &rows.rows {
-        for (idx, value) in row.iter().enumerate() {
-            if idx > 0 {
-                output.push('\t');
-            }
-            output.push_str(&render_value(value));
-        }
-        output.push('\n');
-    }
+    output.extend(rows.rows.iter().map(|row| {
+        row.iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\t")
+    }));
 
     output
 }
 
-fn render_value(value: &Value) -> String {
-    value.to_string()
+fn rendered_lines(result: &QueryResult) -> Vec<String> {
+    match result {
+        QueryResult::Rows(rows) => rendered_row_batch_lines(rows),
+        QueryResult::Command(command) => vec![format!(
+            "{} {}",
+            command_tag_name(command.tag),
+            command.affected
+        )],
+        QueryResult::Explain(plan) => vec!["Query Plan:".to_string(), plan.to_string()],
+        QueryResult::ExplainAnalyze(result) => vec![
+            "Query Plan:".to_string(),
+            result.plan.to_string(),
+            format!("Planning Time: {:.3} ms", result.planning_ms),
+            format!("Execution Time: {:.3} ms", result.execution_ms),
+            format!("Actual Rows: {}", result.actual_rows),
+        ],
+    }
+}
+
+fn rendered_row_batch_lines(rows: &RowBatch) -> Vec<String> {
+    let mut lines = Vec::with_capacity(rows.rows.len() + 2);
+    lines.push(
+        rows.columns
+            .iter()
+            .map(|column| column.name.as_str())
+            .collect::<Vec<_>>()
+            .join("\t"),
+    );
+    lines.push("-".repeat(40));
+    lines.extend(rows.rows.iter().map(|row| {
+        row.iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\t")
+    }));
+    lines
+}
+
+fn command_tag_name(tag: CommandTag) -> &'static str {
+    match tag {
+        CommandTag::CreateTable => "CreateTable",
+        CommandTag::DropTable => "DropTable",
+        CommandTag::AlterTable => "AlterTable",
+        CommandTag::CreateIndex => "CreateIndex",
+        CommandTag::DropIndex => "DropIndex",
+        CommandTag::Insert => "Insert",
+        CommandTag::Update => "Update",
+        CommandTag::Delete => "Delete",
+        CommandTag::BeginTransaction => "BeginTransaction",
+        CommandTag::CommitTransaction => "CommitTransaction",
+        CommandTag::RollbackTransaction => "RollbackTransaction",
+        CommandTag::Savepoint => "Savepoint",
+        CommandTag::ReleaseSavepoint => "ReleaseSavepoint",
+        CommandTag::RollbackToSavepoint => "RollbackToSavepoint",
+        CommandTag::Analyze => "Analyze",
+        CommandTag::TruncateTable => "TruncateTable",
+        CommandTag::CreateView => "CreateView",
+        CommandTag::DropView => "DropView",
+        CommandTag::Merge => "Merge",
+        CommandTag::Do => "Do",
+    }
 }

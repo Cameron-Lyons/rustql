@@ -1,5 +1,5 @@
 mod common;
-use common::{process_query, reset_database};
+use common::*;
 use std::sync::Mutex;
 
 static TEST_MUTEX: Mutex<()> = Mutex::new(());
@@ -14,13 +14,13 @@ fn setup_test<'a>() -> std::sync::MutexGuard<'a, ()> {
 fn test_insert_with_column_names() {
     let _guard = setup_test();
 
-    process_query("CREATE TABLE users (id INTEGER, name TEXT, age INTEGER)").unwrap();
+    execute_sql("CREATE TABLE users (id INTEGER, name TEXT, age INTEGER)").unwrap();
 
-    let result = process_query("INSERT INTO users (name, age, id) VALUES ('Alice', 25, 1)");
+    let result = execute_sql("INSERT INTO users (name, age, id) VALUES ('Alice', 25, 1)");
     assert!(result.is_ok(), "Insert with column names should succeed");
-    assert_eq!(result.unwrap(), "1 row(s) inserted");
+    assert_command(result.unwrap(), CommandTag::Insert, 1);
 
-    let result = process_query("SELECT id, name, age FROM users");
+    let result = execute_sql("SELECT id, name, age FROM users");
     assert!(result.is_ok());
     let output = result.unwrap();
     assert!(output.contains("1"));
@@ -32,13 +32,13 @@ fn test_insert_with_column_names() {
 fn test_arithmetic_expressions_in_select() {
     let _guard = setup_test();
 
-    process_query("CREATE TABLE products (id INTEGER, price FLOAT, quantity INTEGER)").unwrap();
-    process_query("INSERT INTO products VALUES (1, 10.5, 3), (2, 20.0, 2)").unwrap();
+    execute_sql("CREATE TABLE products (id INTEGER, price FLOAT, quantity INTEGER)").unwrap();
+    execute_sql("INSERT INTO products VALUES (1, 10.5, 3), (2, 20.0, 2)").unwrap();
 
-    let result = process_query("SELECT id, price * quantity AS total FROM products");
+    let result = execute_sql("SELECT id, price * quantity AS total FROM products");
     match &result {
         Ok(output) => {
-            println!("Success! Output: {}", output);
+            println!("Success! Output: {:?}", output);
             assert!(output.contains("total"));
             assert!(output.contains("31.5")); // 10.5 * 3
         }
@@ -47,10 +47,10 @@ fn test_arithmetic_expressions_in_select() {
         }
     }
 
-    let result = process_query("SELECT id, price - quantity AS diff FROM products");
+    let result = execute_sql("SELECT id, price - quantity AS diff FROM products");
     assert!(result.is_ok());
 
-    let result = process_query("SELECT id, price / quantity AS unit_price FROM products");
+    let result = execute_sql("SELECT id, price / quantity AS unit_price FROM products");
     assert!(result.is_ok());
 }
 
@@ -58,19 +58,22 @@ fn test_arithmetic_expressions_in_select() {
 fn test_union() {
     let _guard = setup_test();
 
-    process_query("CREATE TABLE users1 (id INTEGER, name TEXT)").unwrap();
-    process_query("CREATE TABLE users2 (id INTEGER, name TEXT)").unwrap();
+    execute_sql("CREATE TABLE users1 (id INTEGER, name TEXT)").unwrap();
+    execute_sql("CREATE TABLE users2 (id INTEGER, name TEXT)").unwrap();
 
-    process_query("INSERT INTO users1 VALUES (1, 'Alice'), (2, 'Bob')").unwrap();
-    process_query("INSERT INTO users2 VALUES (3, 'Charlie'), (1, 'Alice')").unwrap();
+    execute_sql("INSERT INTO users1 VALUES (1, 'Alice'), (2, 'Bob')").unwrap();
+    execute_sql("INSERT INTO users2 VALUES (3, 'Charlie'), (1, 'Alice')").unwrap();
 
-    let result = process_query("SELECT name FROM users1 UNION SELECT name FROM users2");
+    let result = execute_sql("SELECT name FROM users1 UNION SELECT name FROM users2");
     assert!(result.is_ok());
     let output = result.unwrap();
     assert!(output.contains("Alice"));
     assert!(output.contains("Bob"));
     assert!(output.contains("Charlie"));
-    let alice_count = output.matches("Alice").count();
+    let alice_count = query_output_lines(&output)
+        .join("\n")
+        .matches("Alice")
+        .count();
     assert_eq!(alice_count, 1, "UNION should remove duplicate 'Alice'");
 }
 
@@ -78,12 +81,12 @@ fn test_union() {
 fn test_primary_key() {
     let _guard = setup_test();
 
-    process_query("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)").unwrap();
+    execute_sql("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)").unwrap();
 
-    let result = process_query("INSERT INTO users VALUES (1, 'Alice')");
+    let result = execute_sql("INSERT INTO users VALUES (1, 'Alice')");
     assert!(result.is_ok());
 
-    let result = process_query("INSERT INTO users VALUES (1, 'Bob')");
+    let result = execute_sql("INSERT INTO users VALUES (1, 'Bob')");
     assert!(result.is_err());
     assert!(
         result
@@ -91,11 +94,11 @@ fn test_primary_key() {
             .contains("Primary key constraint violation")
     );
 
-    let result = process_query("INSERT INTO users VALUES (NULL, 'Charlie')");
+    let result = execute_sql("INSERT INTO users VALUES (NULL, 'Charlie')");
     assert!(result.is_err());
     assert!(result.unwrap_err().contains("cannot be NULL"));
 
-    let result = process_query("INSERT INTO users VALUES (2, 'David')");
+    let result = execute_sql("INSERT INTO users VALUES (2, 'David')");
     assert!(result.is_ok());
 }
 
@@ -103,22 +106,22 @@ fn test_primary_key() {
 fn test_default_values() {
     let _guard = setup_test();
 
-    process_query(
+    execute_sql(
         "CREATE TABLE users (id INTEGER, name TEXT DEFAULT 'Unknown', age INTEGER DEFAULT 0)",
     )
     .unwrap();
 
-    let result = process_query("INSERT INTO users (id) VALUES (1)");
+    let result = execute_sql("INSERT INTO users (id) VALUES (1)");
     assert!(result.is_ok());
 
-    let result = process_query("SELECT * FROM users WHERE id = 1").unwrap();
+    let result = execute_sql("SELECT * FROM users WHERE id = 1").unwrap();
     assert!(result.contains("Unknown"));
     assert!(result.contains("0"));
 
-    let result = process_query("INSERT INTO users VALUES (2, 'Alice', 25)");
+    let result = execute_sql("INSERT INTO users VALUES (2, 'Alice', 25)");
     assert!(result.is_ok());
 
-    let result = process_query("SELECT * FROM users WHERE id = 2").unwrap();
+    let result = execute_sql("SELECT * FROM users WHERE id = 2").unwrap();
     assert!(result.contains("Alice"));
     assert!(result.contains("25"));
 }
@@ -127,11 +130,11 @@ fn test_default_values() {
 fn test_primary_key_with_default() {
     let _guard = setup_test();
 
-    process_query("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT DEFAULT 'User')").unwrap();
+    execute_sql("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT DEFAULT 'User')").unwrap();
 
-    let result = process_query("INSERT INTO users (id) VALUES (1)");
+    let result = execute_sql("INSERT INTO users (id) VALUES (1)");
     assert!(result.is_ok());
 
-    let result = process_query("SELECT * FROM users WHERE id = 1").unwrap();
+    let result = execute_sql("SELECT * FROM users WHERE id = 1").unwrap();
     assert!(result.contains("User"));
 }

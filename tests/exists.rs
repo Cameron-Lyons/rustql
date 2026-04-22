@@ -1,5 +1,5 @@
 mod common;
-use common::execute;
+use common::*;
 use rustql::ast::*;
 
 #[test]

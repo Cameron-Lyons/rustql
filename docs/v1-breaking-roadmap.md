@@ -1,287 +1,57 @@
-# RustQL v1 Breaking Roadmap
+# RustQL v1 Current Status Matrix
 
-This document defines a concrete migration from the current v0 architecture to a deliberately breaking v1.
+Last audited: 2026-04-22.
+
+This document replaces the old milestone roadmap with the current state of the
+v1 work in this repository. It records what is implemented now, where the
+runtime still has compatibility or fallback paths, and what remains open.
+
+## Status Key
+
+- Done: implemented in the current runtime path.
+- Partial: implemented for some paths, with known cleanup or coverage gaps.
+- Open: not present in the current tree.
+- Deferred: not part of current v1 scope unless explicitly reopened.
 
 ## Goals
 
 - Replace string-oriented APIs with typed query results.
-- Remove global mutable singletons to support multiple independent engines/sessions.
-- Make planner and executor a single pipeline used by both `SELECT` and `EXPLAIN`.
-- Move to a durable transaction and storage model with explicit format versioning.
+- Remove global mutable singletons so multiple engines and sessions can run in
+  one process.
+- Make planner and executor a single pipeline used by both `SELECT` and
+  `EXPLAIN`.
+- Move to a durable transaction and storage model with explicit format
+  versioning.
 - Tighten SQL/type semantics where current behavior is ambiguous.
 
 ## Non-goals
 
-- Full PostgreSQL compatibility in v1.
-- Distributed storage or network protocol support.
+- Full PostgreSQL compatibility.
+- Distributed storage or a network protocol.
 - Performance tuning before correctness and API clarity.
 
-## Target v1 Architecture
-
-### 1) Engine + Session API
-
-```rust
-pub struct Engine { /* storage, catalog, config */ }
-pub struct Session<'e> { /* txn state, temp objects, settings */ }
-
-pub enum QueryResult {
-    Rows { columns: Vec<ColumnMeta>, rows: Vec<Row> },
-    Command { tag: CommandTag, affected: u64 },
-    Explain { plan: PlanTree },
-}
-
-impl Engine {
-    pub fn open(opts: EngineOptions) -> Result<Self, RustqlError>;
-    pub fn session(&self) -> Session<'_>;
-}
-
-impl Session<'_> {
-    pub fn execute(&mut self, sql: &str) -> Result<Vec<QueryResult>, RustqlError>;
-}
-```
-
-Key break:
-- Remove `process_query(&str) -> Result<String, String>`.
-
-### 2) Typed execution boundary
-
-- All internal execution paths return typed row batches.
-- Text formatting is done only in CLI adapters.
-- Eliminate parse-from-string roundtrips in `INSERT ... SELECT`, aggregate, and grouping paths.
-
-### 3) Transaction and storage model
-
-- WAL is persisted to disk, replayed on startup, and checkpointed.
-- Savepoints only valid inside explicit transactions.
-- Storage format has required version header + migration path.
-
-### 4) Data model updates
-
-- Replace row-position identity (`usize`) with stable row IDs.
-- Index entries point to row IDs, not vector positions.
-- Type comparison and ordering reject undefined cross-type comparisons unless explicit casts exist.
-
-## Milestones
-
-## M0: Branch Cut + Safety Rails (1 week)
-
-Deliverables:
-- Create `v1` feature branch and mark `main` as v0 maintenance-only.
-- Add architecture decision records in `docs/adr/` for API, storage, txn model.
-- Add test harness scaffolding for API-level and storage-level tests.
-
-Acceptance criteria:
-- ADRs approved.
-- CI has separate v0 and v1 jobs.
-
-## M1: New Public API Surface (1 week)
-
-Deliverables:
-- Introduce `Engine`, `Session`, `QueryResult`, `CommandTag`, `ColumnMeta`.
-- New error type boundary returns `RustqlError` directly (no `String` conversion).
-- CLI rewritten to call `Session::execute` and render `QueryResult`.
-
-Breaking changes:
-- Remove old `process_query` export from default API.
-
-Acceptance criteria:
-- REPL and stdin modes still work.
-- Existing SQL smoke tests pass through new API adapter.
-
-## M2: Remove Global Singletons (1 week)
-
-Deliverables:
-- Delete global `DATABASE`, `TRANSACTION_WAL`, and storage singleton usage.
-- Thread `&Engine`/`&mut Session` through parser/planner/executor paths.
-- Make tests instantiate isolated engines with temporary storage roots.
-
-Breaking changes:
-- No implicit global DB state in library mode.
-
-Acceptance criteria:
-- Tests can run in parallel with isolated sessions.
-- Two independent engines in one process do not share state.
-
-## M3: Typed Executor Refactor (2 weeks)
-
-Deliverables:
-- Convert select/dml/ddl paths to return typed results only.
-- Remove all internal text parsing (`parse_value_from_string` loops used as internal glue).
-- Introduce unified output structs for rows and schema metadata.
-
-Breaking changes:
-- Internal modules no longer expose text formatting utilities as primary interfaces.
-
-Acceptance criteria:
-- `INSERT ... SELECT`, grouped queries, aggregates, and set ops have zero text roundtrip paths.
-- Result correctness parity with v0 test corpus.
-
-## M4: Unified Planner/Executor Pipeline (2 weeks)
-
-Deliverables:
-- `SELECT` execution goes through planner -> physical plan -> plan executor.
-- `EXPLAIN` prints the same plan nodes used for execution.
-- Remove duplicate execution logic from legacy select paths.
-
-Breaking changes:
-- Plan shape and explain text can change.
-
-Acceptance criteria:
-- No direct bypass of planner for standard `SELECT` paths.
-- Plan-based tests cover scans, joins, filters, aggregation, limits, sorts.
-
-## M5: Row IDs + Index Redesign (2 weeks)
-
-Deliverables:
-- Add row ID allocation per table.
-- Change index payload from `Vec<usize>` to `Vec<RowId>`.
-- Rework DML, FK checks, and join code to operate on stable IDs.
-
-Breaking changes:
-- On-disk index representation incompatible with v0.
-
-Acceptance criteria:
-- Deletes/updates no longer cause index pointer drift.
-- WAL rollback works correctly after mixed DML sequences.
-
-## M6: Durable WAL + Transaction Semantics (2 weeks)
-
-Deliverables:
-- Write WAL records to disk before applying committed changes.
-- Crash recovery applies/reverts incomplete transactions deterministically.
-- Savepoint semantics aligned to explicit transaction scope.
-
-Breaking changes:
-- `SAVEPOINT` outside transaction returns error.
-- Transaction edge-case behavior may differ from v0.
-
-Acceptance criteria:
-- Recovery tests pass: crash-before-commit, crash-after-commit, nested savepoints.
-- No data loss in power-failure simulation tests.
-
-## M7: Storage Format v2 + Migration Tooling (2 weeks)
-
-Deliverables:
-- Define storage header with `magic + major/minor`.
-- Implement online/offline migration command:
-  - `rustql migrate --from v0 --to v1 --input <path> --output <path> --backup`.
-- Keep JSON debug export/import utilities for diagnostics.
-
-Breaking changes:
-- v1 does not read raw v0 files directly in normal startup path.
-
-Acceptance criteria:
-- Migration tool handles JSON and B-tree v0 inputs.
-- Migrated DB passes validation checks and golden query suite.
-
-## M8: Type Semantics Tightening + Final Cleanup (1-2 weeks)
-
-Deliverables:
-- Enforce explicit coercion rules for comparisons/sorts.
-- Date/time types validated and normalized on write.
-- Remove deprecated v0 compatibility shims.
-
-Breaking changes:
-- Queries that relied on permissive mixed-type behavior now fail with clear errors.
-
-Acceptance criteria:
-- Type behavior documented with examples.
-- Compatibility mode removed or disabled by default at GA.
-
-## Migration Shim Strategy
-
-Shims exist only to reduce adoption pain during v1 pre-GA and early GA.
-
-## Shim A: Legacy API adapter
-
-Provide `rustql::legacy` module (or separate `rustql-compat` crate):
-
-```rust
-pub fn process_query(sql: &str) -> Result<String, String>
-```
-
-Implementation:
-- Internally creates/uses a process-local default `Engine` + `Session`.
-- Executes SQL using v1 typed API.
-- Formats typed results into v0-style text table output.
-
-Removal window:
-- Available through v1.2.
-- Removed in v1.3.
-
-## Shim B: Legacy output formatter
-
-- Keep `legacy::format_query_result(&QueryResult) -> String` for clients that still consume text.
-- Encourage direct typed consumption via examples and docs.
-
-Removal window:
-- Deprecated in v1.1.
-- Removed in v1.3.
-
-## Shim C: SQL compatibility mode
-
-Session setting:
-- `SET compatibility_mode = 'v0';`
-
-Scope:
-- Limited to known semantic differences only (for example mixed-type ordering fallback).
-- Explicit warning emitted in command result metadata.
-
-Removal window:
-- Off by default in v1.0.
-- Removed in v1.2.
-
-## Shim D: Storage migration bridge
-
-- `rustql migrate` utility performs one-time conversion and validation.
-- Startup error in v1 when opening unknown/old format includes exact migration command.
-
-Removal window:
-- Keep indefinitely for at least one major cycle.
-
-## Release Timeline
-
-- v1.0.0-alpha1: M1-M3 complete, legacy API shim included.
-- v1.0.0-beta1: M4-M6 complete, migration tool available.
-- v1.0.0-rc1: M7 complete, compatibility mode off by default.
-- v1.0.0: M8 complete, docs + migration guides finalized.
-- v1.2.0: remove compatibility mode.
-- v1.3.0: remove legacy API/output shims.
-
-## Workstreams and Ownership
-
-- API/runtime: `src/lib.rs`, `src/main.rs`, executor boundary.
-- Planner/executor unification: `src/planner.rs`, `src/plan_executor.rs`, `src/executor/select.rs`.
-- Storage/WAL: `src/storage.rs`, `src/wal.rs`, `src/database.rs`.
-- Migration tooling: new `src/bin/rustql-migrate.rs` + validation checks.
-- Test migration: `tests/` split into `tests/v0_compat/` and `tests/v1/`.
-
-## Test and Quality Gates
-
-Required gates per milestone:
-
-- Unit tests for all new public API types and error paths.
-- Differential tests comparing v0/v1 behavior where parity is required.
-- Crash/recovery tests for WAL durability milestones.
-- Storage format fuzz tests for header parsing and corruption handling.
-- Performance baseline checks on representative read/write workloads.
-
-## Known Risks and Mitigations
-
-- Risk: Refactor scope too broad.
-  - Mitigation: enforce milestone boundaries; no cross-milestone spillover without sign-off.
-- Risk: Compatibility shim becomes permanent.
-  - Mitigation: time-box removals in milestone and release criteria.
-- Risk: Query regressions during planner unification.
-  - Mitigation: run full existing suite + add plan-shape golden tests.
-- Risk: Migration tool trust gap.
-  - Mitigation: checksums, dry-run mode, and post-migration validator.
-
-## Definition of Done (v1 GA)
-
-- New API is the only default public API.
-- No global singleton state in runtime path.
-- Planner drives all query execution paths.
-- Durable WAL recovery demonstrated in automated crash tests.
-- Storage v2 fully versioned and migration documented.
-- Compatibility shims are optional and clearly deprecated.
+## Current Status
+
+| Area | Status | Current implementation | Remaining work |
+|------|--------|------------------------|----------------|
+| Public engine/session API | Done | `src/engine.rs` defines `EngineOptions`, `Engine`, `Session`, `QueryResult`, `CommandTag`, `ColumnMeta`, and `RowBatch`; `src/lib.rs` exports the typed API. The CLI opens an engine and renders typed results at the edge. | Keep README/API examples aligned with the typed API. |
+| Legacy `process_query` API | Done | No `process_query` function is exported from `src/`. The only remaining `process_query` helper lives in `tests/common/mod.rs` for compatibility-style test rendering. | Add a separate public compatibility module only if there is a supported migration need. |
+| Global runtime state | Done | `Engine` owns an `ExecutionContext` with per-engine `Database`, `WalState`, and optional storage. Tests cover isolated engines and transaction state. | None known. |
+| Typed execution boundary | Partial | Public execution returns typed `QueryResult` values, and CLI/test renderers convert to text outside the API boundary. `SELECT` results are converted to `RowBatch`. | Remove or quarantine old internal text helpers, including unused `parse_value_from_string` and aggregate string table formatting paths. |
+| Planner/executor pipeline | Partial | `PlanExecutor` and planner-backed `PlanNode` execution handle supported `SELECT` forms, and `EXPLAIN` returns planner nodes. | `can_execute_via_plan` still gates unsupported constructs and falls back to legacy select code for some CTE, subquery, set-op, and materialized-source paths. |
+| Row IDs and index storage | Done | `src/database.rs` has `RowId`, per-table `row_ids`, and `next_row_id`. Regular and composite indexes store `Vec<RowId>`, and DML, WAL rollback, index maintenance, and storage normalization use stable row IDs. | Keep new table/index work on row IDs; do not persist vector positions as row identity. |
+| Transactions and WAL | Partial | `WalState` supports rollback and savepoints. B-tree storage writes a versioned `.wal` transaction journal for pending and committed states and recovers committed journals on load. | JSON storage has no durable transaction journal, and the B-tree journal is not a general replay log of every mutation. |
+| Storage format versioning | Partial | B-tree files use magic/version headers and currently read legacy version 2 plus the current version 3. The B-tree journal also has a magic/version header. | JSON storage remains raw JSON. Decide whether JSON is debug-only or needs a versioned envelope. |
+| Migration tooling | Open | There is no `src/bin` migration tool and no `rustql migrate` command. | Add a converter and validator only if v0 files need one-way migration into the current storage format. |
+| Type semantics | Partial | Mixed nonnumeric comparisons return type mismatch errors; integer/float comparisons are intentionally numeric-compatible; date/time casts exist. | Normalize date/time values on write, tighten casts that still accept arbitrary text, and document sort/coercion rules. |
+| Compatibility mode and shims | Deferred | No runtime compatibility mode and no public legacy module exist. | Reopen only if users need a supported transition window. |
+| Test and CI gates | Partial | GitHub Actions runs MSRV check, fmt, clippy, build, tests, and a benchmark smoke profile. Tests cover API, planner, recovery, typed rows, and row IDs. | There are no separate v0/v1 jobs, ADRs, storage fuzz tests, or migration validation suite. |
+
+## Current Priorities
+
+| Priority | Work | Reason |
+|----------|------|--------|
+| 1 | Finish or explicitly document planner fallback paths. | This is the largest remaining gap between the target architecture and runtime behavior. |
+| 2 | Decide JSON storage status. | Storage versioning and transaction guarantees differ between JSON and B-tree backends. |
+| 3 | Remove stale internal compatibility helpers. | The public API is typed, but old text-format helpers still make the architecture harder to reason about. |
+| 4 | Document and test type coercion rules. | Mixed-type comparisons are stricter now, but cast and date/time behavior still needs a crisp contract. |

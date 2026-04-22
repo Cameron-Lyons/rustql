@@ -6,7 +6,6 @@ use crate::executor::ddl::{IndexUsage, find_index_usage};
 use crate::executor::expr::compare_values_same_type;
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::fmt;
 
 const DEFAULT_GENERATE_SERIES_ROWS: usize = 100;
 const DEFAULT_LATERAL_ROWS: usize = 10;
@@ -36,118 +35,12 @@ const SELECTIVITY_DEFAULT: f64 = 0.5;
 const SELECTIVITY_EQUAL_JOIN: f64 = 0.1;
 const SELECTIVITY_NON_EQUAL_JOIN: f64 = 0.01;
 const INDEX_RANGE_SELECTIVITY: f64 = 0.1;
+const LATERAL_OUTER_TABLE_PREFIX: &str = "__lateral_outer_";
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum PlanNode {
-    OneRow {
-        cost: f64,
-        rows: usize,
-    },
+mod plan_node;
 
-    SeqScan {
-        table: String,
-        output_label: Option<String>,
-        filter: Option<Expression>,
-        cost: f64,
-        rows: usize,
-    },
+pub use plan_node::PlanNode;
 
-    IndexScan {
-        table: String,
-        index: String,
-        output_label: Option<String>,
-        filter: Option<Expression>,
-        cost: f64,
-        rows: usize,
-    },
-
-    FunctionScan {
-        function: TableFunction,
-        output_label: Option<String>,
-        filter: Option<Expression>,
-        cost: f64,
-        rows: usize,
-    },
-
-    ValuesScan {
-        values: Vec<Vec<Expression>>,
-        columns: Vec<String>,
-        filter: Option<Expression>,
-        cost: f64,
-        rows: usize,
-    },
-
-    NestedLoopJoin {
-        left: Box<PlanNode>,
-        right: Box<PlanNode>,
-        join_type: JoinType,
-        condition: Expression,
-        cost: f64,
-        rows: usize,
-    },
-
-    HashJoin {
-        left: Box<PlanNode>,
-        right: Box<PlanNode>,
-        condition: Expression,
-        cost: f64,
-        rows: usize,
-    },
-
-    LateralJoin {
-        left: Box<PlanNode>,
-        subquery: Box<SelectStatement>,
-        alias: String,
-        right_columns: Vec<String>,
-        join_type: JoinType,
-        condition: Expression,
-        cost: f64,
-        rows: usize,
-    },
-
-    Filter {
-        input: Box<PlanNode>,
-        condition: Expression,
-        cost: f64,
-        rows: usize,
-    },
-
-    Sort {
-        input: Box<PlanNode>,
-        order_by: Vec<OrderByExpr>,
-        cost: f64,
-        rows: usize,
-    },
-
-    DistinctOn {
-        input: Box<PlanNode>,
-        distinct_on: Vec<Expression>,
-        cost: f64,
-        rows: usize,
-    },
-
-    Limit {
-        input: Box<PlanNode>,
-        limit: usize,
-        offset: usize,
-        with_ties: bool,
-        order_by: Vec<OrderByExpr>,
-        cost: f64,
-        rows: usize,
-    },
-
-    Aggregate {
-        input: Box<PlanNode>,
-        group_by: Vec<Expression>,
-        grouping_sets: Option<Vec<Vec<Expression>>>,
-        aggregates: Vec<AggregateFunction>,
-        having: Option<Expression>,
-        cost: f64,
-        rows: usize,
-    },
-}
-
-#[derive(Debug, Clone)]
 pub struct TableStats {
     pub row_count: usize,
     pub column_stats: HashMap<String, ColumnStats>,
@@ -172,12 +65,38 @@ impl<'a> QueryPlanner<'a> {
     }
 
     pub fn plan_select(&self, stmt: &SelectStatement) -> Result<PlanNode, RustqlError> {
+        if let Some((ref set_op, ref right_stmt)) = stmt.set_op {
+            return self.plan_set_operation(stmt, right_stmt, set_op);
+        }
+
         if stmt.from.is_empty() && stmt.from_function.is_none() {
             return Ok(self.plan_constant_select(stmt));
         }
 
         let db = self.db;
-        let join_tables: HashSet<String> = stmt.joins.iter().map(|j| j.table.clone()).collect();
+        let mut join_tables: HashSet<String> = HashSet::new();
+        for join in &stmt.joins {
+            join_tables.insert(join.table.clone());
+            if let Some(alias) = join.table_alias.as_ref() {
+                join_tables.insert(alias.clone());
+            }
+        }
+        let mut base_tables: HashSet<String> = HashSet::new();
+        if !stmt.from.is_empty() {
+            base_tables.insert(stmt.from.clone());
+        }
+        if let Some(alias) = stmt.from_alias.as_ref() {
+            base_tables.insert(alias.clone());
+        }
+        if let Some((_, alias, _)) = stmt.from_values.as_ref() {
+            base_tables.insert(alias.clone());
+        }
+        if let Some(function) = stmt.from_function.as_ref()
+            && let Some(alias) = function.alias.as_ref()
+        {
+            base_tables.insert(alias.clone());
+        }
+        let base_column_names = self.base_column_names(stmt);
 
         let (base_filter, remaining_predicates) = if let Some(ref where_expr) = stmt.where_clause {
             let conjuncts = self.extract_conjuncts(where_expr);
@@ -186,10 +105,13 @@ impl<'a> QueryPlanner<'a> {
 
             for conj in conjuncts {
                 let refs = self.referenced_tables(&conj);
-                if refs.is_empty()
-                    || (refs.len() == 1 && refs.contains(&stmt.from))
-                    || (!refs.iter().any(|r| join_tables.contains(r)) && refs.len() <= 1)
-                {
+                let pushable_unqualified = refs.is_empty()
+                    && (stmt.joins.is_empty()
+                        || self.unqualified_columns_resolve_to_base(&conj, &base_column_names));
+                let pushable_base_refs = !refs.is_empty()
+                    && refs.iter().all(|reference| base_tables.contains(reference))
+                    && self.unqualified_columns_resolve_to_base(&conj, &base_column_names);
+                if pushable_unqualified || pushable_base_refs {
                     base_preds.push(conj);
                 } else {
                     rest.push(conj);
@@ -201,11 +123,12 @@ impl<'a> QueryPlanner<'a> {
             (None, Vec::new())
         };
 
-        let base_output_label = if stmt.joins.is_empty() {
-            None
-        } else {
-            Some(stmt.from_alias.clone().unwrap_or_else(|| stmt.from.clone()))
-        };
+        let base_output_label =
+            if stmt.joins.is_empty() || stmt.from.starts_with(LATERAL_OUTER_TABLE_PREFIX) {
+                None
+            } else {
+                Some(stmt.from_alias.clone().unwrap_or_else(|| stmt.from.clone()))
+            };
 
         let mut plan = if let Some((values, _alias, column_aliases)) = stmt.from_values.as_ref() {
             self.plan_values_access(values, column_aliases, base_filter.as_ref())
@@ -319,6 +242,39 @@ impl<'a> QueryPlanner<'a> {
         }
 
         plan
+    }
+
+    fn plan_set_operation(
+        &self,
+        stmt: &SelectStatement,
+        right_stmt: &SelectStatement,
+        op: &SetOperation,
+    ) -> Result<PlanNode, RustqlError> {
+        let mut left_stmt = stmt.clone();
+        left_stmt.set_op = None;
+        let right_stmt = right_stmt.clone();
+
+        let left_plan = self.plan_select(&left_stmt)?;
+        let right_plan = self.plan_select(&right_stmt)?;
+        let left_rows = self.estimate_rows(&left_plan);
+        let right_rows = self.estimate_rows(&right_plan);
+        let rows = match op {
+            SetOperation::UnionAll => left_rows.saturating_add(right_rows),
+            SetOperation::Union => left_rows.saturating_add(right_rows),
+            SetOperation::Intersect | SetOperation::IntersectAll => left_rows.min(right_rows),
+            SetOperation::Except | SetOperation::ExceptAll => left_rows,
+        };
+        let cost = self.estimate_cost(&left_plan) + self.estimate_cost(&right_plan);
+
+        Ok(PlanNode::SetOperation {
+            left: Box::new(left_plan),
+            right: Box::new(right_plan),
+            left_select: Box::new(left_stmt),
+            right_select: Box::new(right_stmt),
+            op: op.clone(),
+            cost,
+            rows,
+        })
     }
 
     fn plan_values_access(
@@ -435,7 +391,13 @@ impl<'a> QueryPlanner<'a> {
         let mut left_columns = self
             .db
             .get_table(&stmt.from)
-            .map(|table| self.qualified_column_definitions(&table.columns, &base_label))
+            .map(|table| {
+                if stmt.from.starts_with(LATERAL_OUTER_TABLE_PREFIX) {
+                    table.columns.clone()
+                } else {
+                    self.qualified_column_definitions(&table.columns, &base_label)
+                }
+            })
             .unwrap_or_default();
 
         for join in stmt.joins.clone() {
@@ -468,6 +430,11 @@ impl<'a> QueryPlanner<'a> {
                 .table_alias
                 .clone()
                 .unwrap_or_else(|| join.table.clone());
+            let right_output_label = if join.table.starts_with(LATERAL_OUTER_TABLE_PREFIX) {
+                None
+            } else {
+                Some(right_label.clone())
+            };
 
             let mut pushable = Vec::new();
             let mut kept = Vec::new();
@@ -487,7 +454,7 @@ impl<'a> QueryPlanner<'a> {
                 &join.table,
                 right_table,
                 &right_stats,
-                Some(right_label.clone()),
+                right_output_label,
                 right_filter.as_ref(),
                 db,
             )?;
@@ -515,8 +482,12 @@ impl<'a> QueryPlanner<'a> {
             };
 
             current_plan = join_plan;
-            left_columns
-                .extend(self.qualified_column_definitions(&right_table.columns, &right_label));
+            if join.table.starts_with(LATERAL_OUTER_TABLE_PREFIX) {
+                left_columns.extend(right_table.columns.clone());
+            } else {
+                left_columns
+                    .extend(self.qualified_column_definitions(&right_table.columns, &right_label));
+            }
         }
 
         if !remaining_predicates.is_empty()
@@ -645,13 +616,94 @@ impl<'a> QueryPlanner<'a> {
     }
 
     fn resolve_order_by_alias(&self, stmt: &SelectStatement, expr: &Expression) -> Expression {
+        self.resolve_order_by_expression(stmt, expr, true)
+    }
+
+    fn resolve_order_by_expression(
+        &self,
+        stmt: &SelectStatement,
+        expr: &Expression,
+        allow_ordinal: bool,
+    ) -> Expression {
+        if allow_ordinal
+            && let Expression::Value(Value::Integer(position)) = expr
+            && let Some(resolved) = self.select_ordinal_expression(stmt, *position)
+        {
+            return resolved;
+        }
+
         if let Expression::Column(name) = expr
             && let Some(resolved) = self.select_alias_expression(stmt, name)
         {
             return resolved;
         }
 
-        expr.clone()
+        match expr {
+            Expression::BinaryOp { left, op, right } => Expression::BinaryOp {
+                left: Box::new(self.resolve_order_by_expression(stmt, left, false)),
+                op: op.clone(),
+                right: Box::new(self.resolve_order_by_expression(stmt, right, false)),
+            },
+            Expression::UnaryOp { op, expr } => Expression::UnaryOp {
+                op: op.clone(),
+                expr: Box::new(self.resolve_order_by_expression(stmt, expr, false)),
+            },
+            Expression::ScalarFunction { name, args } => Expression::ScalarFunction {
+                name: name.clone(),
+                args: args
+                    .iter()
+                    .map(|arg| self.resolve_order_by_expression(stmt, arg, false))
+                    .collect(),
+            },
+            Expression::Cast { expr, data_type } => Expression::Cast {
+                expr: Box::new(self.resolve_order_by_expression(stmt, expr, false)),
+                data_type: data_type.clone(),
+            },
+            Expression::Case {
+                operand,
+                when_clauses,
+                else_clause,
+            } => Expression::Case {
+                operand: operand
+                    .as_ref()
+                    .map(|expr| Box::new(self.resolve_order_by_expression(stmt, expr, false))),
+                when_clauses: when_clauses
+                    .iter()
+                    .map(|(condition, result)| {
+                        (
+                            self.resolve_order_by_expression(stmt, condition, false),
+                            self.resolve_order_by_expression(stmt, result, false),
+                        )
+                    })
+                    .collect(),
+                else_clause: else_clause
+                    .as_ref()
+                    .map(|expr| Box::new(self.resolve_order_by_expression(stmt, expr, false))),
+            },
+            Expression::IsDistinctFrom { left, right, not } => Expression::IsDistinctFrom {
+                left: Box::new(self.resolve_order_by_expression(stmt, left, false)),
+                right: Box::new(self.resolve_order_by_expression(stmt, right, false)),
+                not: *not,
+            },
+            _ => expr.clone(),
+        }
+    }
+
+    fn select_ordinal_expression(
+        &self,
+        stmt: &SelectStatement,
+        position: i64,
+    ) -> Option<Expression> {
+        if position < 1 || matches!(stmt.columns.first(), Some(Column::All)) {
+            return None;
+        }
+
+        match stmt.columns.get(position as usize - 1)? {
+            Column::Named { name, .. } => Some(Expression::Column(name.clone())),
+            Column::Expression { expr, .. } => Some(expr.clone()),
+            Column::Function(agg) => Some(Expression::Function(agg.clone())),
+            Column::All | Column::Subquery(_) => None,
+        }
     }
 
     fn select_alias_expression(&self, stmt: &SelectStatement, name: &str) -> Option<Expression> {
@@ -664,6 +716,9 @@ impl<'a> QueryPlanner<'a> {
                 expr,
                 alias: Some(alias),
             } if alias == name => Some(expr.clone()),
+            Column::Function(agg) if agg.alias.as_deref() == Some(name) => {
+                Some(Expression::Function(agg.clone()))
+            }
             _ => None,
         })
     }
@@ -856,6 +911,7 @@ impl<'a> QueryPlanner<'a> {
             PlanNode::DistinctOn { cost, .. } => *cost,
             PlanNode::Limit { cost, .. } => *cost,
             PlanNode::Aggregate { cost, .. } => *cost,
+            PlanNode::SetOperation { cost, .. } => *cost,
         }
     }
 
@@ -874,6 +930,7 @@ impl<'a> QueryPlanner<'a> {
             PlanNode::DistinctOn { rows, .. } => *rows,
             PlanNode::Limit { rows, .. } => *rows,
             PlanNode::Aggregate { rows, .. } => *rows,
+            PlanNode::SetOperation { rows, .. } => *rows,
         }
     }
 
@@ -1228,6 +1285,122 @@ impl<'a> QueryPlanner<'a> {
         }
     }
 
+    fn base_column_names(&self, stmt: &SelectStatement) -> HashSet<String> {
+        if let Some((_, _, aliases)) = stmt.from_values.as_ref() {
+            return aliases.iter().cloned().collect();
+        }
+
+        if let Some(function) = stmt.from_function.as_ref() {
+            return [function
+                .alias
+                .clone()
+                .unwrap_or_else(|| function.name.clone())]
+            .into_iter()
+            .collect();
+        }
+
+        if stmt.from.is_empty() {
+            return HashSet::new();
+        }
+
+        self.db
+            .get_table(&stmt.from)
+            .map(|table| {
+                table
+                    .columns
+                    .iter()
+                    .map(|column| column.name.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn unqualified_columns_resolve_to_base(
+        &self,
+        expr: &Expression,
+        base_column_names: &HashSet<String>,
+    ) -> bool {
+        let mut columns = Vec::new();
+        self.collect_unqualified_column_refs(expr, &mut columns);
+        columns
+            .iter()
+            .all(|column| column == "*" || base_column_names.contains(column))
+    }
+
+    fn collect_unqualified_column_refs(&self, expr: &Expression, columns: &mut Vec<String>) {
+        match expr {
+            Expression::Column(name) => {
+                if !name.contains('.') {
+                    columns.push(name.clone());
+                }
+            }
+            Expression::BinaryOp { left, right, .. } => {
+                self.collect_unqualified_column_refs(left, columns);
+                self.collect_unqualified_column_refs(right, columns);
+            }
+            Expression::UnaryOp { expr, .. } | Expression::IsNull { expr, .. } => {
+                self.collect_unqualified_column_refs(expr, columns);
+            }
+            Expression::In { left, .. } => {
+                self.collect_unqualified_column_refs(left, columns);
+            }
+            Expression::Function(agg) => {
+                self.collect_unqualified_column_refs(&agg.expr, columns);
+                if let Some(filter) = agg.filter.as_deref() {
+                    self.collect_unqualified_column_refs(filter, columns);
+                }
+            }
+            Expression::Case {
+                operand,
+                when_clauses,
+                else_clause,
+            } => {
+                if let Some(operand) = operand {
+                    self.collect_unqualified_column_refs(operand, columns);
+                }
+                for (condition, result) in when_clauses {
+                    self.collect_unqualified_column_refs(condition, columns);
+                    self.collect_unqualified_column_refs(result, columns);
+                }
+                if let Some(else_clause) = else_clause {
+                    self.collect_unqualified_column_refs(else_clause, columns);
+                }
+            }
+            Expression::ScalarFunction { args, .. } => {
+                for arg in args {
+                    self.collect_unqualified_column_refs(arg, columns);
+                }
+            }
+            Expression::WindowFunction {
+                args,
+                partition_by,
+                order_by,
+                ..
+            } => {
+                for arg in args {
+                    self.collect_unqualified_column_refs(arg, columns);
+                }
+                for expr in partition_by {
+                    self.collect_unqualified_column_refs(expr, columns);
+                }
+                for order_expr in order_by {
+                    self.collect_unqualified_column_refs(&order_expr.expr, columns);
+                }
+            }
+            Expression::Cast { expr, .. } => {
+                self.collect_unqualified_column_refs(expr, columns);
+            }
+            Expression::Any { left, .. } | Expression::All { left, .. } => {
+                self.collect_unqualified_column_refs(left, columns);
+            }
+            Expression::IsDistinctFrom { left, right, .. } => {
+                self.collect_unqualified_column_refs(left, columns);
+                self.collect_unqualified_column_refs(right, columns);
+            }
+            Expression::Subquery(_) | Expression::Exists(_) | Expression::Value(_) => {}
+        }
+    }
+
     fn combine_conjuncts(&self, exprs: Vec<Expression>) -> Option<Expression> {
         let mut iter = exprs.into_iter();
         let first = iter.next()?;
@@ -1448,248 +1621,6 @@ impl<'a> QueryPlanner<'a> {
     }
 }
 
-impl fmt::Display for PlanNode {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.fmt_with_indent(f, 0)
-    }
-}
-
-impl PlanNode {
-    fn fmt_with_indent(&self, f: &mut fmt::Formatter<'_>, indent: usize) -> fmt::Result {
-        let indent_str = "  ".repeat(indent);
-        match self {
-            PlanNode::OneRow { cost, rows } => {
-                writeln!(f, "{}Result", indent_str)?;
-                writeln!(f, "{}  Cost: {:.2}, Rows: {}", indent_str, cost, rows)
-            }
-            PlanNode::SeqScan {
-                table,
-                filter,
-                cost,
-                rows,
-                ..
-            } => {
-                writeln!(f, "{}Seq Scan on {}", indent_str, table)?;
-                if filter.is_some() {
-                    writeln!(f, "{}  Filter: [WHERE clause]", indent_str)?;
-                }
-                writeln!(f, "{}  Cost: {:.2}, Rows: {}", indent_str, cost, rows)
-            }
-            PlanNode::FunctionScan {
-                function,
-                filter,
-                cost,
-                rows,
-                ..
-            } => {
-                writeln!(f, "{}Function Scan on {}", indent_str, function.name)?;
-                if filter.is_some() {
-                    writeln!(f, "{}  Filter: [WHERE clause]", indent_str)?;
-                }
-                writeln!(f, "{}  Cost: {:.2}, Rows: {}", indent_str, cost, rows)
-            }
-            PlanNode::ValuesScan {
-                columns,
-                filter,
-                cost,
-                rows,
-                ..
-            } => {
-                writeln!(f, "{}Values Scan", indent_str)?;
-                if !columns.is_empty() {
-                    writeln!(f, "{}  Output: {}", indent_str, columns.join(", "))?;
-                }
-                if filter.is_some() {
-                    writeln!(f, "{}  Filter: [WHERE clause]", indent_str)?;
-                }
-                writeln!(f, "{}  Cost: {:.2}, Rows: {}", indent_str, cost, rows)
-            }
-            PlanNode::IndexScan {
-                table,
-                index,
-                filter,
-                cost,
-                rows,
-                ..
-            } => {
-                writeln!(f, "{}Index Scan using {} on {}", indent_str, index, table)?;
-                if filter.is_some() {
-                    writeln!(f, "{}  Filter: [WHERE clause]", indent_str)?;
-                }
-                writeln!(f, "{}  Cost: {:.2}, Rows: {}", indent_str, cost, rows)
-            }
-            PlanNode::NestedLoopJoin {
-                left,
-                right,
-                join_type,
-                condition: _,
-                cost,
-                rows,
-            } => {
-                let join_label = match join_type {
-                    JoinType::Left => "Nested Loop Left Join",
-                    JoinType::Right => "Nested Loop Right Join",
-                    JoinType::Full => "Nested Loop Full Join",
-                    JoinType::Natural => "Nested Loop Natural Join",
-                    JoinType::Cross => "Nested Loop Cross Join",
-                    _ => "Nested Loop Join",
-                };
-                writeln!(f, "{}{}", indent_str, join_label)?;
-                writeln!(f, "{}  Cost: {:.2}, Rows: {}", indent_str, cost, rows)?;
-                left.fmt_with_indent(f, indent + 1)?;
-                right.fmt_with_indent(f, indent + 1)
-            }
-            PlanNode::HashJoin {
-                left,
-                right,
-                condition: _,
-                cost,
-                rows,
-            } => {
-                writeln!(f, "{}Hash Join", indent_str)?;
-                writeln!(f, "{}  Cost: {:.2}, Rows: {}", indent_str, cost, rows)?;
-                left.fmt_with_indent(f, indent + 1)?;
-                right.fmt_with_indent(f, indent + 1)
-            }
-            PlanNode::LateralJoin {
-                left,
-                alias,
-                right_columns,
-                join_type,
-                condition,
-                cost,
-                rows,
-                ..
-            } => {
-                let join_label = match join_type {
-                    JoinType::Left => "Lateral Left Join",
-                    JoinType::Right => "Lateral Right Join",
-                    JoinType::Full => "Lateral Full Join",
-                    JoinType::Cross => "Lateral Cross Join",
-                    JoinType::Natural => "Lateral Natural Join",
-                    JoinType::Inner => "Lateral Join",
-                };
-                writeln!(f, "{}{}", indent_str, join_label)?;
-                writeln!(f, "{}  Alias: {}", indent_str, alias)?;
-                if !matches!(condition, Expression::Value(Value::Boolean(true))) {
-                    writeln!(f, "{}  Condition: {:?}", indent_str, condition)?;
-                }
-                if !right_columns.is_empty() {
-                    writeln!(f, "{}  Output: {}", indent_str, right_columns.join(", "))?;
-                }
-                writeln!(f, "{}  Cost: {:.2}, Rows: {}", indent_str, cost, rows)?;
-                left.fmt_with_indent(f, indent + 1)
-            }
-            PlanNode::Filter {
-                input,
-                condition: _,
-                cost,
-                rows,
-            } => {
-                writeln!(f, "{}Filter", indent_str)?;
-                writeln!(f, "{}  Cost: {:.2}, Rows: {}", indent_str, cost, rows)?;
-                input.fmt_with_indent(f, indent + 1)
-            }
-            PlanNode::Sort {
-                input,
-                order_by: _,
-                cost,
-                rows,
-            } => {
-                writeln!(f, "{}Sort", indent_str)?;
-                writeln!(f, "{}  Cost: {:.2}, Rows: {}", indent_str, cost, rows)?;
-                input.fmt_with_indent(f, indent + 1)
-            }
-            PlanNode::DistinctOn {
-                input,
-                distinct_on,
-                cost,
-                rows,
-            } => {
-                let distinct_strs: Vec<String> = distinct_on
-                    .iter()
-                    .map(|expr| format!("{:?}", expr))
-                    .collect();
-                writeln!(
-                    f,
-                    "{}Distinct On ({})",
-                    indent_str,
-                    distinct_strs.join(", ")
-                )?;
-                writeln!(f, "{}  Cost: {:.2}, Rows: {}", indent_str, cost, rows)?;
-                input.fmt_with_indent(f, indent + 1)
-            }
-            PlanNode::Limit {
-                input,
-                limit,
-                offset,
-                with_ties,
-                order_by,
-                cost,
-                rows,
-            } => {
-                let with_ties_suffix = if *with_ties && !order_by.is_empty() {
-                    " With Ties"
-                } else {
-                    ""
-                };
-                writeln!(
-                    f,
-                    "{}Limit: {} Offset: {}{}",
-                    indent_str, limit, offset, with_ties_suffix
-                )?;
-                writeln!(f, "{}  Cost: {:.2}, Rows: {}", indent_str, cost, rows)?;
-                input.fmt_with_indent(f, indent + 1)
-            }
-            PlanNode::Aggregate {
-                input,
-                group_by,
-                grouping_sets,
-                aggregates: _,
-                having: _,
-                cost,
-                rows,
-            } => {
-                if let Some(sets) = grouping_sets {
-                    let grouping_set_strs: Vec<String> = sets
-                        .iter()
-                        .map(|set| {
-                            if set.is_empty() {
-                                "()".to_string()
-                            } else {
-                                format!(
-                                    "({})",
-                                    set.iter()
-                                        .map(|expr| format!("{:?}", expr))
-                                        .collect::<Vec<_>>()
-                                        .join(", ")
-                                )
-                            }
-                        })
-                        .collect();
-                    writeln!(
-                        f,
-                        "{}Aggregate (Grouping Sets: {})",
-                        indent_str,
-                        grouping_set_strs.join(", ")
-                    )?;
-                } else {
-                    let group_by_strs: Vec<String> =
-                        group_by.iter().map(|e| format!("{:?}", e)).collect();
-                    writeln!(
-                        f,
-                        "{}Aggregate (Group By: {})",
-                        indent_str,
-                        group_by_strs.join(", ")
-                    )?;
-                }
-                writeln!(f, "{}  Cost: {:.2}, Rows: {}", indent_str, cost, rows)?;
-                input.fmt_with_indent(f, indent + 1)
-            }
-        }
-    }
-}
-
 pub fn explain_query(
     db: &dyn DatabaseCatalog,
     stmt: &SelectStatement,
@@ -1704,11 +1635,4 @@ pub fn plan_query(
     stmt: &SelectStatement,
 ) -> Result<PlanNode, RustqlError> {
     QueryPlanner::new(db).plan_select(stmt)
-}
-
-pub(crate) fn infer_select_output_columns(
-    db: &dyn DatabaseCatalog,
-    stmt: &SelectStatement,
-) -> Result<Vec<ColumnDefinition>, RustqlError> {
-    QueryPlanner::new(db).infer_select_output_columns(stmt)
 }

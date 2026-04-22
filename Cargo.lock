@@ -75,6 +75,7 @@ name = "rustql"
 version = "0.1.0"
 dependencies = [
  "regex",
+ "rustql",
  "serde",
  "serde_json",
 ]

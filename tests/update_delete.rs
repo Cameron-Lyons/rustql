@@ -1,5 +1,5 @@
 mod common;
-use common::{execute, reset_database};
+use common::*;
 use rustql::ast::*;
 
 #[test]
@@ -61,7 +61,7 @@ fn test_update_and_delete() {
         returning: None,
     });
 
-    assert_eq!(execute(update).unwrap(), "1 row(s) updated");
+    assert_command(execute(update).unwrap(), CommandTag::Update, 1);
 
     let delete = Statement::Delete(DeleteStatement {
         table: "users".into(),
@@ -70,5 +70,5 @@ fn test_update_and_delete() {
         returning: None,
     });
 
-    assert_eq!(execute(delete).unwrap(), "1 row(s) deleted");
+    assert_command(execute(delete).unwrap(), CommandTag::Delete, 1);
 }

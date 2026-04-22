@@ -1,5 +1,5 @@
 mod common;
-use common::render_result;
+use common::*;
 use rustql::{Engine, EngineOptions, StorageMode};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -36,7 +36,7 @@ fn test_persisted_state_after_reload() {
         .execute_one("SELECT * FROM recovery_users")
         .unwrap();
 
-    assert!(render_result(&result).contains("Alice"), "got: {result:?}");
+    assert!(result.contains("Alice"), "got: {result:?}");
     cleanup_storage_files(&path);
 }
 
@@ -66,7 +66,7 @@ fn test_rolled_back_changes_not_recovered_after_reload() {
         .execute_one("SELECT * FROM recovery_tx")
         .unwrap();
 
-    assert!(!render_result(&result).contains("temp"), "got: {result:?}");
+    assert!(!result.contains("temp"), "got: {result:?}");
     cleanup_storage_files(&path);
 }
 
@@ -96,21 +96,23 @@ fn test_partial_index_filter_persists_across_reload() {
 
     let reloaded = open_disk_engine(&path);
     let mut reloaded_session = reloaded.session();
-    let without_filter = render_result(
+    let without_filter = query_output_lines(
         &reloaded_session
             .execute_one("EXPLAIN SELECT id FROM recovery_pidx WHERE val = 10")
             .unwrap(),
-    );
+    )
+    .join("\n");
     assert!(
         !without_filter.contains("Index Scan using idx_recovery_active"),
         "unexpected partial-index use after reload: {without_filter}"
     );
 
-    let with_filter = render_result(
+    let with_filter = query_output_lines(
         &reloaded_session
             .execute_one("EXPLAIN SELECT id FROM recovery_pidx WHERE val = 10 AND active = 1")
             .unwrap(),
-    );
+    )
+    .join("\n");
     assert!(
         with_filter.contains("Index Scan using idx_recovery_active"),
         "missing partial-index use after reload: {with_filter}"

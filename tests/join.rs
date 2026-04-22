@@ -1,5 +1,6 @@
 mod common;
-use common::{process_query, reset_database};
+use common::*;
+use rustql::ast::Value;
 use std::sync::Mutex;
 
 static GLOBAL_TEST_LOCK: Mutex<()> = Mutex::new(());
@@ -14,14 +15,14 @@ fn setup_test() -> std::sync::MutexGuard<'static, ()> {
 fn test_inner_join() {
     let _guard = setup_test();
 
-    process_query("CREATE TABLE users (id INTEGER, name TEXT, email TEXT)").unwrap();
-    process_query("CREATE TABLE orders (id INTEGER, user_id INTEGER, product TEXT, price FLOAT)")
+    execute_sql("CREATE TABLE users (id INTEGER, name TEXT, email TEXT)").unwrap();
+    execute_sql("CREATE TABLE orders (id INTEGER, user_id INTEGER, product TEXT, price FLOAT)")
         .unwrap();
-    process_query("INSERT INTO users VALUES (1, 'Alice', 'alice@example.com'), (2, 'Bob', 'bob@example.com'), (3, 'Charlie', 'charlie@example.com')").unwrap();
-    process_query("INSERT INTO orders VALUES (101, 1, 'Laptop', 999.99), (102, 1, 'Mouse', 29.99), (103, 2, 'Keyboard', 79.99)").unwrap();
+    execute_sql("INSERT INTO users VALUES (1, 'Alice', 'alice@example.com'), (2, 'Bob', 'bob@example.com'), (3, 'Charlie', 'charlie@example.com')").unwrap();
+    execute_sql("INSERT INTO orders VALUES (101, 1, 'Laptop', 999.99), (102, 1, 'Mouse', 29.99), (103, 2, 'Keyboard', 79.99)").unwrap();
 
     let result =
-        process_query("SELECT name, product FROM users JOIN orders ON users.id = orders.user_id")
+        execute_sql("SELECT name, product FROM users JOIN orders ON users.id = orders.user_id")
             .unwrap();
 
     assert!(result.contains("Alice"));
@@ -36,13 +37,13 @@ fn test_inner_join() {
 fn test_left_join() {
     let _guard = setup_test();
 
-    process_query("CREATE TABLE users (id INTEGER, name TEXT)").unwrap();
-    process_query("CREATE TABLE orders (id INTEGER, user_id INTEGER, product TEXT)").unwrap();
+    execute_sql("CREATE TABLE users (id INTEGER, name TEXT)").unwrap();
+    execute_sql("CREATE TABLE orders (id INTEGER, user_id INTEGER, product TEXT)").unwrap();
 
-    process_query("INSERT INTO users VALUES (1, 'Alice'), (2, 'Bob'), (3, 'Charlie')").unwrap();
-    process_query("INSERT INTO orders VALUES (101, 1, 'Laptop'), (102, 2, 'Keyboard')").unwrap();
+    execute_sql("INSERT INTO users VALUES (1, 'Alice'), (2, 'Bob'), (3, 'Charlie')").unwrap();
+    execute_sql("INSERT INTO orders VALUES (101, 1, 'Laptop'), (102, 2, 'Keyboard')").unwrap();
 
-    let result = process_query("SELECT users.name, orders.product FROM users LEFT JOIN orders ON users.id = orders.user_id").unwrap();
+    let result = execute_sql("SELECT users.name, orders.product FROM users LEFT JOIN orders ON users.id = orders.user_id").unwrap();
 
     assert!(result.contains("Alice"));
     assert!(result.contains("Bob"));
@@ -56,15 +57,15 @@ fn test_left_join() {
 fn test_join_with_where_clause() {
     let _guard = setup_test();
 
-    process_query("CREATE TABLE users (id INTEGER, name TEXT, age INTEGER)").unwrap();
-    process_query("CREATE TABLE orders (id INTEGER, user_id INTEGER, product TEXT, price FLOAT)")
+    execute_sql("CREATE TABLE users (id INTEGER, name TEXT, age INTEGER)").unwrap();
+    execute_sql("CREATE TABLE orders (id INTEGER, user_id INTEGER, product TEXT, price FLOAT)")
         .unwrap();
 
-    process_query("INSERT INTO users VALUES (1, 'Alice', 30), (2, 'Bob', 25), (3, 'Charlie', 35)")
+    execute_sql("INSERT INTO users VALUES (1, 'Alice', 30), (2, 'Bob', 25), (3, 'Charlie', 35)")
         .unwrap();
-    process_query("INSERT INTO orders VALUES (101, 1, 'Laptop', 999.99), (102, 2, 'Mouse', 29.99), (103, 3, 'Keyboard', 79.99)").unwrap();
+    execute_sql("INSERT INTO orders VALUES (101, 1, 'Laptop', 999.99), (102, 2, 'Mouse', 29.99), (103, 3, 'Keyboard', 79.99)").unwrap();
 
-    let result = process_query("SELECT users.name, orders.price FROM users JOIN orders ON users.id = orders.user_id WHERE orders.price > 50").unwrap();
+    let result = execute_sql("SELECT users.name, orders.price FROM users JOIN orders ON users.id = orders.user_id WHERE orders.price > 50").unwrap();
 
     assert!(result.contains("Alice"));
     assert!(result.contains("999.99"));
@@ -78,16 +79,16 @@ fn test_join_with_where_clause() {
 fn test_join_with_specific_columns() {
     let _guard = setup_test();
 
-    process_query("CREATE TABLE users (id INTEGER, name TEXT, email TEXT)").unwrap();
-    process_query(
+    execute_sql("CREATE TABLE users (id INTEGER, name TEXT, email TEXT)").unwrap();
+    execute_sql(
         "CREATE TABLE orders (id INTEGER, user_id INTEGER, product TEXT, quantity INTEGER)",
     )
     .unwrap();
 
-    process_query("INSERT INTO users VALUES (1, 'Alice', 'alice@example.com')").unwrap();
-    process_query("INSERT INTO orders VALUES (101, 1, 'Laptop', 2), (102, 1, 'Mouse', 5)").unwrap();
+    execute_sql("INSERT INTO users VALUES (1, 'Alice', 'alice@example.com')").unwrap();
+    execute_sql("INSERT INTO orders VALUES (101, 1, 'Laptop', 2), (102, 1, 'Mouse', 5)").unwrap();
 
-    let result = process_query("SELECT users.name, orders.product, orders.quantity FROM users JOIN orders ON users.id = orders.user_id").unwrap();
+    let result = execute_sql("SELECT users.name, orders.product, orders.quantity FROM users JOIN orders ON users.id = orders.user_id").unwrap();
 
     assert!(result.contains("Alice"));
     assert!(result.contains("Laptop"));
@@ -100,34 +101,52 @@ fn test_join_with_specific_columns() {
 fn test_join_all_columns() {
     let _guard = setup_test();
 
-    process_query("CREATE TABLE users (id INTEGER, name TEXT)").unwrap();
-    process_query("CREATE TABLE orders (id INTEGER, user_id INTEGER, product TEXT)").unwrap();
+    execute_sql("CREATE TABLE users (id INTEGER, name TEXT)").unwrap();
+    execute_sql("CREATE TABLE orders (id INTEGER, user_id INTEGER, product TEXT)").unwrap();
 
-    process_query("INSERT INTO users VALUES (1, 'Alice'), (2, 'Bob')").unwrap();
-    process_query("INSERT INTO orders VALUES (101, 1, 'Laptop'), (102, 2, 'Keyboard')").unwrap();
+    execute_sql("INSERT INTO users VALUES (1, 'Alice'), (2, 'Bob')").unwrap();
+    execute_sql("INSERT INTO orders VALUES (101, 1, 'Laptop'), (102, 2, 'Keyboard')").unwrap();
 
-    let result =
-        process_query("SELECT * FROM users JOIN orders ON users.id = orders.user_id").unwrap();
-
-    assert!(result.contains("id"));
-    assert!(result.contains("name"));
-    assert!(result.contains("user_id"));
-    assert!(result.contains("product"));
-    assert!(result.contains("Alice"));
-    assert!(result.contains("Laptop"));
+    let rows = query_rows("SELECT * FROM users JOIN orders ON users.id = orders.user_id").unwrap();
+    rows.assert_columns(&[
+        "users.id",
+        "users.name",
+        "orders.id",
+        "orders.user_id",
+        "orders.product",
+    ]);
+    assert_eq!(
+        rows.rows,
+        vec![
+            vec![
+                Value::Integer(1),
+                Value::Text("Alice".into()),
+                Value::Integer(101),
+                Value::Integer(1),
+                Value::Text("Laptop".into()),
+            ],
+            vec![
+                Value::Integer(2),
+                Value::Text("Bob".into()),
+                Value::Integer(102),
+                Value::Integer(2),
+                Value::Text("Keyboard".into()),
+            ],
+        ]
+    );
 }
 
 #[test]
 fn test_join_column_aliases() {
     let _guard = setup_test();
 
-    process_query("CREATE TABLE users (id INTEGER, name TEXT)").unwrap();
-    process_query("CREATE TABLE orders (id INTEGER, user_id INTEGER, product TEXT)").unwrap();
+    execute_sql("CREATE TABLE users (id INTEGER, name TEXT)").unwrap();
+    execute_sql("CREATE TABLE orders (id INTEGER, user_id INTEGER, product TEXT)").unwrap();
 
-    process_query("INSERT INTO users VALUES (1, 'Alice'), (2, 'Bob')").unwrap();
-    process_query("INSERT INTO orders VALUES (101, 1, 'Laptop'), (102, 2, 'Keyboard')").unwrap();
+    execute_sql("INSERT INTO users VALUES (1, 'Alice'), (2, 'Bob')").unwrap();
+    execute_sql("INSERT INTO orders VALUES (101, 1, 'Laptop'), (102, 2, 'Keyboard')").unwrap();
 
-    let result = process_query("SELECT users.name AS user_name, orders.product AS product_name FROM users JOIN orders ON users.id = orders.user_id ORDER BY user_name").unwrap();
+    let result = execute_sql("SELECT users.name AS user_name, orders.product AS product_name FROM users JOIN orders ON users.id = orders.user_id ORDER BY user_name").unwrap();
 
     let mut lines = result.lines();
     let header = lines.next().unwrap();
@@ -137,7 +156,7 @@ fn test_join_column_aliases() {
     let separator = lines.next().unwrap();
     assert!(separator.chars().all(|c| c == '-'));
 
-    let rows: Vec<&str> = lines.collect();
+    let rows: Vec<String> = lines.collect();
     assert_eq!(rows.len(), 2);
     assert!(rows[0].contains("Alice") && rows[0].contains("Laptop"));
     assert!(rows[1].contains("Bob") && rows[1].contains("Keyboard"));
@@ -147,10 +166,10 @@ fn test_join_column_aliases() {
 fn test_join_missing_table() {
     let _guard = setup_test();
 
-    process_query("CREATE TABLE users (id INTEGER, name TEXT)").unwrap();
+    execute_sql("CREATE TABLE users (id INTEGER, name TEXT)").unwrap();
 
     let result =
-        process_query("SELECT * FROM users JOIN nonexistent ON users.id = nonexistent.user_id");
+        execute_sql("SELECT * FROM users JOIN nonexistent ON users.id = nonexistent.user_id");
     assert!(result.is_err());
     assert!(result.unwrap_err().contains("does not exist"));
 }
@@ -159,10 +178,10 @@ fn test_join_missing_table() {
 fn test_join_invalid_column() {
     let _guard = setup_test();
 
-    process_query("CREATE TABLE users (id INTEGER, name TEXT)").unwrap();
-    process_query("CREATE TABLE orders (id INTEGER, user_id INTEGER, product TEXT)").unwrap();
+    execute_sql("CREATE TABLE users (id INTEGER, name TEXT)").unwrap();
+    execute_sql("CREATE TABLE orders (id INTEGER, user_id INTEGER, product TEXT)").unwrap();
 
-    let result = process_query(
+    let result = execute_sql(
         "SELECT users.nonexistent, orders.product FROM users JOIN orders ON users.id = orders.user_id",
     );
     assert!(result.is_err());
@@ -172,12 +191,12 @@ fn test_join_invalid_column() {
 fn test_join_invalid_on_column() {
     let _guard = setup_test();
 
-    process_query("CREATE TABLE users (id INTEGER, name TEXT)").unwrap();
-    process_query("CREATE TABLE orders (id INTEGER, user_id INTEGER, product TEXT)").unwrap();
-    process_query("INSERT INTO users VALUES (1, 'Alice')").unwrap();
-    process_query("INSERT INTO orders VALUES (101, 1, 'Laptop')").unwrap();
+    execute_sql("CREATE TABLE users (id INTEGER, name TEXT)").unwrap();
+    execute_sql("CREATE TABLE orders (id INTEGER, user_id INTEGER, product TEXT)").unwrap();
+    execute_sql("INSERT INTO users VALUES (1, 'Alice')").unwrap();
+    execute_sql("INSERT INTO orders VALUES (101, 1, 'Laptop')").unwrap();
 
-    let result = process_query(
+    let result = execute_sql(
         "SELECT users.name, orders.product FROM users JOIN orders ON users.missing = orders.user_id",
     );
     assert!(result.is_err());
@@ -187,15 +206,15 @@ fn test_join_invalid_on_column() {
 fn test_join_multiple_conditions() {
     let _guard = setup_test();
 
-    process_query("CREATE TABLE users (id INTEGER, name TEXT)").unwrap();
-    process_query("CREATE TABLE orders (id INTEGER, user_id INTEGER, product TEXT, price FLOAT)")
+    execute_sql("CREATE TABLE users (id INTEGER, name TEXT)").unwrap();
+    execute_sql("CREATE TABLE orders (id INTEGER, user_id INTEGER, product TEXT, price FLOAT)")
         .unwrap();
 
-    process_query("INSERT INTO users VALUES (1, 'Alice')").unwrap();
-    process_query("INSERT INTO orders VALUES (101, 1, 'Laptop', 999.99), (102, 1, 'Mouse', 29.99)")
+    execute_sql("INSERT INTO users VALUES (1, 'Alice')").unwrap();
+    execute_sql("INSERT INTO orders VALUES (101, 1, 'Laptop', 999.99), (102, 1, 'Mouse', 29.99)")
         .unwrap();
 
-    let result = process_query("SELECT users.name, orders.product, orders.price FROM users JOIN orders ON users.id = orders.user_id WHERE orders.price < 100").unwrap();
+    let result = execute_sql("SELECT users.name, orders.product, orders.price FROM users JOIN orders ON users.id = orders.user_id WHERE orders.price < 100").unwrap();
 
     assert!(result.contains("Alice"));
     assert!(result.contains("Mouse"));
@@ -208,30 +227,34 @@ fn test_join_multiple_conditions() {
 fn test_join_empty_tables() {
     let _guard = setup_test();
 
-    process_query("CREATE TABLE users (id INTEGER, name TEXT)").unwrap();
-    process_query("CREATE TABLE orders (id INTEGER, user_id INTEGER, product TEXT)").unwrap();
+    execute_sql("CREATE TABLE users (id INTEGER, name TEXT)").unwrap();
+    execute_sql("CREATE TABLE orders (id INTEGER, user_id INTEGER, product TEXT)").unwrap();
 
-    let result =
-        process_query("SELECT * FROM users JOIN orders ON users.id = orders.user_id").unwrap();
-
-    assert!(result.contains("id"));
-    assert!(result.contains("name"));
+    let rows = query_rows("SELECT * FROM users JOIN orders ON users.id = orders.user_id").unwrap();
+    rows.assert_columns(&[
+        "users.id",
+        "users.name",
+        "orders.id",
+        "orders.user_id",
+        "orders.product",
+    ]);
+    assert!(rows.rows.is_empty());
 }
 
 #[test]
 fn test_join_no_matching_rows() {
     let _guard = setup_test();
 
-    process_query("CREATE TABLE users (id INTEGER, name TEXT)").unwrap();
-    process_query("CREATE TABLE orders (id INTEGER, user_id INTEGER, product TEXT)").unwrap();
+    execute_sql("CREATE TABLE users (id INTEGER, name TEXT)").unwrap();
+    execute_sql("CREATE TABLE orders (id INTEGER, user_id INTEGER, product TEXT)").unwrap();
 
-    process_query("INSERT INTO users VALUES (1, 'Alice'), (2, 'Bob')").unwrap();
-    process_query("INSERT INTO orders VALUES (101, 999, 'Laptop')").unwrap(); // user_id 999 doesn't exist
+    execute_sql("INSERT INTO users VALUES (1, 'Alice'), (2, 'Bob')").unwrap();
+    execute_sql("INSERT INTO orders VALUES (101, 999, 'Laptop')").unwrap(); // user_id 999 doesn't exist
 
     let result =
-        process_query("SELECT * FROM users JOIN orders ON users.id = orders.user_id").unwrap();
+        execute_sql("SELECT * FROM users JOIN orders ON users.id = orders.user_id").unwrap();
 
-    let lines: Vec<&str> = result.lines().collect();
+    let lines: Vec<String> = result.lines().collect();
     assert!(lines.len() <= 2);
 }
 
@@ -239,16 +262,16 @@ fn test_join_no_matching_rows() {
 fn test_right_join() {
     let _guard = setup_test();
 
-    process_query("CREATE TABLE customers (id INTEGER, name TEXT)").unwrap();
-    process_query("CREATE TABLE orders (id INTEGER, customer_id INTEGER, product TEXT)").unwrap();
+    execute_sql("CREATE TABLE customers (id INTEGER, name TEXT)").unwrap();
+    execute_sql("CREATE TABLE orders (id INTEGER, customer_id INTEGER, product TEXT)").unwrap();
 
-    process_query("INSERT INTO customers VALUES (1, 'Alice'), (2, 'Bob')").unwrap();
-    process_query(
+    execute_sql("INSERT INTO customers VALUES (1, 'Alice'), (2, 'Bob')").unwrap();
+    execute_sql(
         "INSERT INTO orders VALUES (101, 1, 'Laptop'), (102, 2, 'Keyboard'), (103, 999, 'Mouse')",
     )
     .unwrap(); // customer_id 999 doesn't exist
 
-    let result = process_query("SELECT customers.name, orders.product FROM customers RIGHT JOIN orders ON customers.id = orders.customer_id").unwrap();
+    let result = execute_sql("SELECT customers.name, orders.product FROM customers RIGHT JOIN orders ON customers.id = orders.customer_id").unwrap();
 
     assert!(result.contains("Alice"));
     assert!(result.contains("Bob"));
@@ -261,13 +284,13 @@ fn test_right_join() {
 fn test_full_join() {
     let _guard = setup_test();
 
-    process_query("CREATE TABLE left_table (id INTEGER, name TEXT)").unwrap();
-    process_query("CREATE TABLE right_table (id INTEGER, value TEXT)").unwrap();
+    execute_sql("CREATE TABLE left_table (id INTEGER, name TEXT)").unwrap();
+    execute_sql("CREATE TABLE right_table (id INTEGER, value TEXT)").unwrap();
 
-    process_query("INSERT INTO left_table VALUES (1, 'A'), (2, 'B')").unwrap();
-    process_query("INSERT INTO right_table VALUES (2, 'Y'), (3, 'Z')").unwrap();
+    execute_sql("INSERT INTO left_table VALUES (1, 'A'), (2, 'B')").unwrap();
+    execute_sql("INSERT INTO right_table VALUES (2, 'Y'), (3, 'Z')").unwrap();
 
-    let result = process_query(
+    let result = execute_sql(
         "SELECT * FROM left_table FULL JOIN right_table ON left_table.id = right_table.id",
     )
     .unwrap();
@@ -281,14 +304,14 @@ fn test_full_join() {
 fn test_right_join_no_matches() {
     let _guard = setup_test();
 
-    process_query("CREATE TABLE users (id INTEGER, name TEXT)").unwrap();
-    process_query("CREATE TABLE products (id INTEGER, name TEXT)").unwrap();
+    execute_sql("CREATE TABLE users (id INTEGER, name TEXT)").unwrap();
+    execute_sql("CREATE TABLE products (id INTEGER, name TEXT)").unwrap();
 
-    process_query("INSERT INTO users VALUES (1, 'Alice'), (2, 'Bob')").unwrap();
-    process_query("INSERT INTO products VALUES (101, 'Laptop'), (102, 'Mouse')").unwrap(); // No matching IDs
+    execute_sql("INSERT INTO users VALUES (1, 'Alice'), (2, 'Bob')").unwrap();
+    execute_sql("INSERT INTO products VALUES (101, 'Laptop'), (102, 'Mouse')").unwrap(); // No matching IDs
 
     let result =
-        process_query("SELECT * FROM users RIGHT JOIN products ON users.id = products.id").unwrap();
+        execute_sql("SELECT * FROM users RIGHT JOIN products ON users.id = products.id").unwrap();
 
     assert!(result.contains("Laptop"));
     assert!(result.contains("Mouse"));
@@ -298,13 +321,13 @@ fn test_right_join_no_matches() {
 fn test_full_join_multiple_unmatches() {
     let _guard = setup_test();
 
-    process_query("CREATE TABLE a (id INTEGER, val TEXT)").unwrap();
-    process_query("CREATE TABLE b (id INTEGER, val TEXT)").unwrap();
+    execute_sql("CREATE TABLE a (id INTEGER, val TEXT)").unwrap();
+    execute_sql("CREATE TABLE b (id INTEGER, val TEXT)").unwrap();
 
-    process_query("INSERT INTO a VALUES (1, 'A1'), (2, 'A2')").unwrap();
-    process_query("INSERT INTO b VALUES (3, 'B1'), (4, 'B2')").unwrap(); // No matching IDs
+    execute_sql("INSERT INTO a VALUES (1, 'A1'), (2, 'A2')").unwrap();
+    execute_sql("INSERT INTO b VALUES (3, 'B1'), (4, 'B2')").unwrap(); // No matching IDs
 
-    let result = process_query("SELECT * FROM a FULL JOIN b ON a.id = b.id").unwrap();
+    let result = execute_sql("SELECT * FROM a FULL JOIN b ON a.id = b.id").unwrap();
 
     assert!(result.contains("A1"));
     assert!(result.contains("A2"));
@@ -316,18 +339,17 @@ fn test_full_join_multiple_unmatches() {
 fn test_join_with_aggregate_function() {
     let _guard = setup_test();
 
-    process_query("CREATE TABLE users (id INTEGER, name TEXT)").unwrap();
-    process_query("CREATE TABLE orders (id INTEGER, user_id INTEGER, product TEXT)").unwrap();
+    execute_sql("CREATE TABLE users (id INTEGER, name TEXT)").unwrap();
+    execute_sql("CREATE TABLE orders (id INTEGER, user_id INTEGER, product TEXT)").unwrap();
 
-    process_query("INSERT INTO users VALUES (1, 'Alice'), (2, 'Bob'), (3, 'Charlie')").unwrap();
-    process_query(
+    execute_sql("INSERT INTO users VALUES (1, 'Alice'), (2, 'Bob'), (3, 'Charlie')").unwrap();
+    execute_sql(
         "INSERT INTO orders VALUES (101, 1, 'Laptop'), (102, 1, 'Mouse'), (103, 2, 'Keyboard')",
     )
     .unwrap();
 
     let result =
-        process_query("SELECT COUNT(*) FROM users JOIN orders ON users.id = orders.user_id")
-            .unwrap();
+        execute_sql("SELECT COUNT(*) FROM users JOIN orders ON users.id = orders.user_id").unwrap();
 
     assert!(result.contains("Count(*)"));
     assert!(result.contains("3"));
@@ -339,19 +361,19 @@ fn test_join_group_by_with_aggregate() {
 
     let _guard = setup_test();
 
-    process_query("CREATE TABLE users (id INTEGER, name TEXT)").unwrap();
-    process_query(
+    execute_sql("CREATE TABLE users (id INTEGER, name TEXT)").unwrap();
+    execute_sql(
         "CREATE TABLE orders (id INTEGER, user_id INTEGER, product TEXT, quantity INTEGER)",
     )
     .unwrap();
 
-    process_query("INSERT INTO users VALUES (1, 'Alice'), (2, 'Bob'), (3, 'Charlie')").unwrap();
-    process_query(
+    execute_sql("INSERT INTO users VALUES (1, 'Alice'), (2, 'Bob'), (3, 'Charlie')").unwrap();
+    execute_sql(
         "INSERT INTO orders VALUES (101, 1, 'Laptop', 2), (102, 1, 'Mouse', 5), (103, 2, 'Keyboard', 1)",
     )
     .unwrap();
 
-    let result = process_query("SELECT users.name, COUNT(orders.product) AS order_count FROM users LEFT JOIN orders ON users.id = orders.user_id GROUP BY users.name").unwrap();
+    let result = execute_sql("SELECT users.name, COUNT(orders.product) AS order_count FROM users LEFT JOIN orders ON users.id = orders.user_id GROUP BY users.name").unwrap();
 
     let mut lines = result.lines();
     let header = lines.next().unwrap();
@@ -378,21 +400,21 @@ fn test_join_group_by_with_aggregate() {
 fn test_join_group_by_order_by_limit() {
     let _guard = setup_test();
 
-    process_query("CREATE TABLE users (id INTEGER, name TEXT)").unwrap();
-    process_query(
+    execute_sql("CREATE TABLE users (id INTEGER, name TEXT)").unwrap();
+    execute_sql(
         "CREATE TABLE orders (id INTEGER, user_id INTEGER, product TEXT, quantity INTEGER)",
     )
     .unwrap();
 
-    process_query("INSERT INTO users VALUES (1, 'Alice'), (2, 'Bob'), (3, 'Charlie')").unwrap();
-    process_query(
+    execute_sql("INSERT INTO users VALUES (1, 'Alice'), (2, 'Bob'), (3, 'Charlie')").unwrap();
+    execute_sql(
         "INSERT INTO orders VALUES (101, 1, 'Laptop', 2), (102, 1, 'Mouse', 5), (103, 2, 'Keyboard', 1)",
     )
     .unwrap();
 
-    let result = process_query("SELECT users.name, COUNT(orders.product) AS order_count FROM users LEFT JOIN orders ON users.id = orders.user_id GROUP BY users.name ORDER BY order_count DESC LIMIT 1").unwrap();
+    let result = execute_sql("SELECT users.name, COUNT(orders.product) AS order_count FROM users LEFT JOIN orders ON users.id = orders.user_id GROUP BY users.name ORDER BY order_count DESC LIMIT 1").unwrap();
 
-    let rows: Vec<&str> = result
+    let rows: Vec<String> = result
         .lines()
         .skip(2)
         .filter(|line| !line.trim().is_empty())
@@ -407,21 +429,21 @@ fn test_join_group_by_order_by_limit() {
 fn test_join_group_by_order_by_ordinal() {
     let _guard = setup_test();
 
-    process_query("CREATE TABLE users (id INTEGER, name TEXT)").unwrap();
-    process_query(
+    execute_sql("CREATE TABLE users (id INTEGER, name TEXT)").unwrap();
+    execute_sql(
         "CREATE TABLE orders (id INTEGER, user_id INTEGER, product TEXT, quantity INTEGER)",
     )
     .unwrap();
 
-    process_query("INSERT INTO users VALUES (1, 'Alice'), (2, 'Bob'), (3, 'Charlie')").unwrap();
-    process_query(
+    execute_sql("INSERT INTO users VALUES (1, 'Alice'), (2, 'Bob'), (3, 'Charlie')").unwrap();
+    execute_sql(
         "INSERT INTO orders VALUES (101, 1, 'Laptop', 2), (102, 1, 'Mouse', 5), (103, 2, 'Keyboard', 1)",
     )
     .unwrap();
 
-    let result = process_query("SELECT users.name, COUNT(orders.product) AS order_count FROM users LEFT JOIN orders ON users.id = orders.user_id GROUP BY users.name ORDER BY 2 DESC").unwrap();
+    let result = execute_sql("SELECT users.name, COUNT(orders.product) AS order_count FROM users LEFT JOIN orders ON users.id = orders.user_id GROUP BY users.name ORDER BY 2 DESC").unwrap();
 
-    let rows: Vec<&str> = result
+    let rows: Vec<String> = result
         .lines()
         .skip(2)
         .filter(|line| !line.trim().is_empty())
@@ -437,21 +459,21 @@ fn test_join_group_by_order_by_ordinal() {
 fn test_join_group_by_order_by_expression() {
     let _guard = setup_test();
 
-    process_query("CREATE TABLE users (id INTEGER, name TEXT)").unwrap();
-    process_query(
+    execute_sql("CREATE TABLE users (id INTEGER, name TEXT)").unwrap();
+    execute_sql(
         "CREATE TABLE orders (id INTEGER, user_id INTEGER, product TEXT, quantity INTEGER)",
     )
     .unwrap();
 
-    process_query("INSERT INTO users VALUES (1, 'Alice'), (2, 'Bob'), (3, 'Charlie')").unwrap();
-    process_query(
+    execute_sql("INSERT INTO users VALUES (1, 'Alice'), (2, 'Bob'), (3, 'Charlie')").unwrap();
+    execute_sql(
         "INSERT INTO orders VALUES (101, 1, 'Laptop', 2), (102, 1, 'Mouse', 5), (103, 2, 'Keyboard', 1)",
     )
     .unwrap();
 
-    let result = process_query("SELECT users.name, COUNT(orders.product) AS order_count FROM users LEFT JOIN orders ON users.id = orders.user_id GROUP BY users.name ORDER BY order_count + 1 DESC LIMIT 1").unwrap();
+    let result = execute_sql("SELECT users.name, COUNT(orders.product) AS order_count FROM users LEFT JOIN orders ON users.id = orders.user_id GROUP BY users.name ORDER BY order_count + 1 DESC LIMIT 1").unwrap();
 
-    let rows: Vec<&str> = result
+    let rows: Vec<String> = result
         .lines()
         .skip(2)
         .filter(|line| !line.trim().is_empty())

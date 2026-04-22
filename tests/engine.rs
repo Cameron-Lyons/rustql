@@ -1,5 +1,5 @@
 mod common;
-use common::render_result;
+use common::*;
 use rustql::ast::Value;
 use rustql::{Engine, EngineOptions, QueryResult, StorageMode};
 use std::fs;
@@ -91,7 +91,7 @@ fn disk_engine_uses_custom_path() {
         .execute_one("SELECT * FROM persisted_disk")
         .unwrap();
 
-    assert!(render_result(&result).contains("11"), "got: {result:?}");
+    assert!(result.contains("11"), "got: {result:?}");
     cleanup_storage_files(&path);
 }
 

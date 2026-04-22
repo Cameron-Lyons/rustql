@@ -1,5 +1,5 @@
 mod common;
-use common::{process_query, reset_database};
+use common::*;
 use std::fs;
 use std::path::Path;
 use std::sync::Mutex;
@@ -49,7 +49,7 @@ fn sql_logic_corpus() {
         for block in blocks {
             match block {
                 Block::StatementOk { sql } => {
-                    let result = process_query(sql.trim());
+                    let result = execute_sql(sql.trim());
                     assert!(
                         result.is_ok(),
                         "statement failed in {}:\n{}\nerror: {:?}",
@@ -62,7 +62,7 @@ fn sql_logic_corpus() {
                     sql,
                     expected_error,
                 } => {
-                    let error = process_query(sql.trim()).expect_err(&format!(
+                    let error = execute_sql(sql.trim()).expect_err(&format!(
                         "expected statement error in {}:\n{}",
                         file.display(),
                         sql
@@ -70,44 +70,46 @@ fn sql_logic_corpus() {
                     assert_expected_error(&file, &sql, &error, expected_error.as_deref());
                 }
                 Block::QueryContains { sql, expected } => {
-                    let output = process_query(sql.trim()).unwrap_or_else(|e| {
+                    let output = execute_sql(sql.trim()).unwrap_or_else(|e| {
                         panic!("query failed in {}:\n{}\nerror: {}", file.display(), sql, e)
                     });
                     for needle in expected {
                         let needle = decode_expected_line(&needle);
+                        let output_text = query_output_lines(&output).join("\n");
                         assert!(
                             output.contains(&needle),
                             "expected '{}' in output from {}:\nquery:\n{}\noutput:\n{}",
                             needle,
                             file.display(),
                             sql,
-                            output
+                            output_text
                         );
                     }
                 }
                 Block::QueryExact { sql, expected } => {
-                    let output = process_query(sql.trim()).unwrap_or_else(|e| {
+                    let output = execute_sql(sql.trim()).unwrap_or_else(|e| {
                         panic!("query failed in {}:\n{}\nerror: {}", file.display(), sql, e)
                     });
-                    let actual = normalize_query_output(&output);
+                    let actual = query_output_lines(&output);
                     let expected = expected
                         .iter()
                         .map(|line| decode_expected_line(line))
                         .collect::<Vec<_>>();
+                    let output_text = actual.join("\n");
                     assert_eq!(
                         actual,
                         expected,
                         "exact output mismatch in {}:\nquery:\n{}\nraw output:\n{}",
                         file.display(),
                         sql,
-                        output
+                        output_text
                     );
                 }
                 Block::QueryError {
                     sql,
                     expected_error,
                 } => {
-                    let error = process_query(sql.trim()).expect_err(&format!(
+                    let error = execute_sql(sql.trim()).expect_err(&format!(
                         "expected query error in {}:\n{}",
                         file.display(),
                         sql
@@ -221,20 +223,6 @@ fn parse_query_block(lines: &[&str], mut i: usize) -> (String, Vec<String>, usiz
     }
 
     (sql_lines.join("\n"), expected, i)
-}
-
-fn normalize_query_output(output: &str) -> Vec<String> {
-    output
-        .lines()
-        .map(str::trim_end)
-        .filter(|line| !line.trim().is_empty())
-        .filter(|line| !is_separator_line(line.trim()))
-        .map(ToString::to_string)
-        .collect()
-}
-
-fn is_separator_line(line: &str) -> bool {
-    !line.is_empty() && line.chars().all(|ch| ch == '-')
 }
 
 fn decode_expected_line(line: &str) -> String {

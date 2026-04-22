@@ -1,5 +1,5 @@
 mod common;
-use common::{execute, reset_database};
+use common::*;
 use rustql::ast::*;
 
 #[test]
@@ -50,6 +50,5 @@ fn test_insert() {
         returning: None,
     });
 
-    let result = execute(insert).unwrap();
-    assert_eq!(result, "1 row(s) inserted");
+    assert_command(execute(insert).unwrap(), CommandTag::Insert, 1);
 }

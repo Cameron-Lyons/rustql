@@ -1,5 +1,5 @@
 mod common;
-use common::{process_query, reset_database};
+use common::*;
 use std::sync::Mutex;
 
 static TEST_MUTEX: Mutex<()> = Mutex::new(());
@@ -14,7 +14,7 @@ fn setup_test() -> std::sync::MutexGuard<'static, ()> {
 fn test_out_of_range_integer_literal_returns_parse_error() {
     let _guard = setup_test();
 
-    let error = process_query("SELECT 9223372036854775808").unwrap_err();
+    let error = execute_sql("SELECT 9223372036854775808").unwrap_err();
     assert!(error.contains("Invalid integer literal"));
 }
 
@@ -22,7 +22,7 @@ fn test_out_of_range_integer_literal_returns_parse_error() {
 fn test_minimum_integer_literal_is_supported() {
     let _guard = setup_test();
 
-    let result = process_query("SELECT -9223372036854775808").unwrap();
+    let result = execute_sql("SELECT -9223372036854775808").unwrap();
     assert!(result.contains("-9223372036854775808"));
 }
 
@@ -30,16 +30,16 @@ fn test_minimum_integer_literal_is_supported() {
 fn test_three_table_join() {
     let _guard = setup_test();
 
-    process_query("CREATE TABLE customers (id INTEGER, name TEXT)").unwrap();
-    process_query("CREATE TABLE orders (id INTEGER, customer_id INTEGER, product_id INTEGER)")
+    execute_sql("CREATE TABLE customers (id INTEGER, name TEXT)").unwrap();
+    execute_sql("CREATE TABLE orders (id INTEGER, customer_id INTEGER, product_id INTEGER)")
         .unwrap();
-    process_query("CREATE TABLE products (id INTEGER, pname TEXT)").unwrap();
+    execute_sql("CREATE TABLE products (id INTEGER, pname TEXT)").unwrap();
 
-    process_query("INSERT INTO customers VALUES (1, 'Alice'), (2, 'Bob')").unwrap();
-    process_query("INSERT INTO orders VALUES (10, 1, 100), (11, 2, 101)").unwrap();
-    process_query("INSERT INTO products VALUES (100, 'Widget'), (101, 'Gadget')").unwrap();
+    execute_sql("INSERT INTO customers VALUES (1, 'Alice'), (2, 'Bob')").unwrap();
+    execute_sql("INSERT INTO orders VALUES (10, 1, 100), (11, 2, 101)").unwrap();
+    execute_sql("INSERT INTO products VALUES (100, 'Widget'), (101, 'Gadget')").unwrap();
 
-    let result = process_query(
+    let result = execute_sql(
         "SELECT customers.name, products.pname \
          FROM customers \
          JOIN orders ON customers.id = orders.customer_id \
@@ -56,17 +56,17 @@ fn test_three_table_join() {
 fn test_four_table_join() {
     let _guard = setup_test();
 
-    process_query("CREATE TABLE t1 (id INTEGER, v1 TEXT)").unwrap();
-    process_query("CREATE TABLE t2 (id INTEGER, t1_id INTEGER, v2 TEXT)").unwrap();
-    process_query("CREATE TABLE t3 (id INTEGER, t2_id INTEGER, v3 TEXT)").unwrap();
-    process_query("CREATE TABLE t4 (id INTEGER, t3_id INTEGER, v4 TEXT)").unwrap();
+    execute_sql("CREATE TABLE t1 (id INTEGER, v1 TEXT)").unwrap();
+    execute_sql("CREATE TABLE t2 (id INTEGER, t1_id INTEGER, v2 TEXT)").unwrap();
+    execute_sql("CREATE TABLE t3 (id INTEGER, t2_id INTEGER, v3 TEXT)").unwrap();
+    execute_sql("CREATE TABLE t4 (id INTEGER, t3_id INTEGER, v4 TEXT)").unwrap();
 
-    process_query("INSERT INTO t1 VALUES (1, 'alpha')").unwrap();
-    process_query("INSERT INTO t2 VALUES (10, 1, 'beta')").unwrap();
-    process_query("INSERT INTO t3 VALUES (100, 10, 'gamma')").unwrap();
-    process_query("INSERT INTO t4 VALUES (1000, 100, 'delta')").unwrap();
+    execute_sql("INSERT INTO t1 VALUES (1, 'alpha')").unwrap();
+    execute_sql("INSERT INTO t2 VALUES (10, 1, 'beta')").unwrap();
+    execute_sql("INSERT INTO t3 VALUES (100, 10, 'gamma')").unwrap();
+    execute_sql("INSERT INTO t4 VALUES (1000, 100, 'delta')").unwrap();
 
-    let result = process_query(
+    let result = execute_sql(
         "SELECT t1.v1, t2.v2, t3.v3, t4.v4 \
          FROM t1 \
          JOIN t2 ON t1.id = t2.t1_id \
@@ -84,11 +84,11 @@ fn test_four_table_join() {
 fn test_null_in_between() {
     let _guard = setup_test();
 
-    process_query("CREATE TABLE t (id INTEGER, val INTEGER)").unwrap();
-    process_query("INSERT INTO t (id, val) VALUES (1, 10)").unwrap();
-    process_query("INSERT INTO t (id, val) VALUES (2, 50)").unwrap();
+    execute_sql("CREATE TABLE t (id INTEGER, val INTEGER)").unwrap();
+    execute_sql("INSERT INTO t (id, val) VALUES (1, 10)").unwrap();
+    execute_sql("INSERT INTO t (id, val) VALUES (2, 50)").unwrap();
 
-    let result = process_query("SELECT * FROM t WHERE val BETWEEN 5 AND 100").unwrap();
+    let result = execute_sql("SELECT * FROM t WHERE val BETWEEN 5 AND 100").unwrap();
     assert!(result.contains("10"));
     assert!(result.contains("50"));
 }
@@ -97,10 +97,10 @@ fn test_null_in_between() {
 fn test_null_in_comparison() {
     let _guard = setup_test();
 
-    process_query("CREATE TABLE t (id INTEGER, val INTEGER)").unwrap();
-    process_query("INSERT INTO t (id, val) VALUES (1, 10)").unwrap();
+    execute_sql("CREATE TABLE t (id INTEGER, val INTEGER)").unwrap();
+    execute_sql("INSERT INTO t (id, val) VALUES (1, 10)").unwrap();
 
-    let result = process_query("SELECT * FROM t WHERE val IS NULL").unwrap();
+    let result = execute_sql("SELECT * FROM t WHERE val IS NULL").unwrap();
     assert!(!result.contains("10"));
 }
 
@@ -108,13 +108,13 @@ fn test_null_in_comparison() {
 fn test_select_with_subquery_in_where() {
     let _guard = setup_test();
 
-    process_query("CREATE TABLE t1 (id INTEGER, name TEXT)").unwrap();
-    process_query("CREATE TABLE t2 (id INTEGER, t1_id INTEGER)").unwrap();
+    execute_sql("CREATE TABLE t1 (id INTEGER, name TEXT)").unwrap();
+    execute_sql("CREATE TABLE t2 (id INTEGER, t1_id INTEGER)").unwrap();
 
-    process_query("INSERT INTO t1 VALUES (1, 'Alice'), (2, 'Bob'), (3, 'Charlie')").unwrap();
-    process_query("INSERT INTO t2 VALUES (10, 1), (11, 3)").unwrap();
+    execute_sql("INSERT INTO t1 VALUES (1, 'Alice'), (2, 'Bob'), (3, 'Charlie')").unwrap();
+    execute_sql("INSERT INTO t2 VALUES (10, 1), (11, 3)").unwrap();
 
-    let result = process_query("SELECT name FROM t1 WHERE id IN (SELECT t1_id FROM t2)").unwrap();
+    let result = execute_sql("SELECT name FROM t1 WHERE id IN (SELECT t1_id FROM t2)").unwrap();
     assert!(result.contains("Alice"));
     assert!(result.contains("Charlie"));
     assert!(!result.contains("Bob"));
@@ -124,10 +124,10 @@ fn test_select_with_subquery_in_where() {
 fn test_multiple_aggregates_in_select() {
     let _guard = setup_test();
 
-    process_query("CREATE TABLE t (id INTEGER, val INTEGER)").unwrap();
-    process_query("INSERT INTO t VALUES (1, 10), (2, 20), (3, 30)").unwrap();
+    execute_sql("CREATE TABLE t (id INTEGER, val INTEGER)").unwrap();
+    execute_sql("INSERT INTO t VALUES (1, 10), (2, 20), (3, 30)").unwrap();
 
-    let result = process_query("SELECT COUNT(*), SUM(val), MIN(val), MAX(val) FROM t").unwrap();
+    let result = execute_sql("SELECT COUNT(*), SUM(val), MIN(val), MAX(val) FROM t").unwrap();
     assert!(result.contains("3"));
     assert!(result.contains("60"));
     assert!(result.contains("10"));

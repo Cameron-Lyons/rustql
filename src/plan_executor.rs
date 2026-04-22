@@ -1,13 +1,12 @@
 use crate::ast::*;
 use crate::database::{DatabaseCatalog, RowId, ScopedDatabase};
 use crate::error::RustqlError;
-use crate::executor::aggregate::DEFAULT_PERCENTILE_FRACTION;
+use crate::executor::aggregate::{DEFAULT_PERCENTILE_FRACTION, format_aggregate_header};
 use crate::executor::expr::{
     apply_arithmetic, compare_values, compare_values_same_type, evaluate_expression,
-    evaluate_value_expression_with_db,
+    evaluate_value_expression_with_db, format_value,
 };
-use crate::executor::select::execute_select_internal;
-use crate::planner::PlanNode;
+use crate::planner::{self, PlanNode};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
@@ -32,6 +31,10 @@ impl<'a> PlanExecutor<'a> {
         select_stmt: &SelectStatement,
     ) -> Result<ExecutionResult, RustqlError> {
         let result = self.execute_plan_node(plan)?;
+
+        if matches!(plan, PlanNode::SetOperation { .. }) {
+            return Ok(result);
+        }
 
         let projected = self.apply_projection(&result, select_stmt)?;
         let distincted = if select_stmt.distinct {
@@ -159,6 +162,18 @@ impl<'a> PlanExecutor<'a> {
                     aggregates,
                     having.as_ref(),
                 )
+            }
+            PlanNode::SetOperation {
+                left,
+                right,
+                left_select,
+                right_select,
+                op,
+                ..
+            } => {
+                let left_result = self.execute(left, left_select)?;
+                let right_result = self.execute(right, right_select)?;
+                self.execute_set_operation(left_result, right_result, op)
             }
         }
     }
@@ -529,20 +544,19 @@ impl<'a> PlanExecutor<'a> {
         for left_row in &left.rows {
             scoped_db.update_temp_row(left_row);
 
-            let subquery_result =
-                match execute_select_internal(None, rewritten_subquery.clone(), &scoped_db) {
-                    Ok(result) => result,
-                    Err(err) => {
-                        if matches!(join_type, JoinType::Left | JoinType::Full) {
-                            joined_rows
-                                .push(combine_row_with_right_nulls(left_row, right_columns.len()));
-                            continue;
-                        }
-                        return Err(err);
+            let subquery_result = match execute_planned_select(&scoped_db, &rewritten_subquery) {
+                Ok(result) => result,
+                Err(err) => {
+                    if matches!(join_type, JoinType::Left | JoinType::Full) {
+                        joined_rows
+                            .push(combine_row_with_right_nulls(left_row, right_columns.len()));
+                        continue;
                     }
-                };
+                    return Err(err);
+                }
+            };
 
-            if subquery_result.headers.len() != right_columns.len() {
+            if subquery_result.columns.len() != right_columns.len() {
                 return Err(RustqlError::Internal(
                     "LATERAL subquery output shape changed during execution".to_string(),
                 ));
@@ -912,6 +926,116 @@ impl<'a> PlanExecutor<'a> {
         })
     }
 
+    fn execute_set_operation(
+        &self,
+        left: ExecutionResult,
+        right: ExecutionResult,
+        op: &SetOperation,
+    ) -> Result<ExecutionResult, RustqlError> {
+        if left.columns.len() != right.columns.len() {
+            return Err(RustqlError::Internal(
+                "Set operation inputs must have the same number of columns".to_string(),
+            ));
+        }
+
+        let rows = match op {
+            SetOperation::UnionAll => {
+                let mut combined = left.rows;
+                combined.extend(right.rows);
+                combined
+            }
+            SetOperation::Union => {
+                let mut seen = BTreeSet::new();
+                let mut combined = Vec::new();
+                for row in left.rows.into_iter().chain(right.rows) {
+                    if seen.insert(row.clone()) {
+                        combined.push(row);
+                    }
+                }
+                combined
+            }
+            SetOperation::Intersect => {
+                let right_set: BTreeSet<Vec<Value>> = right.rows.into_iter().collect();
+                let mut seen = BTreeSet::new();
+                let mut combined = Vec::new();
+                for row in left.rows {
+                    if right_set.contains(&row) && seen.insert(row.clone()) {
+                        combined.push(row);
+                    }
+                }
+                combined
+            }
+            SetOperation::IntersectAll => {
+                let mut right_counts: BTreeMap<Vec<Value>, usize> = BTreeMap::new();
+                for row in right.rows {
+                    *right_counts.entry(row).or_insert(0) += 1;
+                }
+
+                let mut left_counts: BTreeMap<Vec<Value>, usize> = BTreeMap::new();
+                let mut left_order = Vec::new();
+                for row in left.rows {
+                    let count = left_counts.entry(row.clone()).or_insert(0);
+                    if *count == 0 {
+                        left_order.push(row.clone());
+                    }
+                    *count += 1;
+                }
+
+                let mut combined = Vec::new();
+                for row in left_order {
+                    let left_count = left_counts.get(&row).copied().unwrap_or(0);
+                    let right_count = right_counts.get(&row).copied().unwrap_or(0);
+                    for _ in 0..left_count.min(right_count) {
+                        combined.push(row.clone());
+                    }
+                }
+                combined
+            }
+            SetOperation::Except => {
+                let right_set: BTreeSet<Vec<Value>> = right.rows.into_iter().collect();
+                let mut seen = BTreeSet::new();
+                let mut combined = Vec::new();
+                for row in left.rows {
+                    if !right_set.contains(&row) && seen.insert(row.clone()) {
+                        combined.push(row);
+                    }
+                }
+                combined
+            }
+            SetOperation::ExceptAll => {
+                let mut right_counts: BTreeMap<Vec<Value>, usize> = BTreeMap::new();
+                for row in right.rows {
+                    *right_counts.entry(row).or_insert(0) += 1;
+                }
+
+                let mut left_counts: BTreeMap<Vec<Value>, usize> = BTreeMap::new();
+                let mut left_order = Vec::new();
+                for row in left.rows {
+                    let count = left_counts.entry(row.clone()).or_insert(0);
+                    if *count == 0 {
+                        left_order.push(row.clone());
+                    }
+                    *count += 1;
+                }
+
+                let mut combined = Vec::new();
+                for row in left_order {
+                    let left_count = left_counts.get(&row).copied().unwrap_or(0);
+                    let right_count = right_counts.get(&row).copied().unwrap_or(0);
+                    for _ in 0..left_count.saturating_sub(right_count) {
+                        combined.push(row.clone());
+                    }
+                }
+                combined
+            }
+        };
+
+        Ok(ExecutionResult {
+            columns: left.columns,
+            rows,
+        })
+    }
+
     fn evaluate_expression(
         &self,
         expr: &Expression,
@@ -978,13 +1102,105 @@ impl<'a> PlanExecutor<'a> {
         column_defs: &[ColumnDefinition],
         row: &[Value],
     ) -> Result<Value, RustqlError> {
-        if let Expression::Column(col) = expr
-            && let Some(idx) = find_result_column_index(columns, col)
-        {
-            return Ok(row.get(idx).cloned().unwrap_or(Value::Null));
+        match expr {
+            Expression::Column(col) => self.lookup_sort_column_value(columns, row, col),
+            Expression::Function(agg) => self.lookup_sort_aggregate_value(columns, row, agg),
+            Expression::BinaryOp { left, op, right } => {
+                let left_val = self.get_sort_value(left, columns, column_defs, row)?;
+                let right_val = self.get_sort_value(right, columns, column_defs, row)?;
+                match op {
+                    BinaryOperator::Plus
+                    | BinaryOperator::Minus
+                    | BinaryOperator::Multiply
+                    | BinaryOperator::Divide => apply_arithmetic(&left_val, &right_val, op),
+                    BinaryOperator::Concat => Ok(Value::Text(format!(
+                        "{}{}",
+                        format_value(&left_val),
+                        format_value(&right_val)
+                    ))),
+                    _ => Err(RustqlError::Internal(
+                        "Unsupported operator in ORDER BY".to_string(),
+                    )),
+                }
+            }
+            Expression::UnaryOp {
+                op: UnaryOperator::Minus,
+                expr,
+            } => match self.get_sort_value(expr, columns, column_defs, row)? {
+                Value::Integer(value) => Ok(Value::Integer(-value)),
+                Value::Float(value) => Ok(Value::Float(-value)),
+                _ => Err(RustqlError::Internal(
+                    "Unary minus only supported for numeric ORDER BY values".to_string(),
+                )),
+            },
+            Expression::ScalarFunction { .. } | Expression::Cast { .. } => {
+                let materialized = self.materialize_sort_expression(expr, columns, row)?;
+                self.evaluate_value_expression(&materialized, column_defs, row)
+            }
+            Expression::Value(value) => Ok(value.clone()),
+            _ => self.evaluate_value_expression(expr, column_defs, row),
         }
+    }
 
-        self.evaluate_value_expression(expr, column_defs, row)
+    fn lookup_sort_column_value(
+        &self,
+        columns: &[String],
+        row: &[Value],
+        column_name: &str,
+    ) -> Result<Value, RustqlError> {
+        find_result_column_index(columns, column_name)
+            .map(|idx| row.get(idx).cloned().unwrap_or(Value::Null))
+            .ok_or_else(|| RustqlError::ColumnNotFound(column_name.to_string()))
+    }
+
+    fn lookup_sort_aggregate_value(
+        &self,
+        columns: &[String],
+        row: &[Value],
+        agg: &AggregateFunction,
+    ) -> Result<Value, RustqlError> {
+        find_aggregate_result_column_index(columns, agg)
+            .map(|idx| row.get(idx).cloned().unwrap_or(Value::Null))
+            .ok_or_else(|| {
+                RustqlError::ColumnNotFound(format!("{} (ORDER BY)", format_aggregate_header(agg)))
+            })
+    }
+
+    fn materialize_sort_expression(
+        &self,
+        expr: &Expression,
+        columns: &[String],
+        row: &[Value],
+    ) -> Result<Expression, RustqlError> {
+        match expr {
+            Expression::Column(column_name) => Ok(Expression::Value(
+                self.lookup_sort_column_value(columns, row, column_name)?,
+            )),
+            Expression::Function(agg) => Ok(Expression::Value(
+                self.lookup_sort_aggregate_value(columns, row, agg)?,
+            )),
+            Expression::BinaryOp { left, op, right } => Ok(Expression::BinaryOp {
+                left: Box::new(self.materialize_sort_expression(left, columns, row)?),
+                op: op.clone(),
+                right: Box::new(self.materialize_sort_expression(right, columns, row)?),
+            }),
+            Expression::UnaryOp { op, expr } => Ok(Expression::UnaryOp {
+                op: op.clone(),
+                expr: Box::new(self.materialize_sort_expression(expr, columns, row)?),
+            }),
+            Expression::ScalarFunction { name, args } => Ok(Expression::ScalarFunction {
+                name: name.clone(),
+                args: args
+                    .iter()
+                    .map(|arg| self.materialize_sort_expression(arg, columns, row))
+                    .collect::<Result<_, _>>()?,
+            }),
+            Expression::Cast { expr, data_type } => Ok(Expression::Cast {
+                expr: Box::new(self.materialize_sort_expression(expr, columns, row)?),
+                data_type: data_type.clone(),
+            }),
+            _ => Ok(expr.clone()),
+        }
     }
 
     fn evaluate_distinct_on_value(
@@ -1547,6 +1763,7 @@ impl<'a> PlanExecutor<'a> {
             None
         };
 
+        let scalar_outer_columns = scalar_outer_scope_columns(&result.columns, select_stmt);
         let mut projected_rows = Vec::new();
         for (row_idx, row) in result.rows.iter().enumerate() {
             let mut projected_row = Vec::new();
@@ -1582,11 +1799,8 @@ impl<'a> PlanExecutor<'a> {
                         aggregate_offset += 1;
                         value
                     }
-                    Column::Subquery(_) => {
-                        return Err(RustqlError::Internal(
-                            "Subqueries in SELECT list not yet supported in plan executor"
-                                .to_string(),
-                        ));
+                    Column::Subquery(subquery) => {
+                        self.evaluate_scalar_subquery(subquery, &scalar_outer_columns, row)?
                     }
                 };
                 projected_row.push(val);
@@ -1601,6 +1815,15 @@ impl<'a> PlanExecutor<'a> {
             columns: projected_columns,
             rows: projected_rows,
         })
+    }
+
+    fn evaluate_scalar_subquery(
+        &self,
+        subquery: &SelectStatement,
+        outer_columns: &[ColumnDefinition],
+        outer_row: &[Value],
+    ) -> Result<Value, RustqlError> {
+        evaluate_planned_scalar_subquery_with_outer(self.db, subquery, outer_columns, outer_row)
     }
 
     fn apply_distinct(&self, input: ExecutionResult) -> Result<ExecutionResult, RustqlError> {
@@ -1638,6 +1861,21 @@ fn find_result_column_index(columns: &[String], reference: &str) -> Option<usize
         })
 }
 
+fn find_aggregate_result_column_index(
+    columns: &[String],
+    aggregate: &AggregateFunction,
+) -> Option<usize> {
+    let internal_name = format!("{:?}", aggregate.function);
+    find_result_column_index(columns, &internal_name)
+        .or_else(|| find_result_column_index(columns, &format_aggregate_header(aggregate)))
+        .or_else(|| {
+            aggregate
+                .alias
+                .as_deref()
+                .and_then(|alias| find_result_column_index(columns, alias))
+        })
+}
+
 fn qualify_column_names(columns: &[ColumnDefinition], output_label: Option<&str>) -> Vec<String> {
     columns
         .iter()
@@ -1666,6 +1904,300 @@ impl Clone for ExecutionResult {
         ExecutionResult {
             columns: self.columns.clone(),
             rows: self.rows.clone(),
+        }
+    }
+}
+
+fn execute_planned_select(
+    db: &dyn DatabaseCatalog,
+    stmt: &SelectStatement,
+) -> Result<ExecutionResult, RustqlError> {
+    let plan = planner::plan_query(db, stmt)?;
+    PlanExecutor::new(db).execute(&plan, stmt)
+}
+
+pub(crate) fn evaluate_planned_scalar_subquery_with_outer(
+    db: &dyn DatabaseCatalog,
+    subquery: &SelectStatement,
+    outer_columns: &[ColumnDefinition],
+    outer_row: &[Value],
+) -> Result<Value, RustqlError> {
+    if subquery.columns.len() != 1 {
+        return Err(RustqlError::Internal(
+            "Scalar subquery must select exactly one column".to_string(),
+        ));
+    }
+
+    let result = execute_scoped_select(db, subquery, outer_columns, outer_row)?;
+    if result.columns.len() != 1 {
+        return Err(RustqlError::Internal(
+            "Scalar subquery must return exactly one column".to_string(),
+        ));
+    }
+
+    match result.rows.len() {
+        0 => Ok(Value::Null),
+        1 => result.rows[0].first().cloned().ok_or_else(|| {
+            RustqlError::Internal("Scalar subquery must return exactly one column".to_string())
+        }),
+        _ => Err(RustqlError::Internal(
+            "Scalar subquery returned more than one row".to_string(),
+        )),
+    }
+}
+
+pub(crate) fn evaluate_planned_subquery_values_with_outer(
+    db: &dyn DatabaseCatalog,
+    subquery: &SelectStatement,
+    outer_columns: &[ColumnDefinition],
+    outer_row: &[Value],
+) -> Result<Vec<Value>, RustqlError> {
+    if subquery.columns.len() != 1 {
+        return Err(RustqlError::Internal(
+            "Subquery in IN must select exactly one column".to_string(),
+        ));
+    }
+
+    let result = execute_scoped_select(db, subquery, outer_columns, outer_row)?;
+    if result.columns.len() != 1 {
+        return Err(RustqlError::Internal(
+            "Subquery in IN must return exactly one column".to_string(),
+        ));
+    }
+
+    Ok(result
+        .rows
+        .into_iter()
+        .map(|row| row.first().cloned().unwrap_or(Value::Null))
+        .collect())
+}
+
+pub(crate) fn evaluate_planned_subquery_exists_with_outer(
+    db: &dyn DatabaseCatalog,
+    subquery: &SelectStatement,
+    outer_columns: &[ColumnDefinition],
+    outer_row: &[Value],
+) -> Result<bool, RustqlError> {
+    Ok(
+        !execute_scoped_select(db, subquery, outer_columns, outer_row)?
+            .rows
+            .is_empty(),
+    )
+}
+
+fn execute_scoped_select(
+    db: &dyn DatabaseCatalog,
+    subquery: &SelectStatement,
+    outer_columns: &[ColumnDefinition],
+    outer_row: &[Value],
+) -> Result<ExecutionResult, RustqlError> {
+    let local_columns = subquery_local_column_names(db, subquery);
+    let needs_outer_scope = !outer_columns.is_empty()
+        && subquery_needs_outer_scope(subquery, &local_columns, outer_columns);
+    if !needs_outer_scope {
+        return execute_planned_select(db, subquery);
+    }
+
+    let temp_table_name = "__lateral_outer_scalar".to_string();
+    let (scoped_outer_columns, outer_column_mappings) = scoped_outer_columns(outer_columns);
+    let rewritten_subquery = scoped_subquery_with_outer_scope(
+        subquery,
+        &temp_table_name,
+        &outer_column_mappings,
+        &local_columns,
+    );
+    let mut scoped_db = ScopedDatabase::new(db, temp_table_name, scoped_outer_columns);
+    scoped_db.update_temp_row(outer_row);
+    execute_planned_select(&scoped_db, &rewritten_subquery)
+}
+
+fn subquery_needs_outer_scope(
+    subquery: &SelectStatement,
+    local_columns: &HashSet<String>,
+    outer_columns: &[ColumnDefinition],
+) -> bool {
+    subquery_expression_refs(subquery)
+        .into_iter()
+        .any(|expr| expression_needs_outer_scope(expr, local_columns, outer_columns))
+}
+
+fn subquery_expression_refs(subquery: &SelectStatement) -> Vec<&Expression> {
+    let mut expressions = Vec::new();
+
+    for column in &subquery.columns {
+        match column {
+            Column::Named { name, .. } => {
+                // Treat SELECT-list names as local unless another expression proves correlation.
+                let _ = name;
+            }
+            Column::Function(aggregate) => {
+                expressions.push(aggregate.expr.as_ref());
+                if let Some(filter) = aggregate.filter.as_deref() {
+                    expressions.push(filter);
+                }
+            }
+            Column::Expression { expr, .. } => expressions.push(expr),
+            Column::All | Column::Subquery(_) => {}
+        }
+    }
+
+    if let Some(where_clause) = subquery.where_clause.as_ref() {
+        expressions.push(where_clause);
+    }
+    if let Some(group_by) = subquery.group_by.as_ref() {
+        expressions.extend(group_by.exprs());
+    }
+    if let Some(having) = subquery.having.as_ref() {
+        expressions.push(having);
+    }
+    if let Some(distinct_on) = subquery.distinct_on.as_ref() {
+        expressions.extend(distinct_on);
+    }
+    if let Some(order_by) = subquery.order_by.as_ref() {
+        expressions.extend(order_by.iter().map(|item| &item.expr));
+    }
+    for join in &subquery.joins {
+        if let Some(on) = join.on.as_ref() {
+            expressions.push(on);
+        }
+    }
+
+    expressions
+}
+
+fn expression_needs_outer_scope(
+    expr: &Expression,
+    local_columns: &HashSet<String>,
+    outer_columns: &[ColumnDefinition],
+) -> bool {
+    match expr {
+        Expression::Column(name) => column_needs_outer_scope(name, local_columns, outer_columns),
+        Expression::BinaryOp { left, right, .. }
+        | Expression::IsDistinctFrom { left, right, .. } => {
+            expression_needs_outer_scope(left, local_columns, outer_columns)
+                || expression_needs_outer_scope(right, local_columns, outer_columns)
+        }
+        Expression::UnaryOp { expr, .. }
+        | Expression::IsNull { expr, .. }
+        | Expression::Cast { expr, .. } => {
+            expression_needs_outer_scope(expr, local_columns, outer_columns)
+        }
+        Expression::In { left, .. } => {
+            expression_needs_outer_scope(left, local_columns, outer_columns)
+        }
+        Expression::Any { left, .. } | Expression::All { left, .. } => {
+            expression_needs_outer_scope(left, local_columns, outer_columns)
+        }
+        Expression::Function(aggregate) => {
+            expression_needs_outer_scope(&aggregate.expr, local_columns, outer_columns)
+                || aggregate.filter.as_deref().is_some_and(|filter| {
+                    expression_needs_outer_scope(filter, local_columns, outer_columns)
+                })
+        }
+        Expression::Case {
+            operand,
+            when_clauses,
+            else_clause,
+        } => {
+            operand.as_deref().is_some_and(|expr| {
+                expression_needs_outer_scope(expr, local_columns, outer_columns)
+            }) || when_clauses.iter().any(|(condition, result)| {
+                expression_needs_outer_scope(condition, local_columns, outer_columns)
+                    || expression_needs_outer_scope(result, local_columns, outer_columns)
+            }) || else_clause.as_deref().is_some_and(|expr| {
+                expression_needs_outer_scope(expr, local_columns, outer_columns)
+            })
+        }
+        Expression::ScalarFunction { args, .. } => args
+            .iter()
+            .any(|arg| expression_needs_outer_scope(arg, local_columns, outer_columns)),
+        Expression::WindowFunction {
+            args,
+            partition_by,
+            order_by,
+            ..
+        } => {
+            args.iter()
+                .chain(partition_by.iter())
+                .any(|expr| expression_needs_outer_scope(expr, local_columns, outer_columns))
+                || order_by.iter().any(|item| {
+                    expression_needs_outer_scope(&item.expr, local_columns, outer_columns)
+                })
+        }
+        Expression::Subquery(_) | Expression::Exists(_) | Expression::Value(_) => false,
+    }
+}
+
+fn column_needs_outer_scope(
+    reference: &str,
+    local_columns: &HashSet<String>,
+    outer_columns: &[ColumnDefinition],
+) -> bool {
+    if reference.contains('.') {
+        if outer_columns.iter().any(|column| column.name == reference) {
+            return true;
+        }
+
+        if local_columns.contains(reference) {
+            return false;
+        }
+
+        let unqualified = unqualified_column_name(reference);
+        return outer_columns.iter().any(|column| {
+            column.name == reference || unqualified_column_name(&column.name) == unqualified
+        });
+    }
+
+    let unqualified = unqualified_column_name(reference);
+    if local_columns.contains(reference) || local_columns.contains(unqualified) {
+        return false;
+    }
+
+    outer_columns.iter().any(|column| {
+        column.name == reference || unqualified_column_name(&column.name) == unqualified
+    })
+}
+
+fn subquery_local_column_names(
+    db: &dyn DatabaseCatalog,
+    subquery: &SelectStatement,
+) -> HashSet<String> {
+    let mut columns = HashSet::new();
+    collect_table_column_names(
+        db,
+        &subquery.from,
+        subquery.from_alias.as_deref(),
+        &mut columns,
+    );
+
+    for join in &subquery.joins {
+        collect_table_column_names(db, &join.table, join.table_alias.as_deref(), &mut columns);
+    }
+
+    if let Some((_, alias, column_aliases)) = subquery.from_values.as_ref() {
+        for column in column_aliases {
+            columns.insert(column.clone());
+            columns.insert(format!("{}.{}", alias, column));
+        }
+    }
+
+    columns
+}
+
+fn collect_table_column_names(
+    db: &dyn DatabaseCatalog,
+    table_name: &str,
+    alias: Option<&str>,
+    output: &mut HashSet<String>,
+) {
+    if table_name.is_empty() {
+        return;
+    }
+    if let Some(table) = db.get_table(table_name) {
+        let label = alias.unwrap_or(table_name);
+        for column in &table.columns {
+            output.insert(column.name.clone());
+            output.insert(format!("{}.{}", label, column.name));
         }
     }
 }
@@ -1701,6 +2233,40 @@ fn column_definitions_from_names(columns: &[String]) -> Vec<ColumnDefinition> {
             generated: None,
         })
         .collect()
+}
+
+fn scalar_outer_scope_columns(
+    columns: &[String],
+    select_stmt: &SelectStatement,
+) -> Vec<ColumnDefinition> {
+    let mut definitions = column_definitions_from_names(columns);
+    let source_label = if select_stmt.joins.is_empty() {
+        if !select_stmt.from.is_empty() {
+            select_stmt
+                .from_alias
+                .clone()
+                .or_else(|| Some(select_stmt.from.clone()))
+        } else if let Some((_, alias, _)) = select_stmt.from_values.as_ref() {
+            Some(alias.clone())
+        } else {
+            select_stmt
+                .from_function
+                .as_ref()
+                .and_then(|function| function.alias.clone())
+        }
+    } else {
+        None
+    };
+
+    if let Some(label) = source_label {
+        for column in &mut definitions {
+            if !column.name.contains('.') {
+                column.name = format!("{}.{}", label, column.name);
+            }
+        }
+    }
+
+    definitions
 }
 
 fn combined_column_definitions(left: &[String], right: &[String]) -> Vec<ColumnDefinition> {
@@ -1776,9 +2342,262 @@ fn lateral_subquery_with_outer_scope(
             table_alias: None,
             on: None,
             using_columns: None,
-            lateral: true,
+            lateral: false,
             subquery: None,
         });
     }
     rewritten
+}
+
+struct OuterColumnMapping {
+    original_name: String,
+    unqualified_name: String,
+    scoped_name: String,
+}
+
+fn scoped_outer_columns(
+    outer_columns: &[ColumnDefinition],
+) -> (Vec<ColumnDefinition>, Vec<OuterColumnMapping>) {
+    let mut scoped_columns = Vec::with_capacity(outer_columns.len());
+    let mut mappings = Vec::with_capacity(outer_columns.len());
+
+    for (idx, column) in outer_columns.iter().enumerate() {
+        let scoped_name = format!("__outer_col_{}", idx);
+        let mut scoped_column = column.clone();
+        scoped_column.name = scoped_name.clone();
+        scoped_columns.push(scoped_column);
+        mappings.push(OuterColumnMapping {
+            original_name: column.name.clone(),
+            unqualified_name: unqualified_column_name(&column.name).to_string(),
+            scoped_name,
+        });
+    }
+
+    (scoped_columns, mappings)
+}
+
+fn scoped_subquery_with_outer_scope(
+    subquery: &SelectStatement,
+    outer_table_name: &str,
+    outer_column_mappings: &[OuterColumnMapping],
+    local_columns: &HashSet<String>,
+) -> SelectStatement {
+    let mut rewritten = lateral_subquery_with_outer_scope(subquery, outer_table_name);
+    rewrite_select_outer_references(&mut rewritten, outer_column_mappings, local_columns);
+    rewritten
+}
+
+fn rewrite_select_outer_references(
+    stmt: &mut SelectStatement,
+    outer_column_mappings: &[OuterColumnMapping],
+    local_columns: &HashSet<String>,
+) {
+    for column in &mut stmt.columns {
+        rewrite_column_outer_references(column, outer_column_mappings, local_columns);
+    }
+    if let Some(where_clause) = stmt.where_clause.as_mut() {
+        rewrite_expression_outer_references(where_clause, outer_column_mappings, local_columns);
+    }
+    if let Some(group_by) = stmt.group_by.as_mut() {
+        rewrite_group_by_outer_references(group_by, outer_column_mappings, local_columns);
+    }
+    if let Some(having) = stmt.having.as_mut() {
+        rewrite_expression_outer_references(having, outer_column_mappings, local_columns);
+    }
+    if let Some(order_by) = stmt.order_by.as_mut() {
+        for order_expr in order_by {
+            rewrite_expression_outer_references(
+                &mut order_expr.expr,
+                outer_column_mappings,
+                local_columns,
+            );
+        }
+    }
+    if let Some((_, right_select)) = stmt.set_op.as_mut() {
+        rewrite_select_outer_references(right_select, outer_column_mappings, local_columns);
+    }
+}
+
+fn rewrite_column_outer_references(
+    column: &mut Column,
+    outer_column_mappings: &[OuterColumnMapping],
+    local_columns: &HashSet<String>,
+) {
+    match column {
+        Column::Named { name, .. } => {
+            if let Some(scoped_name) =
+                scoped_outer_column_name(name, outer_column_mappings, local_columns)
+            {
+                *name = scoped_name;
+            }
+        }
+        Column::Function(aggregate) => {
+            rewrite_expression_outer_references(
+                &mut aggregate.expr,
+                outer_column_mappings,
+                local_columns,
+            );
+            if let Some(filter) = aggregate.filter.as_mut() {
+                rewrite_expression_outer_references(filter, outer_column_mappings, local_columns);
+            }
+        }
+        Column::Expression { expr, .. } => {
+            rewrite_expression_outer_references(expr, outer_column_mappings, local_columns);
+        }
+        Column::All | Column::Subquery(_) => {}
+    }
+}
+
+fn rewrite_group_by_outer_references(
+    group_by: &mut GroupByClause,
+    outer_column_mappings: &[OuterColumnMapping],
+    local_columns: &HashSet<String>,
+) {
+    match group_by {
+        GroupByClause::Simple(exprs)
+        | GroupByClause::Rollup(exprs)
+        | GroupByClause::Cube(exprs) => {
+            for expr in exprs {
+                rewrite_expression_outer_references(expr, outer_column_mappings, local_columns);
+            }
+        }
+        GroupByClause::GroupingSets(sets) => {
+            for set in sets {
+                for expr in set {
+                    rewrite_expression_outer_references(expr, outer_column_mappings, local_columns);
+                }
+            }
+        }
+    }
+}
+
+fn rewrite_expression_outer_references(
+    expr: &mut Expression,
+    outer_column_mappings: &[OuterColumnMapping],
+    local_columns: &HashSet<String>,
+) {
+    match expr {
+        Expression::Column(name) => {
+            if let Some(scoped_name) =
+                scoped_outer_column_name(name, outer_column_mappings, local_columns)
+            {
+                *name = scoped_name;
+            }
+        }
+        Expression::BinaryOp { left, right, .. } => {
+            rewrite_expression_outer_references(left, outer_column_mappings, local_columns);
+            rewrite_expression_outer_references(right, outer_column_mappings, local_columns);
+        }
+        Expression::UnaryOp { expr, .. } | Expression::IsNull { expr, .. } => {
+            rewrite_expression_outer_references(expr, outer_column_mappings, local_columns);
+        }
+        Expression::In { left, .. } => {
+            rewrite_expression_outer_references(left, outer_column_mappings, local_columns);
+        }
+        Expression::Any { left, .. } | Expression::All { left, .. } => {
+            rewrite_expression_outer_references(left, outer_column_mappings, local_columns);
+        }
+        Expression::Function(aggregate) => {
+            rewrite_expression_outer_references(
+                &mut aggregate.expr,
+                outer_column_mappings,
+                local_columns,
+            );
+            if let Some(filter) = aggregate.filter.as_mut() {
+                rewrite_expression_outer_references(filter, outer_column_mappings, local_columns);
+            }
+        }
+        Expression::Case {
+            operand,
+            when_clauses,
+            else_clause,
+        } => {
+            if let Some(operand) = operand {
+                rewrite_expression_outer_references(operand, outer_column_mappings, local_columns);
+            }
+            for (condition, result) in when_clauses {
+                rewrite_expression_outer_references(
+                    condition,
+                    outer_column_mappings,
+                    local_columns,
+                );
+                rewrite_expression_outer_references(result, outer_column_mappings, local_columns);
+            }
+            if let Some(else_clause) = else_clause {
+                rewrite_expression_outer_references(
+                    else_clause,
+                    outer_column_mappings,
+                    local_columns,
+                );
+            }
+        }
+        Expression::ScalarFunction { args, .. } => {
+            for arg in args {
+                rewrite_expression_outer_references(arg, outer_column_mappings, local_columns);
+            }
+        }
+        Expression::WindowFunction {
+            args,
+            partition_by,
+            order_by,
+            ..
+        } => {
+            for arg in args {
+                rewrite_expression_outer_references(arg, outer_column_mappings, local_columns);
+            }
+            for expr in partition_by {
+                rewrite_expression_outer_references(expr, outer_column_mappings, local_columns);
+            }
+            for order_expr in order_by {
+                rewrite_expression_outer_references(
+                    &mut order_expr.expr,
+                    outer_column_mappings,
+                    local_columns,
+                );
+            }
+        }
+        Expression::Cast { expr, .. } => {
+            rewrite_expression_outer_references(expr, outer_column_mappings, local_columns);
+        }
+        Expression::IsDistinctFrom { left, right, .. } => {
+            rewrite_expression_outer_references(left, outer_column_mappings, local_columns);
+            rewrite_expression_outer_references(right, outer_column_mappings, local_columns);
+        }
+        Expression::Subquery(_) | Expression::Exists(_) | Expression::Value(_) => {}
+    }
+}
+
+fn scoped_outer_column_name(
+    reference: &str,
+    outer_column_mappings: &[OuterColumnMapping],
+    local_columns: &HashSet<String>,
+) -> Option<String> {
+    if reference.contains('.') {
+        if let Some(mapping) = outer_column_mappings
+            .iter()
+            .find(|mapping| mapping.original_name == reference)
+        {
+            return Some(mapping.scoped_name.clone());
+        }
+
+        if local_columns.contains(reference) {
+            return None;
+        }
+
+        let unqualified = unqualified_column_name(reference);
+        return outer_column_mappings
+            .iter()
+            .find(|mapping| mapping.unqualified_name == unqualified)
+            .map(|mapping| mapping.scoped_name.clone());
+    }
+
+    if local_columns.contains(reference) {
+        return None;
+    }
+
+    let unqualified = unqualified_column_name(reference);
+    outer_column_mappings
+        .iter()
+        .find(|mapping| mapping.unqualified_name == unqualified)
+        .map(|mapping| mapping.scoped_name.clone())
 }

@@ -1,5 +1,5 @@
 mod common;
-use common::{execute, reset_database};
+use common::*;
 use rustql::ast::*;
 
 #[test]
@@ -44,6 +44,6 @@ fn test_create_and_drop_table() {
         if_exists: false,
     });
 
-    assert_eq!(execute(create).unwrap(), "Table 'users' created");
-    assert_eq!(execute(drop).unwrap(), "Table 'users' dropped");
+    assert_command(execute(create).unwrap(), CommandTag::CreateTable, 0);
+    assert_command(execute(drop).unwrap(), CommandTag::DropTable, 0);
 }

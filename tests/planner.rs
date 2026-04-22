@@ -1,5 +1,5 @@
 mod common;
-use common::{process_query, reset_database, snapshot_database};
+use common::*;
 use rustql::*;
 use std::sync::Mutex;
 
@@ -15,13 +15,13 @@ fn setup_test() -> std::sync::MutexGuard<'static, ()> {
 fn test_query_planner_basic() {
     let _guard = setup_test();
 
-    process_query("CREATE TABLE users (id INTEGER, name TEXT, age INTEGER)").unwrap();
+    execute_sql("CREATE TABLE users (id INTEGER, name TEXT, age INTEGER)").unwrap();
 
-    process_query("INSERT INTO users VALUES (1, 'Alice', 25)").unwrap();
-    process_query("INSERT INTO users VALUES (2, 'Bob', 30)").unwrap();
-    process_query("INSERT INTO users VALUES (3, 'Charlie', 35)").unwrap();
+    execute_sql("INSERT INTO users VALUES (1, 'Alice', 25)").unwrap();
+    execute_sql("INSERT INTO users VALUES (2, 'Bob', 30)").unwrap();
+    execute_sql("INSERT INTO users VALUES (3, 'Charlie', 35)").unwrap();
 
-    process_query("CREATE INDEX idx_age ON users (age)").unwrap();
+    execute_sql("CREATE INDEX idx_age ON users (age)").unwrap();
 
     let db = snapshot_database().unwrap();
 
@@ -43,11 +43,11 @@ fn test_query_planner_basic() {
 fn test_query_planner_join() {
     let _guard = setup_test();
 
-    process_query("CREATE TABLE users (id INTEGER, name TEXT)").unwrap();
-    process_query("CREATE TABLE orders (id INTEGER, user_id INTEGER, amount FLOAT)").unwrap();
+    execute_sql("CREATE TABLE users (id INTEGER, name TEXT)").unwrap();
+    execute_sql("CREATE TABLE orders (id INTEGER, user_id INTEGER, amount FLOAT)").unwrap();
 
-    process_query("INSERT INTO users VALUES (1, 'Alice')").unwrap();
-    process_query("INSERT INTO orders VALUES (1, 1, 100.0)").unwrap();
+    execute_sql("INSERT INTO users VALUES (1, 'Alice')").unwrap();
+    execute_sql("INSERT INTO orders VALUES (1, 1, 100.0)").unwrap();
 
     let db = snapshot_database().unwrap();
 
@@ -74,14 +74,14 @@ fn test_query_planner_join() {
 fn test_explain_command() {
     let _guard = setup_test();
 
-    process_query("CREATE TABLE users (id INTEGER, name TEXT, age INTEGER)").unwrap();
+    execute_sql("CREATE TABLE users (id INTEGER, name TEXT, age INTEGER)").unwrap();
 
-    process_query("INSERT INTO users VALUES (1, 'Alice', 25)").unwrap();
-    process_query("INSERT INTO users VALUES (2, 'Bob', 30)").unwrap();
+    execute_sql("INSERT INTO users VALUES (1, 'Alice', 25)").unwrap();
+    execute_sql("INSERT INTO users VALUES (2, 'Bob', 30)").unwrap();
 
-    process_query("CREATE INDEX idx_age ON users (age)").unwrap();
+    execute_sql("CREATE INDEX idx_age ON users (age)").unwrap();
 
-    let result = process_query("EXPLAIN SELECT * FROM users WHERE age > 25");
+    let result = execute_sql("EXPLAIN SELECT * FROM users WHERE age > 25");
     assert!(result.is_ok());
     let plan_str = result.unwrap();
 
@@ -95,13 +95,13 @@ fn test_explain_command() {
 fn test_explain_with_join() {
     let _guard = setup_test();
 
-    process_query("CREATE TABLE users (id INTEGER, name TEXT)").unwrap();
-    process_query("CREATE TABLE orders (id INTEGER, user_id INTEGER, amount FLOAT)").unwrap();
+    execute_sql("CREATE TABLE users (id INTEGER, name TEXT)").unwrap();
+    execute_sql("CREATE TABLE orders (id INTEGER, user_id INTEGER, amount FLOAT)").unwrap();
 
-    process_query("INSERT INTO users VALUES (1, 'Alice')").unwrap();
-    process_query("INSERT INTO orders VALUES (1, 1, 100.0)").unwrap();
+    execute_sql("INSERT INTO users VALUES (1, 'Alice')").unwrap();
+    execute_sql("INSERT INTO orders VALUES (1, 1, 100.0)").unwrap();
 
-    let result = process_query(
+    let result = execute_sql(
         "EXPLAIN SELECT users.name, orders.amount FROM users JOIN orders ON users.id = orders.user_id",
     );
     assert!(result.is_ok());
@@ -119,12 +119,12 @@ fn test_explain_with_join() {
 fn test_explain_fetch_with_ties() {
     let _guard = setup_test();
 
-    process_query("CREATE TABLE scores (id INTEGER, score INTEGER)").unwrap();
-    process_query("INSERT INTO scores VALUES (1, 100)").unwrap();
-    process_query("INSERT INTO scores VALUES (2, 90)").unwrap();
-    process_query("INSERT INTO scores VALUES (3, 90)").unwrap();
+    execute_sql("CREATE TABLE scores (id INTEGER, score INTEGER)").unwrap();
+    execute_sql("INSERT INTO scores VALUES (1, 100)").unwrap();
+    execute_sql("INSERT INTO scores VALUES (2, 90)").unwrap();
+    execute_sql("INSERT INTO scores VALUES (3, 90)").unwrap();
 
-    let result = process_query(
+    let result = execute_sql(
         "EXPLAIN SELECT id FROM scores ORDER BY score DESC FETCH FIRST 2 ROWS WITH TIES",
     );
     assert!(result.is_ok());
@@ -138,7 +138,7 @@ fn test_explain_fetch_with_ties() {
 fn test_explain_generate_series() {
     let _guard = setup_test();
 
-    let result = process_query("EXPLAIN SELECT * FROM GENERATE_SERIES(1, 5)");
+    let result = execute_sql("EXPLAIN SELECT * FROM GENERATE_SERIES(1, 5)");
     assert!(result.is_ok());
     let plan_str = result.unwrap();
 
@@ -150,12 +150,12 @@ fn test_explain_generate_series() {
 fn test_explain_distinct_on() {
     let _guard = setup_test();
 
-    process_query("CREATE TABLE items (category TEXT, item TEXT, price INTEGER)").unwrap();
-    process_query("INSERT INTO items VALUES ('fruit', 'apple', 1)").unwrap();
-    process_query("INSERT INTO items VALUES ('fruit', 'banana', 2)").unwrap();
-    process_query("INSERT INTO items VALUES ('veggie', 'carrot', 3)").unwrap();
+    execute_sql("CREATE TABLE items (category TEXT, item TEXT, price INTEGER)").unwrap();
+    execute_sql("INSERT INTO items VALUES ('fruit', 'apple', 1)").unwrap();
+    execute_sql("INSERT INTO items VALUES ('fruit', 'banana', 2)").unwrap();
+    execute_sql("INSERT INTO items VALUES ('veggie', 'carrot', 3)").unwrap();
 
-    let result = process_query(
+    let result = execute_sql(
         "EXPLAIN SELECT DISTINCT ON (category) category, item, price FROM items ORDER BY category, price",
     );
     assert!(result.is_ok());
@@ -169,13 +169,13 @@ fn test_explain_distinct_on() {
 fn test_explain_natural_join() {
     let _guard = setup_test();
 
-    process_query("CREATE TABLE departments (id INTEGER, dept_name TEXT)").unwrap();
-    process_query("CREATE TABLE staff (id INTEGER, staff_name TEXT)").unwrap();
-    process_query("INSERT INTO departments VALUES (1, 'Engineering'), (2, 'Sales')").unwrap();
-    process_query("INSERT INTO staff VALUES (1, 'Alice'), (2, 'Bob')").unwrap();
+    execute_sql("CREATE TABLE departments (id INTEGER, dept_name TEXT)").unwrap();
+    execute_sql("CREATE TABLE staff (id INTEGER, staff_name TEXT)").unwrap();
+    execute_sql("INSERT INTO departments VALUES (1, 'Engineering'), (2, 'Sales')").unwrap();
+    execute_sql("INSERT INTO staff VALUES (1, 'Alice'), (2, 'Bob')").unwrap();
 
     let result =
-        process_query("EXPLAIN SELECT dept_name, staff_name FROM departments NATURAL JOIN staff");
+        execute_sql("EXPLAIN SELECT dept_name, staff_name FROM departments NATURAL JOIN staff");
     assert!(result.is_ok());
     let plan_str = result.unwrap();
 
@@ -187,12 +187,12 @@ fn test_explain_natural_join() {
 fn test_explain_full_join() {
     let _guard = setup_test();
 
-    process_query("CREATE TABLE left_table (id INTEGER, name TEXT)").unwrap();
-    process_query("CREATE TABLE right_table (id INTEGER, value TEXT)").unwrap();
-    process_query("INSERT INTO left_table VALUES (1, 'A'), (2, 'B')").unwrap();
-    process_query("INSERT INTO right_table VALUES (2, 'Y'), (3, 'Z')").unwrap();
+    execute_sql("CREATE TABLE left_table (id INTEGER, name TEXT)").unwrap();
+    execute_sql("CREATE TABLE right_table (id INTEGER, value TEXT)").unwrap();
+    execute_sql("INSERT INTO left_table VALUES (1, 'A'), (2, 'B')").unwrap();
+    execute_sql("INSERT INTO right_table VALUES (2, 'Y'), (3, 'Z')").unwrap();
 
-    let result = process_query(
+    let result = execute_sql(
         "EXPLAIN SELECT * FROM left_table FULL JOIN right_table ON left_table.id = right_table.id",
     );
     assert!(result.is_ok());
@@ -206,37 +206,37 @@ fn test_explain_full_join() {
 fn test_explain_multi_join() {
     let _guard = setup_test();
 
-    process_query("CREATE TABLE customers (id INTEGER, name TEXT)").unwrap();
-    process_query("CREATE TABLE orders (id INTEGER, customer_id INTEGER, product_id INTEGER)")
+    execute_sql("CREATE TABLE customers (id INTEGER, name TEXT)").unwrap();
+    execute_sql("CREATE TABLE orders (id INTEGER, customer_id INTEGER, product_id INTEGER)")
         .unwrap();
-    process_query("CREATE TABLE products (id INTEGER, pname TEXT)").unwrap();
-    process_query("INSERT INTO customers VALUES (1, 'Alice'), (2, 'Bob')").unwrap();
-    process_query("INSERT INTO orders VALUES (10, 1, 100), (11, 2, 101)").unwrap();
-    process_query("INSERT INTO products VALUES (100, 'Widget'), (101, 'Gadget')").unwrap();
+    execute_sql("CREATE TABLE products (id INTEGER, pname TEXT)").unwrap();
+    execute_sql("INSERT INTO customers VALUES (1, 'Alice'), (2, 'Bob')").unwrap();
+    execute_sql("INSERT INTO orders VALUES (10, 1, 100), (11, 2, 101)").unwrap();
+    execute_sql("INSERT INTO products VALUES (100, 'Widget'), (101, 'Gadget')").unwrap();
 
-    let result = process_query(
+    let result = execute_sql(
         "EXPLAIN SELECT customers.name, products.pname
          FROM customers
          JOIN orders ON customers.id = orders.customer_id
          JOIN products ON orders.product_id = products.id",
     );
     assert!(result.is_ok());
-    let plan_str = result.unwrap();
+    let plan = result.unwrap();
 
-    assert!(plan_str.contains("Query Plan"));
-    assert!(plan_str.matches("Join").count() >= 2);
+    assert!(plan.contains("Query Plan"));
+    assert!(query_output_lines(&plan).join("\n").matches("Join").count() >= 2);
 }
 
 #[test]
 fn test_explain_join_subquery() {
     let _guard = setup_test();
 
-    process_query("CREATE TABLE users (id INTEGER, name TEXT)").unwrap();
-    process_query("CREATE TABLE orders (id INTEGER, user_id INTEGER, amount INTEGER)").unwrap();
-    process_query("INSERT INTO users VALUES (1, 'Alice'), (2, 'Bob')").unwrap();
-    process_query("INSERT INTO orders VALUES (10, 1, 75), (11, 2, 60)").unwrap();
+    execute_sql("CREATE TABLE users (id INTEGER, name TEXT)").unwrap();
+    execute_sql("CREATE TABLE orders (id INTEGER, user_id INTEGER, amount INTEGER)").unwrap();
+    execute_sql("INSERT INTO users VALUES (1, 'Alice'), (2, 'Bob')").unwrap();
+    execute_sql("INSERT INTO orders VALUES (10, 1, 75), (11, 2, 60)").unwrap();
 
-    let result = process_query(
+    let result = execute_sql(
         "EXPLAIN SELECT users.name, recent.amount
          FROM users
          JOIN (
@@ -256,11 +256,11 @@ fn test_explain_join_subquery() {
 fn test_explain_rollup() {
     let _guard = setup_test();
 
-    process_query("CREATE TABLE sales (region TEXT, product TEXT, amount INTEGER)").unwrap();
-    process_query("INSERT INTO sales VALUES ('East', 'Widget', 100), ('West', 'Gadget', 200)")
+    execute_sql("CREATE TABLE sales (region TEXT, product TEXT, amount INTEGER)").unwrap();
+    execute_sql("INSERT INTO sales VALUES ('East', 'Widget', 100), ('West', 'Gadget', 200)")
         .unwrap();
 
-    let result = process_query(
+    let result = execute_sql(
         "EXPLAIN SELECT region, product, COUNT(*) AS total
          FROM sales
          GROUP BY ROLLUP(region, product)",
@@ -276,12 +276,12 @@ fn test_explain_rollup() {
 fn test_explain_lateral_join() {
     let _guard = setup_test();
 
-    process_query("CREATE TABLE users (id INTEGER, name TEXT)").unwrap();
-    process_query("CREATE TABLE orders (id INTEGER, user_id INTEGER, amount INTEGER)").unwrap();
-    process_query("INSERT INTO users VALUES (1, 'Alice'), (2, 'Bob')").unwrap();
-    process_query("INSERT INTO orders VALUES (10, 1, 75), (11, 2, 60)").unwrap();
+    execute_sql("CREATE TABLE users (id INTEGER, name TEXT)").unwrap();
+    execute_sql("CREATE TABLE orders (id INTEGER, user_id INTEGER, amount INTEGER)").unwrap();
+    execute_sql("INSERT INTO users VALUES (1, 'Alice'), (2, 'Bob')").unwrap();
+    execute_sql("INSERT INTO orders VALUES (10, 1, 75), (11, 2, 60)").unwrap();
 
-    let result = process_query(
+    let result = execute_sql(
         "EXPLAIN SELECT users.name, recent.amount
          FROM users
          LEFT JOIN LATERAL (

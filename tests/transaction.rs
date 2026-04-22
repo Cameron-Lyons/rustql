@@ -1,5 +1,5 @@
 mod common;
-use common::{process_query, reset_database};
+use common::*;
 use std::sync::Mutex;
 
 static TEST_MUTEX: Mutex<()> = Mutex::new(());
@@ -13,26 +13,26 @@ fn setup_test<'a>() -> std::sync::MutexGuard<'a, ()> {
 #[test]
 fn test_begin_commit_transaction() {
     let _guard = setup_test();
-    process_query("CREATE TABLE users (id INTEGER, name TEXT)").unwrap();
+    execute_sql("CREATE TABLE users (id INTEGER, name TEXT)").unwrap();
 
-    let result = process_query("BEGIN TRANSACTION");
+    let result = execute_sql("BEGIN TRANSACTION");
     assert!(result.is_ok());
-    assert_eq!(result.unwrap(), "Transaction begun");
+    assert_command(result.unwrap(), CommandTag::BeginTransaction, 0);
 
-    process_query("INSERT INTO users VALUES (1, 'Alice')").unwrap();
-    process_query("INSERT INTO users VALUES (2, 'Bob')").unwrap();
+    execute_sql("INSERT INTO users VALUES (1, 'Alice')").unwrap();
+    execute_sql("INSERT INTO users VALUES (2, 'Bob')").unwrap();
 
-    let result = process_query("SELECT * FROM users");
+    let result = execute_sql("SELECT * FROM users");
     assert!(result.is_ok());
     let result_str = result.unwrap();
     assert!(result_str.contains("Alice"));
     assert!(result_str.contains("Bob"));
 
-    let result = process_query("COMMIT TRANSACTION");
+    let result = execute_sql("COMMIT TRANSACTION");
     assert!(result.is_ok());
-    assert_eq!(result.unwrap(), "Transaction committed");
+    assert_command(result.unwrap(), CommandTag::CommitTransaction, 0);
 
-    let result = process_query("SELECT * FROM users");
+    let result = execute_sql("SELECT * FROM users");
     assert!(result.is_ok());
     let result_str = result.unwrap();
     assert!(result_str.contains("Alice"));
@@ -42,27 +42,27 @@ fn test_begin_commit_transaction() {
 #[test]
 fn test_begin_rollback_transaction() {
     let _guard = setup_test();
-    process_query("CREATE TABLE users (id INTEGER, name TEXT)").unwrap();
-    process_query("INSERT INTO users VALUES (1, 'Alice')").unwrap();
+    execute_sql("CREATE TABLE users (id INTEGER, name TEXT)").unwrap();
+    execute_sql("INSERT INTO users VALUES (1, 'Alice')").unwrap();
 
-    let result = process_query("BEGIN TRANSACTION");
+    let result = execute_sql("BEGIN TRANSACTION");
     assert!(result.is_ok());
 
-    process_query("INSERT INTO users VALUES (2, 'Bob')").unwrap();
-    process_query("INSERT INTO users VALUES (3, 'Charlie')").unwrap();
+    execute_sql("INSERT INTO users VALUES (2, 'Bob')").unwrap();
+    execute_sql("INSERT INTO users VALUES (3, 'Charlie')").unwrap();
 
-    let result = process_query("SELECT * FROM users");
+    let result = execute_sql("SELECT * FROM users");
     assert!(result.is_ok());
     let result_str = result.unwrap();
     assert!(result_str.contains("Alice"));
     assert!(result_str.contains("Bob"));
     assert!(result_str.contains("Charlie"));
 
-    let result = process_query("ROLLBACK TRANSACTION");
+    let result = execute_sql("ROLLBACK TRANSACTION");
     assert!(result.is_ok());
-    assert_eq!(result.unwrap(), "Transaction rolled back");
+    assert_command(result.unwrap(), CommandTag::RollbackTransaction, 0);
 
-    let result = process_query("SELECT * FROM users");
+    let result = execute_sql("SELECT * FROM users");
     assert!(result.is_ok());
     let result_str = result.unwrap();
     assert!(result_str.contains("Alice"));
@@ -73,9 +73,9 @@ fn test_begin_rollback_transaction() {
 #[test]
 fn test_nested_transaction_error() {
     let _guard = setup_test();
-    process_query("BEGIN TRANSACTION").unwrap();
+    execute_sql("BEGIN TRANSACTION").unwrap();
 
-    let result = process_query("BEGIN TRANSACTION");
+    let result = execute_sql("BEGIN TRANSACTION");
     assert!(result.is_err());
     assert!(
         result
@@ -83,14 +83,14 @@ fn test_nested_transaction_error() {
             .contains("Transaction already in progress")
     );
 
-    process_query("ROLLBACK TRANSACTION").unwrap();
+    execute_sql("ROLLBACK TRANSACTION").unwrap();
 }
 
 #[test]
 fn test_commit_without_transaction_error() {
     let _guard = setup_test();
 
-    let result = process_query("COMMIT TRANSACTION");
+    let result = execute_sql("COMMIT TRANSACTION");
     assert!(result.is_err());
     assert!(result.unwrap_err().contains("No transaction in progress"));
 }
@@ -99,7 +99,7 @@ fn test_commit_without_transaction_error() {
 fn test_rollback_without_transaction_error() {
     let _guard = setup_test();
 
-    let result = process_query("ROLLBACK TRANSACTION");
+    let result = execute_sql("ROLLBACK TRANSACTION");
     assert!(result.is_err());
     assert!(result.unwrap_err().contains("No transaction in progress"));
 }

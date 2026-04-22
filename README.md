@@ -117,13 +117,13 @@ Set `RUSTQL_STORAGE_PATH=/path/to/file` to override the selected storage file.
 | `planner.rs` | Cost-based query planner |
 | `plan_executor.rs` | Executes optimized query plans |
 | `storage.rs` | JSON and B-tree storage engines, file format, and recovery journal |
-| `testing.rs` | Hidden compatibility helpers used by the test suite |
+| `tests/common/` | Test harness helpers and compatibility result renderer |
 | `wal.rs` | Write-ahead log for transaction rollback |
 | `error.rs` | Error types |
 
 ## Roadmap
 
-- [v1 Breaking Roadmap](docs/v1-breaking-roadmap.md)
+- [v1 Status Matrix](docs/v1-breaking-roadmap.md)
 
 ## Testing
 

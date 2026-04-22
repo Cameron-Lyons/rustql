@@ -23,6 +23,15 @@ regex = "1.12.3"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 
+[features]
+default = []
+testing-api = []
+
+[dev-dependencies]
+# Integration tests opt into hidden internals without making them part of
+# the default public API.
+rustql = { path = ".", features = ["testing-api"] }
+
 [[bench]]
 name = "engine"
 harness = false

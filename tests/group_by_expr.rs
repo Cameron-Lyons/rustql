@@ -1,6 +1,6 @@
 mod common;
-use common::process_query;
 use common::reset_database;
+use common::*;
 use std::sync::Once;
 
 static INIT: Once = Once::new();
@@ -14,15 +14,14 @@ fn setup() {
 #[test]
 fn test_group_by_single_column() {
     setup();
-    process_query("CREATE TABLE IF NOT EXISTS gbe_sales (region TEXT, amount INTEGER)").unwrap();
-    process_query("DELETE FROM gbe_sales").unwrap_or_default();
-    process_query(
+    execute_sql("CREATE TABLE IF NOT EXISTS gbe_sales (region TEXT, amount INTEGER)").unwrap();
+    let _ = execute_sql("DELETE FROM gbe_sales");
+    execute_sql(
         "INSERT INTO gbe_sales VALUES ('North', 100), ('South', 200), ('North', 150), ('South', 50)",
     )
     .unwrap();
 
-    let result =
-        process_query("SELECT region, SUM(amount) FROM gbe_sales GROUP BY region").unwrap();
+    let result = execute_sql("SELECT region, SUM(amount) FROM gbe_sales GROUP BY region").unwrap();
     assert!(result.contains("North"));
     assert!(result.contains("South"));
     assert!(result.contains("250")); // North total or South total
@@ -31,15 +30,14 @@ fn test_group_by_single_column() {
 #[test]
 fn test_group_by_with_count() {
     setup();
-    process_query("CREATE TABLE IF NOT EXISTS gbe_items (category TEXT, name TEXT)").unwrap();
-    process_query("DELETE FROM gbe_items").unwrap_or_default();
-    process_query(
+    execute_sql("CREATE TABLE IF NOT EXISTS gbe_items (category TEXT, name TEXT)").unwrap();
+    let _ = execute_sql("DELETE FROM gbe_items");
+    execute_sql(
         "INSERT INTO gbe_items VALUES ('A', 'Item1'), ('A', 'Item2'), ('B', 'Item3'), ('A', 'Item4')",
     )
     .unwrap();
 
-    let result =
-        process_query("SELECT category, COUNT(*) FROM gbe_items GROUP BY category").unwrap();
+    let result = execute_sql("SELECT category, COUNT(*) FROM gbe_items GROUP BY category").unwrap();
     assert!(result.contains("A"));
     assert!(result.contains("B"));
     assert!(result.contains("3")); // A has 3 items
@@ -49,15 +47,14 @@ fn test_group_by_with_count() {
 #[test]
 fn test_group_by_with_having() {
     setup();
-    process_query("CREATE TABLE IF NOT EXISTS gbe_products (category TEXT, price INTEGER)")
-        .unwrap();
-    process_query("DELETE FROM gbe_products").unwrap_or_default();
-    process_query(
+    execute_sql("CREATE TABLE IF NOT EXISTS gbe_products (category TEXT, price INTEGER)").unwrap();
+    let _ = execute_sql("DELETE FROM gbe_products");
+    execute_sql(
         "INSERT INTO gbe_products VALUES ('A', 10), ('A', 20), ('B', 5), ('B', 8), ('C', 100)",
     )
     .unwrap();
 
-    let result = process_query(
+    let result = execute_sql(
         "SELECT category, SUM(price) FROM gbe_products GROUP BY category HAVING SUM(price) > 15",
     )
     .unwrap();
@@ -68,14 +65,14 @@ fn test_group_by_with_having() {
 #[test]
 fn test_group_by_with_avg() {
     setup();
-    process_query("CREATE TABLE IF NOT EXISTS gbe_scores (team TEXT, score INTEGER)").unwrap();
-    process_query("DELETE FROM gbe_scores").unwrap_or_default();
-    process_query(
+    execute_sql("CREATE TABLE IF NOT EXISTS gbe_scores (team TEXT, score INTEGER)").unwrap();
+    let _ = execute_sql("DELETE FROM gbe_scores");
+    execute_sql(
         "INSERT INTO gbe_scores VALUES ('Red', 10), ('Red', 20), ('Blue', 15), ('Blue', 25)",
     )
     .unwrap();
 
-    let result = process_query("SELECT team, AVG(score) FROM gbe_scores GROUP BY team").unwrap();
+    let result = execute_sql("SELECT team, AVG(score) FROM gbe_scores GROUP BY team").unwrap();
     assert!(result.contains("Red"));
     assert!(result.contains("Blue"));
     assert!(result.contains("15")); // Red avg
@@ -85,13 +82,13 @@ fn test_group_by_with_avg() {
 #[test]
 fn test_group_by_with_min_max() {
     setup();
-    process_query("CREATE TABLE IF NOT EXISTS gbe_temps (city TEXT, temp INTEGER)").unwrap();
-    process_query("DELETE FROM gbe_temps").unwrap_or_default();
-    process_query("INSERT INTO gbe_temps VALUES ('NYC', 30), ('NYC', 40), ('LA', 60), ('LA', 80)")
+    execute_sql("CREATE TABLE IF NOT EXISTS gbe_temps (city TEXT, temp INTEGER)").unwrap();
+    let _ = execute_sql("DELETE FROM gbe_temps");
+    execute_sql("INSERT INTO gbe_temps VALUES ('NYC', 30), ('NYC', 40), ('LA', 60), ('LA', 80)")
         .unwrap();
 
     let result =
-        process_query("SELECT city, MIN(temp), MAX(temp) FROM gbe_temps GROUP BY city").unwrap();
+        execute_sql("SELECT city, MIN(temp), MAX(temp) FROM gbe_temps GROUP BY city").unwrap();
     assert!(result.contains("NYC"));
     assert!(result.contains("LA"));
     assert!(result.contains("30")); // NYC min

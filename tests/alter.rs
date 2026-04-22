@@ -1,5 +1,5 @@
 mod common;
-use common::{execute, reset_database};
+use common::*;
 use rustql::ast::*;
 
 #[test]
@@ -43,5 +43,5 @@ fn test_alter_table_add_column() {
     });
 
     let result = execute(alter).unwrap();
-    assert!(result.contains("Column 'name' added"));
+    assert_command(result, CommandTag::AlterTable, 0);
 }

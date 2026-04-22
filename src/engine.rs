@@ -3,6 +3,8 @@ use crate::database::Database;
 use crate::error::RustqlError;
 use crate::storage::StorageEngine;
 use crate::{executor, lexer, parser};
+#[cfg(not(feature = "testing-api"))]
+use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -12,7 +14,41 @@ const DEFAULT_JSON_PATH: &str = "rustql_data.json";
 const DEFAULT_BTREE_PATH: &str = "rustql_btree.dat";
 
 pub type Row = Vec<Value>;
+
+#[cfg(feature = "testing-api")]
 pub type PlanTree = crate::planner::PlanNode;
+
+#[cfg(not(feature = "testing-api"))]
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlanTree {
+    inner: crate::planner::PlanNode,
+}
+
+#[cfg(not(feature = "testing-api"))]
+impl PlanTree {
+    fn new(inner: crate::planner::PlanNode) -> Self {
+        Self { inner }
+    }
+}
+
+#[cfg(not(feature = "testing-api"))]
+impl fmt::Display for PlanTree {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.inner.fmt(f)
+    }
+}
+
+pub(crate) fn plan_tree_from_node(node: crate::planner::PlanNode) -> PlanTree {
+    #[cfg(feature = "testing-api")]
+    {
+        node
+    }
+
+    #[cfg(not(feature = "testing-api"))]
+    {
+        PlanTree::new(node)
+    }
+}
 
 #[derive(Debug, Clone)]
 pub enum StorageMode {
@@ -153,6 +189,7 @@ impl Engine {
         Session { engine: self }
     }
 
+    #[cfg(feature = "testing-api")]
     pub fn snapshot_database(&self) -> Database {
         self.context.database_snapshot()
     }
@@ -176,7 +213,7 @@ impl Session<'_> {
         let statements = parser::parse_script_spanned(tokens)?;
         let mut results = Vec::with_capacity(statements.len());
         for statement in statements {
-            results.push(self.execute_statement(statement)?);
+            results.push(self.execute_statement_inner(statement)?);
         }
         Ok(results)
     }
@@ -184,10 +221,18 @@ impl Session<'_> {
     pub fn execute_one(&mut self, sql: &str) -> Result<QueryResult, RustqlError> {
         let tokens = lexer::tokenize_spanned(sql)?;
         let statement = parser::parse_spanned(tokens)?;
-        self.execute_statement(statement)
+        self.execute_statement_inner(statement)
     }
 
+    #[cfg(feature = "testing-api")]
     pub fn execute_statement(&mut self, statement: Statement) -> Result<QueryResult, RustqlError> {
+        self.execute_statement_inner(statement)
+    }
+
+    fn execute_statement_inner(
+        &mut self,
+        statement: Statement,
+    ) -> Result<QueryResult, RustqlError> {
         executor::execute(&self.engine.context, statement)
     }
 }
