@@ -1484,24 +1484,65 @@ pub fn validate_check_constraints(
     for col_def in columns {
         if let Some(ref check_expr_str) = col_def.check {
             let wrapped = format!("SELECT * FROM _dummy WHERE {}", check_expr_str);
-            if let Ok(tokens) = crate::lexer::tokenize(&wrapped)
-                && let Ok(Statement::Select(select_stmt)) = crate::parser::parse(tokens)
-                && let Some(where_expr) = select_stmt.where_clause
-            {
-                let result = evaluate_expression(None, &where_expr, columns, row)?;
-                if !result {
-                    return Err(RustqlError::ConstraintViolation {
-                        kind: ConstraintKind::NotNull,
-                        message: format!(
-                            "CHECK constraint violation on column '{}': {}",
-                            col_def.name, check_expr_str
-                        ),
-                    });
-                }
+            let select_stmt = parse_wrapped_select(&wrapped)?;
+            let Some(where_expr) = select_stmt.where_clause else {
+                return Err(RustqlError::Internal(format!(
+                    "CHECK constraint on column '{}' did not produce a predicate",
+                    col_def.name
+                )));
+            };
+
+            let result = evaluate_expression(None, &where_expr, columns, row)?;
+            if !result {
+                return Err(RustqlError::ConstraintViolation {
+                    kind: ConstraintKind::Check,
+                    message: format!(
+                        "CHECK constraint violation on column '{}': {}",
+                        col_def.name, check_expr_str
+                    ),
+                });
             }
         }
     }
     Ok(())
+}
+
+fn parse_wrapped_select(sql: &str) -> Result<SelectStatement, RustqlError> {
+    let tokens = crate::lexer::tokenize(sql)?;
+    match crate::parser::parse(tokens)? {
+        Statement::Select(select_stmt) => Ok(select_stmt),
+        _ => Err(RustqlError::Internal(
+            "Wrapped expression did not parse as SELECT".to_string(),
+        )),
+    }
+}
+
+fn evaluate_generated_value(
+    select_stmt: &SelectStatement,
+    columns: &[ColumnDefinition],
+    row: &[Value],
+) -> Result<Value, RustqlError> {
+    match select_stmt.columns.first() {
+        Some(Column::Expression { expr, .. }) => evaluate_value_expression(expr, columns, row),
+        Some(Column::Named { name, .. }) => {
+            let src_idx = columns
+                .iter()
+                .position(|column| column.name == *name)
+                .ok_or_else(|| RustqlError::ColumnNotFound(name.clone()))?;
+            row.get(src_idx).cloned().ok_or_else(|| {
+                RustqlError::Internal(format!(
+                    "Generated column source '{}' is outside the row",
+                    name
+                ))
+            })
+        }
+        Some(_) => Err(RustqlError::TypeMismatch(
+            "Generated column expression must be scalar".to_string(),
+        )),
+        None => Err(RustqlError::Internal(
+            "Generated column expression produced no output".to_string(),
+        )),
+    }
 }
 
 fn evaluate_generated_columns(
@@ -1522,20 +1563,10 @@ fn evaluate_generated_columns(
             }
 
             let wrapped = format!("SELECT {} FROM _dummy", generated.expr_sql);
-            if let Ok(tokens) = crate::lexer::tokenize(&wrapped)
-                && let Ok(Statement::Select(select_stmt)) = crate::parser::parse(tokens)
-            {
-                if let Some(Column::Expression { expr, .. }) = select_stmt.columns.first() {
-                    if col_idx < row.len() {
-                        row[col_idx] = evaluate_value_expression(expr, columns, row)?;
-                    }
-                } else if let Some(Column::Named { name, .. }) = select_stmt.columns.first()
-                    && let Some(src_idx) = columns.iter().position(|c| c.name == *name)
-                    && col_idx < row.len()
-                    && src_idx < row.len()
-                {
-                    row[col_idx] = row[src_idx].clone();
-                }
+            let select_stmt = parse_wrapped_select(&wrapped)?;
+            if col_idx < row.len() {
+                let value = evaluate_generated_value(&select_stmt, columns, row)?;
+                row[col_idx] = value;
             }
         }
     }
@@ -1549,20 +1580,10 @@ fn evaluate_generated_columns_update(
     for (col_idx, col_def) in columns.iter().enumerate() {
         if let Some(ref generated) = col_def.generated {
             let wrapped = format!("SELECT {} FROM _dummy", generated.expr_sql);
-            if let Ok(tokens) = crate::lexer::tokenize(&wrapped)
-                && let Ok(Statement::Select(select_stmt)) = crate::parser::parse(tokens)
-            {
-                if let Some(Column::Expression { expr, .. }) = select_stmt.columns.first() {
-                    if col_idx < row.len() {
-                        row[col_idx] = evaluate_value_expression(expr, columns, row)?;
-                    }
-                } else if let Some(Column::Named { name, .. }) = select_stmt.columns.first()
-                    && let Some(src_idx) = columns.iter().position(|c| c.name == *name)
-                    && col_idx < row.len()
-                    && src_idx < row.len()
-                {
-                    row[col_idx] = row[src_idx].clone();
-                }
+            let select_stmt = parse_wrapped_select(&wrapped)?;
+            if col_idx < row.len() {
+                let value = evaluate_generated_value(&select_stmt, columns, row)?;
+                row[col_idx] = value;
             }
         }
     }

@@ -1,5 +1,6 @@
 use crate::ast::{ColumnDefinition, TableConstraint, Value};
 use crate::database::{Database, RowId};
+use crate::engine::{EngineOptions, StorageMode};
 use crate::error::RustqlError;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::collections::{HashMap, VecDeque};
@@ -89,21 +90,25 @@ impl StorageEngine for JsonStorageEngine {
     }
 }
 
-fn default_engine() -> Box<dyn StorageEngine> {
-    match std::env::var("RUSTQL_STORAGE") {
-        Ok(v) if v.eq_ignore_ascii_case("btree") => {
-            Box::new(BTreeStorageEngine::new("rustql_btree.dat"))
+#[allow(deprecated)]
+fn default_engine() -> Result<Box<dyn StorageEngine>, RustqlError> {
+    match EngineOptions::from_env()?.storage {
+        StorageMode::Json { path } => Ok(Box::new(JsonStorageEngine::new(path))),
+        StorageMode::BTree { path } | StorageMode::Disk { path } => {
+            Ok(Box::new(BTreeStorageEngine::new(path)))
         }
-        _ => Box::new(JsonStorageEngine::new("rustql_data.json")),
+        StorageMode::Memory => Err(RustqlError::StorageError(
+            "Legacy Database::load/save helpers require persistent storage".to_string(),
+        )),
     }
 }
 
-pub fn load_database() -> Result<Database, RustqlError> {
-    default_engine().load()
+pub(crate) fn load_database() -> Result<Database, RustqlError> {
+    default_engine()?.load()
 }
 
-pub fn save_database(db: &Database) -> Result<(), RustqlError> {
-    default_engine().save(db)
+pub(crate) fn save_database(db: &Database) -> Result<(), RustqlError> {
+    default_engine()?.save(db)
 }
 
 static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);

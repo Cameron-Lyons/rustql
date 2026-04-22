@@ -101,6 +101,21 @@ impl Parser {
         }
     }
 
+    fn finish_single_statement(&mut self, statement: Statement) -> Result<Statement, RustqlError> {
+        while *self.current_token() == Token::Semicolon {
+            self.advance();
+        }
+
+        if *self.current_token() != Token::Eof {
+            return Err(RustqlError::ParseError(format!(
+                "Unexpected trailing token: {:?}",
+                self.current_token()
+            )));
+        }
+
+        Ok(statement)
+    }
+
     fn parse_with_select(&mut self) -> Result<Statement, RustqlError> {
         self.consume(Token::With)?;
         let recursive = if *self.current_token() == Token::Recursive {
@@ -4292,15 +4307,21 @@ fn token_to_sql(tok: &Token) -> String {
 
 pub fn parse(tokens: Vec<Token>) -> Result<Statement, RustqlError> {
     let mut parser = Parser::new(tokens);
-    parser
+    let statement = parser
         .parse_statement()
+        .map_err(|err| parser.with_current_location(err))?;
+    parser
+        .finish_single_statement(statement)
         .map_err(|err| parser.with_current_location(err))
 }
 
 pub fn parse_spanned(tokens: Vec<SpannedToken>) -> Result<Statement, RustqlError> {
     let mut parser = Parser::new_spanned(tokens);
-    parser
+    let statement = parser
         .parse_statement()
+        .map_err(|err| parser.with_current_location(err))?;
+    parser
+        .finish_single_statement(statement)
         .map_err(|err| parser.with_current_location(err))
 }
 
@@ -4321,6 +4342,13 @@ pub fn parse_script(tokens: Vec<Token>) -> Result<Vec<Statement>, RustqlError> {
 
         if *parser.current_token() == Token::Semicolon {
             parser.advance();
+        } else if *parser.current_token() != Token::Eof {
+            return Err(
+                parser.with_current_location(RustqlError::ParseError(format!(
+                    "Expected semicolon or end of input, found {:?}",
+                    parser.current_token()
+                ))),
+            );
         }
     }
 
@@ -4344,6 +4372,13 @@ pub fn parse_script_spanned(tokens: Vec<SpannedToken>) -> Result<Vec<Statement>,
 
         if *parser.current_token() == Token::Semicolon {
             parser.advance();
+        } else if *parser.current_token() != Token::Eof {
+            return Err(
+                parser.with_current_location(RustqlError::ParseError(format!(
+                    "Expected semicolon or end of input, found {:?}",
+                    parser.current_token()
+                ))),
+            );
         }
     }
 

@@ -80,12 +80,9 @@ echo "SHOW TABLES" | cargo run --release
 For embedding, open an engine and execute SQL through a session:
 
 ```rust
-use rustql::{Engine, EngineOptions, StorageMode};
+use rustql::Engine;
 
-let engine = Engine::open(EngineOptions {
-    storage: StorageMode::Memory,
-})
-    .unwrap();
+let engine = Engine::in_memory().unwrap();
 let mut session = engine.session();
 
 session.execute_one("CREATE TABLE users (id INTEGER)").unwrap();
@@ -103,6 +100,7 @@ let results = session.execute("SELECT * FROM users").unwrap();
 
 Use `EngineOptions::default()` to open the default JSON-backed engine at `rustql_data.json`.
 Set `RUSTQL_STORAGE=btree` for the B-tree-backed CLI store at `rustql_btree.dat`.
+Set `RUSTQL_STORAGE_PATH=/path/to/file` to override the selected storage file.
 
 ## Project structure
 

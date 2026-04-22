@@ -6,6 +6,7 @@ pub enum ConstraintKind {
     PrimaryKey,
     Unique,
     ForeignKey,
+    Check,
 }
 
 impl fmt::Display for ConstraintKind {
@@ -15,6 +16,7 @@ impl fmt::Display for ConstraintKind {
             ConstraintKind::PrimaryKey => write!(f, "Primary key"),
             ConstraintKind::Unique => write!(f, "Unique"),
             ConstraintKind::ForeignKey => write!(f, "Foreign key"),
+            ConstraintKind::Check => write!(f, "CHECK"),
         }
     }
 }

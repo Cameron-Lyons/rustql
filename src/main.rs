@@ -1,18 +1,10 @@
 use rustql::Value;
-use rustql::{CommandTag, Engine, EngineOptions, ExplainAnalyzeResult, QueryResult, RowBatch};
+use rustql::{CommandTag, Engine, ExplainAnalyzeResult, QueryResult, RowBatch};
 use std::io::{self, IsTerminal, Read, Write};
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
-    let options = match EngineOptions::from_env() {
-        Ok(options) => options,
-        Err(e) => {
-            eprintln!("Error: {}", e);
-            return ExitCode::FAILURE;
-        }
-    };
-
-    let engine = match Engine::open(options) {
+    let engine = match Engine::from_env() {
         Ok(engine) => engine,
         Err(e) => {
             eprintln!("Error: {}", e);

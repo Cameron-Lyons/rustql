@@ -6,6 +6,11 @@ use crate::{executor, lexer, parser};
 use std::path::PathBuf;
 use std::sync::Arc;
 
+const ENV_STORAGE_KIND: &str = "RUSTQL_STORAGE";
+const ENV_STORAGE_PATH: &str = "RUSTQL_STORAGE_PATH";
+const DEFAULT_JSON_PATH: &str = "rustql_data.json";
+const DEFAULT_BTREE_PATH: &str = "rustql_btree.dat";
+
 pub type Row = Vec<Value>;
 pub type PlanTree = crate::planner::PlanNode;
 
@@ -33,31 +38,70 @@ impl Default for EngineOptions {
     fn default() -> Self {
         Self {
             storage: StorageMode::Json {
-                path: PathBuf::from("rustql_data.json"),
+                path: PathBuf::from(DEFAULT_JSON_PATH),
             },
         }
     }
 }
 
 impl EngineOptions {
+    pub fn memory() -> Self {
+        Self {
+            storage: StorageMode::Memory,
+        }
+    }
+
+    pub fn json(path: impl Into<PathBuf>) -> Self {
+        Self {
+            storage: StorageMode::Json { path: path.into() },
+        }
+    }
+
+    pub fn btree(path: impl Into<PathBuf>) -> Self {
+        Self {
+            storage: StorageMode::BTree { path: path.into() },
+        }
+    }
+
     pub fn from_env() -> Result<Self, RustqlError> {
-        match std::env::var("RUSTQL_STORAGE") {
+        let storage = match std::env::var(ENV_STORAGE_KIND) {
             Ok(value) if value.eq_ignore_ascii_case("btree") => Ok(Self {
                 storage: StorageMode::BTree {
-                    path: PathBuf::from("rustql_btree.dat"),
+                    path: storage_path_from_env(DEFAULT_BTREE_PATH)?,
                 },
             }),
-            Ok(value) if value.eq_ignore_ascii_case("json") => Ok(Self::default()),
+            Ok(value) if value.eq_ignore_ascii_case("json") => Ok(Self {
+                storage: StorageMode::Json {
+                    path: storage_path_from_env(DEFAULT_JSON_PATH)?,
+                },
+            }),
             Ok(value) => Err(RustqlError::StorageError(format!(
                 "Unsupported RUSTQL_STORAGE value '{}'. Expected 'json' or 'btree'",
                 value
             ))),
-            Err(std::env::VarError::NotPresent) => Ok(Self::default()),
+            Err(std::env::VarError::NotPresent) => Ok(Self {
+                storage: StorageMode::Json {
+                    path: storage_path_from_env(DEFAULT_JSON_PATH)?,
+                },
+            }),
             Err(err) => Err(RustqlError::StorageError(format!(
                 "Failed to read RUSTQL_STORAGE: {}",
                 err
             ))),
-        }
+        }?;
+
+        Ok(storage)
+    }
+}
+
+fn storage_path_from_env(default_path: &str) -> Result<PathBuf, RustqlError> {
+    match std::env::var_os(ENV_STORAGE_PATH) {
+        Some(path) if path.is_empty() => Err(RustqlError::StorageError(format!(
+            "{} cannot be empty",
+            ENV_STORAGE_PATH
+        ))),
+        Some(path) => Ok(PathBuf::from(path)),
+        None => Ok(PathBuf::from(default_path)),
     }
 }
 
@@ -66,6 +110,18 @@ pub struct Engine {
 }
 
 impl Engine {
+    pub fn open_default() -> Result<Self, RustqlError> {
+        Self::open(EngineOptions::default())
+    }
+
+    pub fn from_env() -> Result<Self, RustqlError> {
+        Self::open(EngineOptions::from_env()?)
+    }
+
+    pub fn in_memory() -> Result<Self, RustqlError> {
+        Self::open(EngineOptions::memory())
+    }
+
     #[allow(deprecated)]
     pub fn open(options: EngineOptions) -> Result<Self, RustqlError> {
         let (database, storage) = match &options.storage {

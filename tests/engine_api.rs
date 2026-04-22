@@ -1,8 +1,44 @@
 use rustql::{
-    CommandTag, Engine, EngineOptions, QueryResult, StorageMode, ast, lexer, parser, planner,
+    CommandTag, ConstraintKind, Database, Engine, EngineOptions, QueryResult, RustqlError,
+    StorageMode, ast, lexer, parser, planner,
 };
 use std::collections::BTreeSet;
+use std::ffi::{OsStr, OsString};
 use std::sync::{Mutex, OnceLock};
+
+struct EnvVarGuard {
+    key: &'static str,
+    original: Option<OsString>,
+}
+
+impl EnvVarGuard {
+    fn unset(key: &'static str) -> Self {
+        let original = std::env::var_os(key);
+        unsafe {
+            std::env::remove_var(key);
+        }
+        Self { key, original }
+    }
+
+    fn set(key: &'static str, value: impl AsRef<OsStr>) -> Self {
+        let original = std::env::var_os(key);
+        unsafe {
+            std::env::set_var(key, value);
+        }
+        Self { key, original }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        unsafe {
+            match &self.original {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+}
 
 fn test_guard() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -43,6 +79,153 @@ fn default_engine_options_use_json_storage() {
 }
 
 #[test]
+fn engine_options_constructors_set_storage_modes() {
+    match EngineOptions::memory().storage {
+        StorageMode::Memory => {}
+        other => panic!("expected memory storage, got: {other:?}"),
+    }
+
+    let json_path = std::path::PathBuf::from("custom.json");
+    match EngineOptions::json(&json_path).storage {
+        StorageMode::Json { path } => assert_eq!(path, json_path),
+        other => panic!("expected JSON storage, got: {other:?}"),
+    }
+
+    let btree_path = std::path::PathBuf::from("custom.dat");
+    match EngineOptions::btree(&btree_path).storage {
+        StorageMode::BTree { path } => assert_eq!(path, btree_path),
+        other => panic!("expected BTree storage, got: {other:?}"),
+    }
+}
+
+#[test]
+fn in_memory_engine_constructor_opens_engine() {
+    let engine = Engine::in_memory().unwrap();
+    let mut session = engine.session();
+
+    let result = session.execute_one("SELECT 1 AS value").unwrap();
+
+    match result {
+        QueryResult::Rows(rows) => assert_eq!(rows.rows, vec![vec![ast::Value::Integer(1)]]),
+        other => panic!("expected rows, got: {other:?}"),
+    }
+}
+
+#[test]
+fn engine_from_env_opens_configured_storage() {
+    let _guard = test_guard();
+    let path = unique_temp_path("engine_from_env", "json");
+    cleanup_storage_path(&path);
+    let _storage = EnvVarGuard::set("RUSTQL_STORAGE", "json");
+    let _path = EnvVarGuard::set("RUSTQL_STORAGE_PATH", &path);
+
+    {
+        let engine = Engine::from_env().unwrap();
+        let mut session = engine.session();
+        session
+            .execute_one("CREATE TABLE env_open (id INTEGER)")
+            .unwrap();
+    }
+
+    assert!(path.exists());
+
+    cleanup_storage_path(&path);
+}
+
+#[test]
+fn engine_options_from_env_default_uses_json_storage() {
+    let _guard = test_guard();
+    let _storage = EnvVarGuard::unset("RUSTQL_STORAGE");
+    let _path = EnvVarGuard::unset("RUSTQL_STORAGE_PATH");
+
+    let options = EngineOptions::from_env().unwrap();
+
+    match options.storage {
+        StorageMode::Json { path } => {
+            assert_eq!(path, std::path::PathBuf::from("rustql_data.json"))
+        }
+        other => panic!("expected JSON storage by default, got: {other:?}"),
+    }
+}
+
+#[test]
+fn engine_options_from_env_uses_path_override() {
+    let _guard = test_guard();
+    let path = unique_temp_path("env_json", "json");
+    let _storage = EnvVarGuard::set("RUSTQL_STORAGE", "json");
+    let _path = EnvVarGuard::set("RUSTQL_STORAGE_PATH", &path);
+
+    let options = EngineOptions::from_env().unwrap();
+
+    match options.storage {
+        StorageMode::Json { path: actual } => assert_eq!(actual, path),
+        other => panic!("expected JSON storage, got: {other:?}"),
+    }
+}
+
+#[test]
+fn engine_options_from_env_btree_uses_path_override() {
+    let _guard = test_guard();
+    let path = unique_temp_path("env_btree", "dat");
+    let _storage = EnvVarGuard::set("RUSTQL_STORAGE", "btree");
+    let _path = EnvVarGuard::set("RUSTQL_STORAGE_PATH", &path);
+
+    let options = EngineOptions::from_env().unwrap();
+
+    match options.storage {
+        StorageMode::BTree { path: actual } => assert_eq!(actual, path),
+        other => panic!("expected BTree storage, got: {other:?}"),
+    }
+}
+
+#[test]
+fn engine_options_from_env_rejects_empty_path_override() {
+    let _guard = test_guard();
+    let _storage = EnvVarGuard::set("RUSTQL_STORAGE", "json");
+    let _path = EnvVarGuard::set("RUSTQL_STORAGE_PATH", "");
+
+    let error = EngineOptions::from_env().unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("RUSTQL_STORAGE_PATH cannot be empty")
+    );
+}
+
+#[test]
+fn engine_options_from_env_rejects_unknown_storage() {
+    let _guard = test_guard();
+    let _storage = EnvVarGuard::set("RUSTQL_STORAGE", "sqlite");
+    let _path = EnvVarGuard::unset("RUSTQL_STORAGE_PATH");
+
+    let error = EngineOptions::from_env().unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("Unsupported RUSTQL_STORAGE value")
+    );
+}
+
+#[test]
+fn legacy_database_helpers_use_env_path_override() {
+    let _guard = test_guard();
+    let path = unique_temp_path("database_env", "json");
+    cleanup_storage_path(&path);
+    let _storage = EnvVarGuard::set("RUSTQL_STORAGE", "json");
+    let _path = EnvVarGuard::set("RUSTQL_STORAGE_PATH", &path);
+
+    Database::new().save().unwrap();
+    let loaded = Database::load().unwrap();
+
+    assert!(path.exists());
+    assert!(loaded.tables.is_empty());
+
+    cleanup_storage_path(&path);
+}
+
+#[test]
 fn execute_one_parse_errors_include_line_and_column() {
     let engine = Engine::open(EngineOptions {
         storage: StorageMode::Memory,
@@ -53,6 +236,66 @@ fn execute_one_parse_errors_include_line_and_column() {
     let error = session.execute_one("SELECT FROM users").unwrap_err();
 
     assert!(error.to_string().contains("line 1, column"));
+}
+
+#[test]
+fn execute_one_accepts_trailing_semicolon() {
+    let engine = Engine::in_memory().unwrap();
+    let mut session = engine.session();
+
+    let result = session.execute_one("SELECT 1 AS value;").unwrap();
+
+    match result {
+        QueryResult::Rows(rows) => assert_eq!(rows.rows, vec![vec![ast::Value::Integer(1)]]),
+        other => panic!("expected rows, got {other:?}"),
+    }
+}
+
+#[test]
+fn execute_one_rejects_multiple_statements() {
+    let engine = Engine::in_memory().unwrap();
+    let mut session = engine.session();
+
+    let error = session.execute_one("SELECT 1;\nSELECT 2").unwrap_err();
+
+    assert!(error.to_string().contains("Unexpected trailing token"));
+    assert!(error.to_string().contains("line 2, column 1"));
+}
+
+#[test]
+fn execute_script_requires_statement_separator() {
+    let engine = Engine::in_memory().unwrap();
+    let mut session = engine.session();
+
+    let error = session.execute_script("SELECT 1\nSELECT 2").unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("Expected semicolon or end of input")
+    );
+    assert!(error.to_string().contains("line 2, column 1"));
+}
+
+#[test]
+fn check_constraint_errors_report_check_kind() {
+    let engine = Engine::in_memory().unwrap();
+    let mut session = engine.session();
+
+    session
+        .execute_one("CREATE TABLE checked_values (value INTEGER CHECK (value > 0))")
+        .unwrap();
+    let error = session
+        .execute_one("INSERT INTO checked_values VALUES (-1)")
+        .unwrap_err();
+
+    match error {
+        RustqlError::ConstraintViolation { kind, message } => {
+            assert_eq!(kind, ConstraintKind::Check);
+            assert!(message.contains("CHECK constraint violation"));
+        }
+        other => panic!("expected CHECK constraint violation, got {other:?}"),
+    }
 }
 
 #[test]
