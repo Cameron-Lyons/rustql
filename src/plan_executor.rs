@@ -993,11 +993,9 @@ impl<'a> PlanExecutor<'a> {
         let mut seen = agg.distinct.then(BTreeSet::new);
 
         for row in rows {
-            if agg.filter.as_deref().is_some_and(|filter_expr| {
-                !self
-                    .evaluate_expression(filter_expr, columns, row)
-                    .unwrap_or(false)
-            }) {
+            if let Some(filter_expr) = agg.filter.as_deref()
+                && !self.evaluate_expression(filter_expr, columns, row)?
+            {
                 continue;
             }
 

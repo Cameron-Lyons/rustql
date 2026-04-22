@@ -1048,7 +1048,7 @@ pub(crate) fn execute_select_internal(
             stmt.where_clause
         {
             if let Some(index_usage) = super::ddl::find_index_usage(db, &stmt.from, where_expr) {
-                super::ddl::get_indexed_rows(db, table, &index_usage).ok()
+                Some(super::ddl::get_indexed_rows(db, table, &index_usage)?)
             } else {
                 None
             }
@@ -1355,7 +1355,7 @@ pub fn eval_subquery_values(
         {
             if let Some(index_usage) = super::ddl::find_index_usage(db, &subquery.from, where_expr)
             {
-                super::ddl::get_indexed_rows(db, table, &index_usage).ok()
+                Some(super::ddl::get_indexed_rows(db, table, &index_usage)?)
             } else {
                 None
             }

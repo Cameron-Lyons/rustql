@@ -190,72 +190,22 @@ pub fn perform_multiple_joins(
         let mut joined_rows: Vec<Cow<'_, [Value]>> = Vec::new();
         let mut matched_pairs = HashSet::new();
 
-        let check_join_match = |current_row: &[Value], join_row: &[Value]| -> bool {
-            if let Some(Expression::BinaryOp { left, op, right }) = &join.on
-                && *op == BinaryOperator::Equal
-                && let (Expression::Column(left_col), Expression::Column(right_col)) =
-                    (left.as_ref(), right.as_ref())
-            {
-                let get_col_idx = |col_name: &str| -> Option<usize> {
-                    if col_name.contains('.') {
-                        let parts: Vec<&str> = col_name.split('.').collect();
-                        if parts.len() == 2 {
-                            let table_name = parts[0];
-                            let col_name = parts[1];
-                            if let Some(tbl_idx) = table_names.iter().position(|n| n == table_name)
-                            {
-                                let mut col_offset = 0;
-                                for (idx, &col_count) in table_column_counts.iter().enumerate() {
-                                    if idx == tbl_idx {
-                                        let columns: Cow<'_, [ColumnDefinition]> = if idx == 0 {
-                                            Cow::Borrowed(from_table.columns.as_slice())
-                                        } else if idx == table_column_counts.len() - 1
-                                            && table_names[idx] == join_table_name
-                                        {
-                                            Cow::Borrowed(join_table.columns.as_slice())
-                                        } else {
-                                            Cow::Borrowed(
-                                                &all_columns[col_offset..col_offset + col_count],
-                                            )
-                                        };
-                                        if let Some(col_idx) =
-                                            columns.iter().position(|c| c.name == col_name)
-                                        {
-                                            return Some(col_offset + col_idx);
-                                        }
-                                    }
-                                    col_offset += col_count;
-                                }
-                            }
-                        }
-                    }
-                    None
+        let mut join_condition_columns = all_columns.clone();
+        join_condition_columns.extend(join_table.columns.clone());
+        let join_condition_columns = lateral_outer_scope_columns(
+            &table_names,
+            &table_column_counts,
+            &join_condition_columns,
+        );
+
+        let check_join_match =
+            |current_row: &[Value], join_row: &[Value]| -> Result<bool, RustqlError> {
+                let Some(ref condition) = join.on else {
+                    return Ok(true);
                 };
-
-                let left_col_idx = get_col_idx(left_col);
-                let right_col_idx = get_col_idx(right_col);
-
-                let left_val = left_col_idx.and_then(|idx| {
-                    if idx < current_row.len() {
-                        current_row.get(idx)
-                    } else {
-                        join_row.get(idx - current_row.len())
-                    }
-                });
-                let right_val = right_col_idx.and_then(|idx| {
-                    if idx < current_row.len() {
-                        current_row.get(idx)
-                    } else {
-                        join_row.get(idx - current_row.len())
-                    }
-                });
-
-                if let (Some(lv), Some(rv)) = (left_val, right_val) {
-                    return lv == rv;
-                }
-            }
-            false
-        };
+                let combined_row = combine_rows(current_row, join_row);
+                evaluate_expression(Some(db), condition, &join_condition_columns, &combined_row)
+            };
 
         if let Some(ref using_cols) = join.using_columns {
             let common_columns: Vec<(usize, usize)> = using_cols
@@ -315,7 +265,7 @@ pub fn perform_multiple_joins(
                         let current_row = current_row.as_ref();
                         let mut has_match = false;
                         for (ji, join_row) in join_table.rows.iter().enumerate() {
-                            if check_join_match(current_row, join_row) {
+                            if check_join_match(current_row, join_row)? {
                                 joined_rows.push(Cow::Owned(combine_rows(current_row, join_row)));
                                 has_match = true;
                                 matched_pairs.insert((curr_idx, ji));
@@ -332,7 +282,7 @@ pub fn perform_multiple_joins(
                         for (ji, join_row) in join_table.rows.iter().enumerate() {
                             let mut has_match = false;
                             for (curr_idx, current_row) in current_rows.iter().enumerate() {
-                                if check_join_match(current_row.as_ref(), join_row) {
+                                if check_join_match(current_row.as_ref(), join_row)? {
                                     has_match = true;
                                     if !matches!(join.join_type, JoinType::Full)
                                         || !matched_pairs.contains(&(curr_idx, ji))

@@ -66,14 +66,12 @@ pub fn compute_aggregate_filtered(
     rows: &[&Vec<Value>],
 ) -> Result<Value, RustqlError> {
     if let Some(ref filter_expr) = agg.filter {
-        let filtered: Vec<&Vec<Value>> = rows
-            .iter()
-            .filter(|row| {
-                super::expr::evaluate_expression(None, filter_expr, &table.columns, row)
-                    .unwrap_or(false)
-            })
-            .copied()
-            .collect();
+        let mut filtered = Vec::new();
+        for row in rows {
+            if super::expr::evaluate_expression(None, filter_expr, &table.columns, row)? {
+                filtered.push(*row);
+            }
+        }
         compute_aggregate_inner(
             &agg.function,
             &agg.expr,

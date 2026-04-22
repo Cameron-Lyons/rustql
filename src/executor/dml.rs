@@ -349,7 +349,11 @@ pub fn execute_update(
 
         if let Some(ref where_expr) = stmt.where_clause {
             if let Some(index_usage) = super::ddl::find_index_usage(&db, &stmt.table, where_expr) {
-                super::ddl::get_indexed_rows(&db, table_ref_immut, &index_usage).ok()
+                Some(super::ddl::get_indexed_rows(
+                    &db,
+                    table_ref_immut,
+                    &index_usage,
+                )?)
             } else {
                 None
             }
@@ -505,8 +509,7 @@ pub fn execute_delete(
                 combined_row.extend(using_row.clone());
 
                 let matches = if let Some(ref where_expr) = stmt.where_clause {
-                    evaluate_expression(Some(&*db), where_expr, &combined_columns, &combined_row)
-                        .unwrap_or(false)
+                    evaluate_expression(Some(&*db), where_expr, &combined_columns, &combined_row)?
                 } else {
                     true
                 };
@@ -542,7 +545,7 @@ pub fn execute_delete(
                     if let Some(index_usage) =
                         super::ddl::find_index_usage(&db, &stmt.table, where_expr)
                     {
-                        super::ddl::get_indexed_rows(&db, table_ref, &index_usage).ok()
+                        Some(super::ddl::get_indexed_rows(&db, table_ref, &index_usage)?)
                     } else {
                         None
                     }
@@ -568,9 +571,7 @@ pub fn execute_delete(
                     };
 
                 for (_, _, row) in rows_to_check {
-                    if evaluate_expression(Some(&*db), where_expr, &table_ref.columns, row)
-                        .unwrap_or(false)
-                    {
+                    if evaluate_expression(Some(&*db), where_expr, &table_ref.columns, row)? {
                         rows.push(row.clone());
                     }
                 }
@@ -602,7 +603,7 @@ pub fn execute_delete(
             })
         } else if let Some(ref where_expr) = stmt.where_clause {
             if let Some(index_usage) = super::ddl::find_index_usage(&db, &stmt.table, where_expr) {
-                super::ddl::get_indexed_rows(&db, table_ref, &index_usage).ok()
+                Some(super::ddl::get_indexed_rows(&db, table_ref, &index_usage)?)
             } else {
                 None
             }
@@ -645,7 +646,7 @@ pub fn execute_delete(
                 };
 
             for (idx, row) in rows_to_check {
-                if evaluate_expression(Some(&*db), where_expr, &columns, row).unwrap_or(false) {
+                if evaluate_expression(Some(&*db), where_expr, &columns, row)? {
                     rows_to_delete_indices.push(idx);
                 }
             }

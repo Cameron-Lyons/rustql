@@ -90,19 +90,24 @@ pub fn evaluate_expression(
             let db_ref =
                 db.ok_or_else(|| "ANY subquery not allowed in this context".to_string())?;
             let sub_vals = super::select::eval_subquery_values(db_ref, subquery)?;
-            Ok(sub_vals
-                .iter()
-                .any(|v| compare_values(&left_val, op, v).unwrap_or(false)))
+            for value in &sub_vals {
+                if compare_values(&left_val, op, value)? {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
         }
         Expression::All { left, op, subquery } => {
             let left_val = evaluate_value_expression_with_db(left, columns, row, db)?;
             let db_ref =
                 db.ok_or_else(|| "ALL subquery not allowed in this context".to_string())?;
             let sub_vals = super::select::eval_subquery_values(db_ref, subquery)?;
-            Ok(sub_vals.is_empty()
-                || sub_vals
-                    .iter()
-                    .all(|v| compare_values(&left_val, op, v).unwrap_or(false)))
+            for value in &sub_vals {
+                if !compare_values(&left_val, op, value)? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
         }
         Expression::IsNull { expr, not } => {
             let value = evaluate_value_expression_with_db(expr, columns, row, db)?;

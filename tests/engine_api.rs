@@ -278,6 +278,68 @@ fn execute_script_requires_statement_separator() {
 }
 
 #[test]
+fn delete_where_invalid_column_returns_error() {
+    let engine = Engine::in_memory().unwrap();
+    let mut session = engine.session();
+
+    session
+        .execute_script(
+            "
+            CREATE TABLE delete_errors (id INTEGER);
+            INSERT INTO delete_errors VALUES (1);
+            ",
+        )
+        .unwrap();
+    let error = session
+        .execute_one("DELETE FROM delete_errors WHERE missing = 1")
+        .unwrap_err();
+
+    assert!(matches!(error, RustqlError::ColumnNotFound(_)));
+}
+
+#[test]
+fn delete_using_invalid_column_returns_error() {
+    let engine = Engine::in_memory().unwrap();
+    let mut session = engine.session();
+
+    session
+        .execute_script(
+            "
+            CREATE TABLE delete_using_errors (id INTEGER);
+            CREATE TABLE delete_using_filter (id INTEGER);
+            INSERT INTO delete_using_errors VALUES (1);
+            INSERT INTO delete_using_filter VALUES (1);
+            ",
+        )
+        .unwrap();
+    let error = session
+        .execute_one("DELETE FROM delete_using_errors USING delete_using_filter WHERE missing = 1")
+        .unwrap_err();
+
+    assert!(matches!(error, RustqlError::ColumnNotFound(_)));
+}
+
+#[test]
+fn partial_index_invalid_filter_column_returns_error() {
+    let engine = Engine::in_memory().unwrap();
+    let mut session = engine.session();
+
+    session
+        .execute_script(
+            "
+            CREATE TABLE partial_index_errors (id INTEGER);
+            INSERT INTO partial_index_errors VALUES (1);
+            ",
+        )
+        .unwrap();
+    let error = session
+        .execute_one("CREATE INDEX idx_bad_partial ON partial_index_errors(id) WHERE missing = 1")
+        .unwrap_err();
+
+    assert!(matches!(error, RustqlError::ColumnNotFound(_)));
+}
+
+#[test]
 fn check_constraint_errors_report_check_kind() {
     let engine = Engine::in_memory().unwrap();
     let mut session = engine.session();
@@ -296,6 +358,57 @@ fn check_constraint_errors_report_check_kind() {
         }
         other => panic!("expected CHECK constraint violation, got {other:?}"),
     }
+}
+
+#[test]
+fn aggregate_filter_invalid_column_returns_error() {
+    let engine = Engine::in_memory().unwrap();
+    let mut session = engine.session();
+
+    session
+        .execute_script(
+            "
+            CREATE TABLE aggregate_filter_errors (id INTEGER);
+            INSERT INTO aggregate_filter_errors VALUES (1);
+            ",
+        )
+        .unwrap();
+    let error = session
+        .execute_one("SELECT COUNT(*) FILTER (WHERE missing = 1) FROM aggregate_filter_errors")
+        .unwrap_err();
+
+    assert!(matches!(error, RustqlError::ColumnNotFound(_)));
+}
+
+#[test]
+fn any_all_type_mismatch_returns_error() {
+    let engine = Engine::in_memory().unwrap();
+    let mut session = engine.session();
+
+    session
+        .execute_script(
+            "
+            CREATE TABLE any_all_values (id INTEGER, val INTEGER);
+            CREATE TABLE any_all_text_values (val TEXT);
+            INSERT INTO any_all_values VALUES (1, 10);
+            INSERT INTO any_all_text_values VALUES ('x');
+            ",
+        )
+        .unwrap();
+
+    let any_error = session
+        .execute_one(
+            "SELECT id FROM any_all_values WHERE val = ANY (SELECT val FROM any_all_text_values)",
+        )
+        .unwrap_err();
+    let all_error = session
+        .execute_one(
+            "SELECT id FROM any_all_values WHERE val = ALL (SELECT val FROM any_all_text_values)",
+        )
+        .unwrap_err();
+
+    assert!(matches!(any_error, RustqlError::TypeMismatch(_)));
+    assert!(matches!(all_error, RustqlError::TypeMismatch(_)));
 }
 
 #[test]

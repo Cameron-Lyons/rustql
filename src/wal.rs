@@ -121,7 +121,7 @@ impl WalLog {
         for entry in entries_to_rollback.into_iter().rev() {
             rollback_single_entry(entry, db);
         }
-        rebuild_all_indexes(db);
+        rebuild_all_indexes(db)?;
         Ok(())
     }
 
@@ -278,7 +278,7 @@ impl WalLog {
             }
         }
 
-        rebuild_all_indexes(db);
+        rebuild_all_indexes(db)?;
         Ok(())
     }
 }
@@ -435,7 +435,7 @@ fn rollback_single_entry(entry: WalEntry, db: &mut Database) {
     }
 }
 
-fn rebuild_all_indexes(db: &mut Database) {
+fn rebuild_all_indexes(db: &mut Database) -> Result<(), RustqlError> {
     let db_snapshot = db.clone();
 
     for index in db.indexes.values_mut() {
@@ -449,7 +449,7 @@ fn rebuild_all_indexes(db: &mut Database) {
                     table,
                     index.filter_expr.as_ref(),
                     row,
-                ) {
+                )? {
                     continue;
                 }
                 let value = row.get(col_idx).cloned().unwrap_or(Value::Null);
@@ -478,7 +478,7 @@ fn rebuild_all_indexes(db: &mut Database) {
                         table,
                         index.filter_expr.as_ref(),
                         row,
-                    ) {
+                    )? {
                         continue;
                     }
                     let key = column_positions
@@ -490,6 +490,8 @@ fn rebuild_all_indexes(db: &mut Database) {
             }
         }
     }
+
+    Ok(())
 }
 
 #[derive(Debug, Default)]

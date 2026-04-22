@@ -372,7 +372,7 @@ pub fn execute_create_index(
             })?;
 
             for (row_id, row) in table.iter_rows_with_ids() {
-                if !row_matches_index_filter(&db, table, index.filter_expr.as_ref(), row) {
+                if !row_matches_index_filter(&db, table, index.filter_expr.as_ref(), row)? {
                     continue;
                 }
                 let value = row
@@ -393,7 +393,7 @@ pub fn execute_create_index(
             };
 
             for (row_id, row) in table.iter_rows_with_ids() {
-                if !row_matches_index_filter(&db, table, index.filter_expr.as_ref(), row) {
+                if !row_matches_index_filter(&db, table, index.filter_expr.as_ref(), row)? {
                     continue;
                 }
                 let key = composite_key_for_row(row, &column_positions);
@@ -566,7 +566,7 @@ pub fn update_indexes_on_insert(
 
     for index in db.indexes.values_mut() {
         if index.table == table_name {
-            if !row_matches_index_filter(&db_snapshot, table, index.filter_expr.as_ref(), row) {
+            if !row_matches_index_filter(&db_snapshot, table, index.filter_expr.as_ref(), row)? {
                 continue;
             }
 
@@ -583,7 +583,7 @@ pub fn update_indexes_on_insert(
 
     for index in db.composite_indexes.values_mut() {
         if index.table == table_name {
-            if !row_matches_index_filter(&db_snapshot, table, index.filter_expr.as_ref(), row) {
+            if !row_matches_index_filter(&db_snapshot, table, index.filter_expr.as_ref(), row)? {
                 continue;
             }
 
@@ -644,9 +644,9 @@ pub fn update_indexes_on_update(
             let old_value = old_row.get(col_idx).cloned().unwrap_or(Value::Null);
             let new_value = new_row.get(col_idx).cloned().unwrap_or(Value::Null);
             let old_matches =
-                row_matches_index_filter(&db_snapshot, table, index.filter_expr.as_ref(), old_row);
+                row_matches_index_filter(&db_snapshot, table, index.filter_expr.as_ref(), old_row)?;
             let new_matches =
-                row_matches_index_filter(&db_snapshot, table, index.filter_expr.as_ref(), new_row);
+                row_matches_index_filter(&db_snapshot, table, index.filter_expr.as_ref(), new_row)?;
 
             match (old_matches, new_matches) {
                 (true, true) if old_value != new_value => {
@@ -670,9 +670,9 @@ pub fn update_indexes_on_update(
             let old_key = composite_key_for_row(old_row, &column_positions);
             let new_key = composite_key_for_row(new_row, &column_positions);
             let old_matches =
-                row_matches_index_filter(&db_snapshot, table, index.filter_expr.as_ref(), old_row);
+                row_matches_index_filter(&db_snapshot, table, index.filter_expr.as_ref(), old_row)?;
             let new_matches =
-                row_matches_index_filter(&db_snapshot, table, index.filter_expr.as_ref(), new_row);
+                row_matches_index_filter(&db_snapshot, table, index.filter_expr.as_ref(), new_row)?;
 
             match (old_matches, new_matches) {
                 (true, true) if old_key != new_key => {
@@ -1005,10 +1005,11 @@ pub(crate) fn row_matches_index_filter(
     table: &Table,
     filter_expr: Option<&Expression>,
     row: &[Value],
-) -> bool {
-    filter_expr.is_none_or(|expr| {
-        super::expr::evaluate_expression(Some(db), expr, &table.columns, row).unwrap_or(false)
-    })
+) -> Result<bool, RustqlError> {
+    match filter_expr {
+        Some(expr) => super::expr::evaluate_expression(Some(db), expr, &table.columns, row),
+        None => Ok(true),
+    }
 }
 
 fn remove_row_from_entries<K: Ord + Clone>(

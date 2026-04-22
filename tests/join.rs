@@ -168,6 +168,21 @@ fn test_join_invalid_column() {
 }
 
 #[test]
+fn test_join_invalid_on_column() {
+    let _guard = setup_test();
+
+    process_query("CREATE TABLE users (id INTEGER, name TEXT)").unwrap();
+    process_query("CREATE TABLE orders (id INTEGER, user_id INTEGER, product TEXT)").unwrap();
+    process_query("INSERT INTO users VALUES (1, 'Alice')").unwrap();
+    process_query("INSERT INTO orders VALUES (101, 1, 'Laptop')").unwrap();
+
+    let result = process_query(
+        "SELECT users.name, orders.product FROM users JOIN orders ON users.missing = orders.user_id",
+    );
+    assert!(result.is_err());
+}
+
+#[test]
 fn test_join_multiple_conditions() {
     let _guard = setup_test();
 
