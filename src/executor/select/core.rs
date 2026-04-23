@@ -14,13 +14,6 @@ pub fn execute_select(
     )?))
 }
 
-pub(crate) fn plan_select_for_execution(
-    db: &dyn DatabaseCatalog,
-    stmt: &SelectStatement,
-) -> Result<planner::PlanNode, RustqlError> {
-    planner::plan_query(db, stmt)
-}
-
 pub(crate) fn explain_select(
     context: &ExecutionContext,
     mut stmt: SelectStatement,
@@ -28,7 +21,8 @@ pub(crate) fn explain_select(
     resolve_window_definitions(&mut stmt);
 
     let db = get_database_read(context);
-    plan_select_for_execution(&db, &stmt)
+    let bound = crate::binder::bind_select(&*db, &stmt)?;
+    planner::plan_bound_query(&*db, &bound)
 }
 
 pub(crate) fn execute_select_internal(
@@ -36,8 +30,9 @@ pub(crate) fn execute_select_internal(
     stmt: SelectStatement,
     db: &dyn DatabaseCatalog,
 ) -> Result<SelectResult, RustqlError> {
-    let plan = planner::plan_query(db, &stmt)?;
-    let execution = PlanExecutor::new(db).execute(&plan, &stmt)?;
+    let bound = crate::binder::bind_select(db, &stmt)?;
+    let plan = planner::plan_bound_query(db, &bound)?;
+    let execution = PlanExecutor::new(db).execute(&plan, &bound.statement)?;
     Ok(SelectResult {
         headers: execution.columns,
         rows: execution.rows,

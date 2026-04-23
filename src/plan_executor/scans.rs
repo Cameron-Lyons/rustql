@@ -292,7 +292,7 @@ impl<'a> PlanExecutor<'a> {
         output_label: Option<&str>,
     ) -> Result<ExecutionResult, RustqlError> {
         let base_result = self.execute(base, base_select)?;
-        let cte_columns = column_definitions_from_names(&base_result.columns);
+        let cte_columns = column_definitions_from_result(&base_result);
 
         let mut all_rows = base_result.rows.clone();
         let mut working_rows = base_result.rows;

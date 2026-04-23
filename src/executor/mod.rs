@@ -176,12 +176,21 @@ pub(crate) fn execute(
     statement: Statement,
 ) -> Result<QueryResult, RustqlError> {
     let _statement_guard = context.statement_guard();
+    let statement = bind_statement_for_execution(context, statement)?;
 
     if requires_statement_savepoint(&statement) {
         return execute_atomic_statement(context, statement);
     }
 
     execute_statement_inner(context, statement)
+}
+
+fn bind_statement_for_execution(
+    context: &ExecutionContext,
+    statement: Statement,
+) -> Result<Statement, RustqlError> {
+    let db = get_database_read(context);
+    Ok(crate::binder::bind_statement(&*db, statement)?.into_statement())
 }
 
 fn execute_statement_inner(
@@ -218,6 +227,7 @@ fn execute_statement_inner(
         Statement::Do { statements } => {
             let mut affected = 0u64;
             for statement in statements {
+                let statement = bind_statement_for_execution(context, statement)?;
                 if let QueryResult::Command(result) = execute_statement_inner(context, statement)? {
                     affected += result.affected;
                 }
@@ -344,12 +354,13 @@ fn execute_explain_analyze(
     let planner = QueryPlanner::new(&db);
 
     let planning_start = Instant::now();
-    let plan = planner.plan_select(&stmt)?;
+    let bound = crate::binder::bind_select(&*db, &stmt)?;
+    let plan = planner.plan_bound_select(&bound)?;
     let planning_ms = planning_start.elapsed().as_secs_f64() * 1000.0;
 
     let executor = PlanExecutor::new(&db);
     let execution_start = Instant::now();
-    let result = executor.execute(&plan, &stmt)?;
+    let result = executor.execute(&plan, &bound.statement)?;
     let execution_ms = execution_start.elapsed().as_secs_f64() * 1000.0;
 
     Ok(QueryResult::ExplainAnalyze(ExplainAnalyzeResult {

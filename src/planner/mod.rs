@@ -1,4 +1,5 @@
 use crate::ast::*;
+use crate::binder::{BoundSelectStatement, bind_select_with_ctes};
 use crate::database::{DatabaseCatalog, Table};
 use crate::error::RustqlError;
 use crate::executor::aggregate::format_aggregate_header;
@@ -66,6 +67,15 @@ impl<'a> QueryPlanner<'a> {
     }
 
     pub fn plan_select(&self, stmt: &SelectStatement) -> Result<PlanNode, RustqlError> {
+        let bound = bind_select_with_ctes(self.db, self.ctes.clone(), stmt)?;
+        self.plan_bound_select(&bound)
+    }
+
+    pub fn plan_bound_select(&self, bound: &BoundSelectStatement) -> Result<PlanNode, RustqlError> {
+        self.plan_bound_select_statement(&bound.statement)
+    }
+
+    fn plan_bound_select_statement(&self, stmt: &SelectStatement) -> Result<PlanNode, RustqlError> {
         if stmt.ctes.is_empty() {
             return self.plan_select_body(stmt);
         }
@@ -78,7 +88,7 @@ impl<'a> QueryPlanner<'a> {
         };
         let mut stmt_without_ctes = stmt.clone();
         stmt_without_ctes.ctes.clear();
-        scoped_planner.plan_select_body(&stmt_without_ctes)
+        scoped_planner.plan_bound_select_statement(&stmt_without_ctes)
     }
 
     fn plan_select_body(&self, stmt: &SelectStatement) -> Result<PlanNode, RustqlError> {
@@ -217,8 +227,7 @@ pub fn explain_query(
     db: &dyn DatabaseCatalog,
     stmt: &SelectStatement,
 ) -> Result<String, RustqlError> {
-    let planner = QueryPlanner::new(db);
-    let plan = planner.plan_select(stmt)?;
+    let plan = plan_query(db, stmt)?;
     Ok(format!("Query Plan:\n{}", plan))
 }
 
@@ -227,4 +236,19 @@ pub fn plan_query(
     stmt: &SelectStatement,
 ) -> Result<PlanNode, RustqlError> {
     QueryPlanner::new(db).plan_select(stmt)
+}
+
+pub fn explain_bound_query(
+    db: &dyn DatabaseCatalog,
+    bound: &BoundSelectStatement,
+) -> Result<String, RustqlError> {
+    let plan = plan_bound_query(db, bound)?;
+    Ok(format!("Query Plan:\n{}", plan))
+}
+
+pub fn plan_bound_query(
+    db: &dyn DatabaseCatalog,
+    bound: &BoundSelectStatement,
+) -> Result<PlanNode, RustqlError> {
+    QueryPlanner::new(db).plan_bound_select(bound)
 }

@@ -30,7 +30,9 @@ pub struct BoundExpr {
 #[derive(Debug, Clone, PartialEq)]
 pub enum BoundExprKind {
     Column(BoundColumnRef),
-    Alias { name: String },
+    Alias {
+        name: String,
+    },
     Value(Value),
     BinaryOp {
         left: Box<BoundExpr>,
@@ -190,9 +192,7 @@ impl BoundStatement {
             BoundStatement::CreateView { name, query_sql } => {
                 Statement::CreateView { name, query_sql }
             }
-            BoundStatement::DropView { name, if_exists } => {
-                Statement::DropView { name, if_exists }
-            }
+            BoundStatement::DropView { name, if_exists } => Statement::DropView { name, if_exists },
             BoundStatement::BeginTransaction => Statement::BeginTransaction,
             BoundStatement::CommitTransaction => Statement::CommitTransaction,
             BoundStatement::RollbackTransaction => Statement::RollbackTransaction,
@@ -263,10 +263,7 @@ impl<'a> Binder<'a> {
         }
     }
 
-    pub fn bind_statement(
-        &mut self,
-        statement: Statement,
-    ) -> Result<BoundStatement, RustqlError> {
+    pub fn bind_statement(&mut self, statement: Statement) -> Result<BoundStatement, RustqlError> {
         match statement {
             Statement::Select(stmt) => Ok(BoundStatement::Select(self.bind_select(&stmt)?)),
             Statement::Insert(stmt) => Ok(BoundStatement::Insert(self.bind_insert(stmt)?)),
@@ -281,9 +278,9 @@ impl<'a> Binder<'a> {
                 Ok(BoundStatement::CreateIndex(self.bind_create_index(stmt)?))
             }
             Statement::DropIndex(stmt) => Ok(BoundStatement::DropIndex(stmt)),
-            Statement::TruncateTable { table_name } => Ok(BoundStatement::TruncateTable {
-                table_name,
-            }),
+            Statement::TruncateTable { table_name } => {
+                Ok(BoundStatement::TruncateTable { table_name })
+            }
             Statement::CreateView { name, query_sql } => {
                 Ok(BoundStatement::CreateView { name, query_sql })
             }
@@ -530,7 +527,7 @@ impl<'a> Binder<'a> {
                             alias.clone(),
                             BoundExpr {
                                 kind: BoundExprKind::Column(reference.clone()),
-                                data_type: BoundType::Known(reference.data_type.clone()),
+                                data_type: column_ref_type(&reference),
                                 nullable: reference.nullable,
                                 expr: Expression::Column(name.clone()),
                             },
@@ -630,7 +627,7 @@ impl<'a> Binder<'a> {
                 let reference = self.resolve_column(name, scope)?;
                 Ok(BoundExpr {
                     kind: BoundExprKind::Column(reference.clone()),
-                    data_type: BoundType::Known(reference.data_type.clone()),
+                    data_type: column_ref_type(&reference),
                     nullable: reference.nullable,
                     expr: expr.clone(),
                 })
@@ -642,6 +639,57 @@ impl<'a> Binder<'a> {
                 expr: expr.clone(),
             }),
             Expression::BinaryOp { left, op, right } => {
+                if matches!(op, BinaryOperator::Between) {
+                    let left = self.bind_expr(left, scope)?;
+                    let Expression::BinaryOp {
+                        left: lower,
+                        op: lower_op,
+                        right: upper,
+                    } = right.as_ref()
+                    else {
+                        return Err(RustqlError::TypeMismatch(
+                            "BETWEEN requires lower and upper bounds".to_string(),
+                        ));
+                    };
+                    if !matches!(lower_op, BinaryOperator::And) {
+                        return Err(RustqlError::TypeMismatch(
+                            "BETWEEN requires lower and upper bounds".to_string(),
+                        ));
+                    }
+                    let lower = self.bind_expr(lower, scope)?;
+                    let upper = self.bind_expr(upper, scope)?;
+                    ensure_comparable(&left.data_type, &lower.data_type, "BETWEEN")?;
+                    ensure_comparable(&left.data_type, &upper.data_type, "BETWEEN")?;
+                    let right = BoundExpr {
+                        kind: BoundExprKind::BinaryOp {
+                            left: Box::new(lower.clone()),
+                            op: BinaryOperator::And,
+                            right: Box::new(upper.clone()),
+                        },
+                        data_type: BoundType::Unknown,
+                        nullable: lower.nullable || upper.nullable,
+                        expr: Expression::BinaryOp {
+                            left: Box::new(lower.expr.clone()),
+                            op: BinaryOperator::And,
+                            right: Box::new(upper.expr.clone()),
+                        },
+                    };
+                    return Ok(BoundExpr {
+                        kind: BoundExprKind::BinaryOp {
+                            left: Box::new(left.clone()),
+                            op: op.clone(),
+                            right: Box::new(right.clone()),
+                        },
+                        data_type: BoundType::Known(DataType::Boolean),
+                        nullable: false,
+                        expr: Expression::BinaryOp {
+                            left: Box::new(left.expr),
+                            op: op.clone(),
+                            right: Box::new(right.expr),
+                        },
+                    });
+                }
+
                 let left = self.bind_expr(left, scope)?;
                 let right = self.bind_expr(right, scope)?;
                 let data_type = self.bind_binary_type(op, &left, &right)?;
@@ -986,6 +1034,9 @@ impl<'a> Binder<'a> {
             }
             Expression::Value(Value::Integer(_)) => self.bind_expr(expr, scope),
             Expression::BinaryOp { left, op, right } => {
+                if matches!(op, BinaryOperator::Between) {
+                    return self.bind_expr(expr, scope);
+                }
                 let left = self.bind_order_by_expr(left, scope, aliases)?;
                 let right = self.bind_order_by_expr(right, scope, aliases)?;
                 let data_type = self.bind_binary_type(op, &left, &right)?;
@@ -1162,11 +1213,7 @@ impl<'a> Binder<'a> {
         }
     }
 
-    fn resolve_column(
-        &self,
-        name: &str,
-        scope: &NameScope,
-    ) -> Result<BoundColumnRef, RustqlError> {
+    fn resolve_column(&self, name: &str, scope: &NameScope) -> Result<BoundColumnRef, RustqlError> {
         let local_matches = matching_columns(name, &scope.columns);
         match local_matches.len() {
             1 => return Ok(local_matches[0].clone()),
@@ -1206,7 +1253,10 @@ impl<'a> Binder<'a> {
             return Ok(table
                 .columns
                 .iter()
-                .map(|column| bound_column(relation_label, column, false))
+                .map(|column| {
+                    let column = self.semantic_column_definition(column);
+                    bound_column(relation_label, &column, false)
+                })
                 .collect());
         }
 
@@ -1231,7 +1281,9 @@ impl<'a> Binder<'a> {
             binding_ctes: self.binding_ctes.clone(),
         };
         child.binding_ctes.push(cte.name.clone());
-        child.bind_select(&cte.query).map(|bound| bound.output_columns)
+        child
+            .bind_select(&cte.query)
+            .map(|bound| bound.output_columns)
     }
 
     fn syntactic_output_columns(&self, stmt: &SelectStatement) -> Vec<ColumnDefinition> {
@@ -1257,7 +1309,7 @@ impl<'a> Binder<'a> {
                     Column::Subquery(_) => "<subquery>".to_string(),
                     Column::All => "*".to_string(),
                 };
-                column_definition(name, DataType::Text, true)
+                column_definition(name, syntactic_column_type(column), true)
             })
             .collect()
     }
@@ -1278,6 +1330,27 @@ impl<'a> Binder<'a> {
                 bound_column(relation_label, &column, false)
             })
             .collect()
+    }
+
+    fn semantic_column_definition(&self, column: &ColumnDefinition) -> ColumnDefinition {
+        let Some((relation, name)) = column.name.split_once('.') else {
+            return column.clone();
+        };
+        let Some(table) = self.db.get_table(relation) else {
+            return column.clone();
+        };
+        let Some(source_column) = table
+            .columns
+            .iter()
+            .find(|candidate| candidate.name == name)
+        else {
+            return column.clone();
+        };
+
+        let mut semantic = column.clone();
+        semantic.data_type = source_column.data_type.clone();
+        semantic.nullable = source_column.nullable;
+        semantic
     }
 
     fn bind_values_source(
@@ -1354,8 +1427,12 @@ impl<'a> Binder<'a> {
     ) -> Result<(), RustqlError> {
         if let Some(using_columns) = join.using_columns.as_ref() {
             for column in using_columns {
-                if !left_columns.iter().any(|candidate| candidate.name == *column)
-                    || !right_columns.iter().any(|candidate| candidate.name == *column)
+                if !left_columns
+                    .iter()
+                    .any(|candidate| candidate.name == *column)
+                    || !right_columns
+                        .iter()
+                        .any(|candidate| candidate.name == *column)
                 {
                     return Err(RustqlError::ColumnNotFound(column.clone()));
                 }
@@ -1449,7 +1526,10 @@ impl<'a> Binder<'a> {
 
         let target_width = if let Some(columns) = stmt.columns.as_ref() {
             for column in columns {
-                if !table_columns.iter().any(|candidate| candidate.name == *column) {
+                if !table_columns
+                    .iter()
+                    .any(|candidate| candidate.name == *column)
+                {
                     return Err(RustqlError::ColumnNotFound(format!(
                         "{} (table: {})",
                         column, stmt.table
@@ -1485,7 +1565,10 @@ impl<'a> Binder<'a> {
 
         if let Some(conflict) = stmt.on_conflict.as_ref() {
             for column in &conflict.columns {
-                if !table_columns.iter().any(|candidate| candidate.name == *column) {
+                if !table_columns
+                    .iter()
+                    .any(|candidate| candidate.name == *column)
+                {
                     return Err(RustqlError::ColumnNotFound(column.clone()));
                 }
             }
@@ -1584,7 +1667,11 @@ impl<'a> Binder<'a> {
             ));
         }
         for column in &stmt.columns {
-            if !table.columns.iter().any(|candidate| candidate.name == *column) {
+            if !table
+                .columns
+                .iter()
+                .any(|candidate| candidate.name == *column)
+            {
                 return Err(RustqlError::ColumnNotFound(column.clone()));
             }
         }
@@ -1808,14 +1895,19 @@ fn matching_columns(name: &str, columns: &[BoundColumnRef]) -> Vec<BoundColumnRe
         columns
             .iter()
             .filter(|candidate| {
-                candidate.relation.as_deref() == Some(relation) && candidate.name == column
+                candidate.name == name
+                    || (candidate.relation.as_deref() == Some(relation)
+                        && (candidate.name == column
+                            || unqualified_column_name(&candidate.name) == column))
             })
             .cloned()
             .collect()
     } else {
         columns
             .iter()
-            .filter(|candidate| candidate.name == name)
+            .filter(|candidate| {
+                candidate.name == name || unqualified_column_name(&candidate.name) == name
+            })
             .cloned()
             .collect()
     }
@@ -1829,6 +1921,19 @@ fn bound_column(relation: &str, column: &ColumnDefinition, outer: bool) -> Bound
         data_type: column.data_type.clone(),
         nullable: column.nullable,
         outer,
+    }
+}
+
+fn column_ref_type(reference: &BoundColumnRef) -> BoundType {
+    if reference
+        .relation
+        .as_deref()
+        .is_some_and(|relation| relation.starts_with("__lateral_outer_"))
+        || reference.name.starts_with("__outer_col_")
+    {
+        BoundType::Unknown
+    } else {
+        BoundType::Known(reference.data_type.clone())
     }
 }
 
@@ -1867,6 +1972,86 @@ fn constant_expression_type(expr: &Expression) -> Option<DataType> {
         return Some(data_type);
     }
     None
+}
+
+fn syntactic_column_type(column: &Column) -> DataType {
+    match column {
+        Column::Expression { expr, .. } => syntactic_expr_type(expr).unwrap_or(DataType::Text),
+        Column::Function(aggregate) => match aggregate.function {
+            AggregateFunctionType::Count => DataType::Integer,
+            AggregateFunctionType::Avg
+            | AggregateFunctionType::Stddev
+            | AggregateFunctionType::Variance
+            | AggregateFunctionType::Median
+            | AggregateFunctionType::PercentileCont
+            | AggregateFunctionType::PercentileDisc => DataType::Float,
+            AggregateFunctionType::BoolAnd | AggregateFunctionType::BoolOr => DataType::Boolean,
+            _ => DataType::Text,
+        },
+        _ => DataType::Text,
+    }
+}
+
+fn syntactic_expr_type(expr: &Expression) -> Option<DataType> {
+    match expr {
+        Expression::Value(value) => match value_type(value) {
+            BoundType::Known(data_type) => Some(data_type),
+            BoundType::Unknown => None,
+        },
+        Expression::Cast { data_type, .. } => Some(data_type.clone()),
+        Expression::BinaryOp { left, op, right } => match op {
+            BinaryOperator::Plus
+            | BinaryOperator::Minus
+            | BinaryOperator::Multiply
+            | BinaryOperator::Divide => {
+                let left = syntactic_expr_type(left)?;
+                let right = syntactic_expr_type(right)?;
+                if matches!(left, DataType::Float) || matches!(right, DataType::Float) {
+                    Some(DataType::Float)
+                } else if matches!(left, DataType::Integer) && matches!(right, DataType::Integer) {
+                    Some(DataType::Integer)
+                } else {
+                    None
+                }
+            }
+            BinaryOperator::Concat => Some(DataType::Text),
+            BinaryOperator::And
+            | BinaryOperator::Or
+            | BinaryOperator::Equal
+            | BinaryOperator::NotEqual
+            | BinaryOperator::LessThan
+            | BinaryOperator::LessThanOrEqual
+            | BinaryOperator::GreaterThan
+            | BinaryOperator::GreaterThanOrEqual
+            | BinaryOperator::Like
+            | BinaryOperator::ILike
+            | BinaryOperator::Between
+            | BinaryOperator::In => Some(DataType::Boolean),
+        },
+        Expression::UnaryOp { op, expr } => match op {
+            UnaryOperator::Minus => syntactic_expr_type(expr),
+            UnaryOperator::Not => Some(DataType::Boolean),
+        },
+        Expression::IsNull { .. }
+        | Expression::Exists(_)
+        | Expression::Any { .. }
+        | Expression::All { .. }
+        | Expression::IsDistinctFrom { .. }
+        | Expression::In { .. } => Some(DataType::Boolean),
+        Expression::ScalarFunction { name, .. } => scalar_function_type(name, &[])
+            .known()
+            .or(Some(DataType::Text)),
+        _ => None,
+    }
+}
+
+impl BoundType {
+    fn known(self) -> Option<DataType> {
+        match self {
+            BoundType::Known(data_type) => Some(data_type),
+            BoundType::Unknown => None,
+        }
+    }
 }
 
 fn bound_type_or_text(data_type: &BoundType) -> DataType {
@@ -2003,7 +2188,10 @@ fn window_function_type(function: &WindowFunctionType, args: &[BoundExpr]) -> Bo
 }
 
 fn ensure_boolean(expr: &BoundExpr, context: &str) -> Result<(), RustqlError> {
-    if matches!(expr.data_type, BoundType::Known(DataType::Boolean) | BoundType::Unknown) {
+    if matches!(
+        expr.data_type,
+        BoundType::Known(DataType::Boolean) | BoundType::Unknown
+    ) {
         Ok(())
     } else {
         Err(RustqlError::TypeMismatch(format!(

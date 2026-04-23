@@ -85,6 +85,47 @@ pub(super) fn column_definitions_from_names(columns: &[String]) -> Vec<ColumnDef
         .collect()
 }
 
+pub(super) fn column_definitions_from_result(result: &ExecutionResult) -> Vec<ColumnDefinition> {
+    result
+        .columns
+        .iter()
+        .enumerate()
+        .map(|(idx, name)| ColumnDefinition {
+            name: name.clone(),
+            data_type: result
+                .rows
+                .iter()
+                .filter_map(|row| row.get(idx))
+                .find_map(value_data_type)
+                .unwrap_or(DataType::Text),
+            nullable: result
+                .rows
+                .iter()
+                .any(|row| matches!(row.get(idx), None | Some(Value::Null))),
+            primary_key: false,
+            unique: false,
+            default_value: None,
+            foreign_key: None,
+            check: None,
+            auto_increment: false,
+            generated: None,
+        })
+        .collect()
+}
+
+fn value_data_type(value: &Value) -> Option<DataType> {
+    match value {
+        Value::Null => None,
+        Value::Integer(_) => Some(DataType::Integer),
+        Value::Float(_) => Some(DataType::Float),
+        Value::Text(_) => Some(DataType::Text),
+        Value::Boolean(_) => Some(DataType::Boolean),
+        Value::Date(_) => Some(DataType::Date),
+        Value::Time(_) => Some(DataType::Time),
+        Value::DateTime(_) => Some(DataType::DateTime),
+    }
+}
+
 pub(super) fn scalar_outer_scope_columns(
     columns: &[String],
     select_stmt: &SelectStatement,
