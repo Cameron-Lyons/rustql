@@ -215,6 +215,13 @@ struct NameScope {
     columns: Vec<BoundColumnRef>,
 }
 
+struct BoundSelectItems {
+    select_items: Vec<BoundSelectItem>,
+    output_columns: Vec<ColumnDefinition>,
+    aliases: Vec<(String, BoundExpr)>,
+    normalized_columns: Vec<Column>,
+}
+
 pub struct Binder<'a> {
     db: &'a dyn DatabaseCatalog,
     ctes: Vec<Cte>,
@@ -359,8 +366,12 @@ impl<'a> Binder<'a> {
             columns: source_columns.clone(),
         };
 
-        let (select_items, output_columns, aliases, normalized_columns) =
-            self.bind_select_items(&normalized, &scope)?;
+        let BoundSelectItems {
+            select_items,
+            output_columns,
+            aliases,
+            normalized_columns,
+        } = self.bind_select_items(&normalized, &scope)?;
         normalized.columns = normalized_columns;
 
         let where_clause = if let Some(expr) = normalized.where_clause.as_ref() {
@@ -491,15 +502,7 @@ impl<'a> Binder<'a> {
         &mut self,
         stmt: &SelectStatement,
         scope: &NameScope,
-    ) -> Result<
-        (
-            Vec<BoundSelectItem>,
-            Vec<ColumnDefinition>,
-            Vec<(String, BoundExpr)>,
-            Vec<Column>,
-        ),
-        RustqlError,
-    > {
+    ) -> Result<BoundSelectItems, RustqlError> {
         let mut items = Vec::new();
         let mut outputs = Vec::new();
         let mut aliases = Vec::new();
@@ -606,7 +609,12 @@ impl<'a> Binder<'a> {
             }
         }
 
-        Ok((items, outputs, aliases, normalized_columns))
+        Ok(BoundSelectItems {
+            select_items: items,
+            output_columns: outputs,
+            aliases,
+            normalized_columns,
+        })
     }
 
     fn bind_expr(
@@ -1827,7 +1835,7 @@ impl<'a> Binder<'a> {
                 }
                 Column::Subquery(subquery) => {
                     let bound = self.bind_correlated_select(subquery, scope)?;
-                    *subquery = Box::new(bound.statement);
+                    **subquery = bound.statement;
                 }
             }
         }

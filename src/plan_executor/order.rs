@@ -25,7 +25,7 @@ impl<'a> PlanExecutor<'a> {
             for (idx, order_expr) in order_by.iter().enumerate() {
                 let a_val = a_keys.get(idx).unwrap_or(&Value::Null);
                 let b_val = b_keys.get(idx).unwrap_or(&Value::Null);
-                let cmp = compare_values_same_type(a_val, b_val);
+                let cmp = compare_values_for_sort(a_val, b_val);
                 if cmp != Ordering::Equal {
                     return if order_expr.asc { cmp } else { cmp.reverse() };
                 }

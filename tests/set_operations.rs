@@ -1,6 +1,7 @@
 mod common;
 use common::*;
-use std::sync::Mutex;
+use rustql::ast::Value;
+use std::{collections::BTreeSet, sync::Mutex};
 
 static TEST_MUTEX: Mutex<()> = Mutex::new(());
 
@@ -8,6 +9,40 @@ fn setup_test<'a>() -> std::sync::MutexGuard<'a, ()> {
     let guard = TEST_MUTEX.lock().unwrap();
     reset_database();
     guard
+}
+
+#[test]
+fn test_value_ordering_distinguishes_unrelated_types() {
+    let mut values = BTreeSet::new();
+
+    assert!(values.insert(Value::Integer(1)));
+    assert!(values.insert(Value::Float(1.0)));
+    assert!(values.insert(Value::Text("1".to_string())));
+    assert!(values.insert(Value::Boolean(true)));
+
+    assert_eq!(
+        values.into_iter().collect::<Vec<_>>(),
+        vec![
+            Value::Integer(1),
+            Value::Float(1.0),
+            Value::Text("1".to_string()),
+            Value::Boolean(true),
+        ]
+    );
+}
+
+#[test]
+fn test_value_ordering_handles_nan_deterministically() {
+    let mut values = BTreeSet::new();
+
+    assert!(values.insert(Value::Float(f64::INFINITY)));
+    assert!(values.insert(Value::Float(f64::NAN)));
+    assert!(!values.insert(Value::Float(f64::NAN)));
+
+    assert_eq!(
+        values.into_iter().collect::<Vec<_>>(),
+        vec![Value::Float(f64::INFINITY), Value::Float(f64::NAN)]
+    );
 }
 
 #[test]
@@ -122,4 +157,17 @@ fn test_set_ops_with_order_by() {
     let result = execute_sql("SELECT id FROM t1 UNION SELECT id FROM t2 ORDER BY id ASC").unwrap();
     let data_lines: Vec<String> = result.lines().skip(2).collect();
     assert!(data_lines.len() >= 3);
+}
+
+#[test]
+fn test_union_distinguishes_unrelated_literal_types() {
+    let _guard = setup_test();
+
+    let rows = query_rows("SELECT 1 AS x UNION SELECT 'a' AS x").unwrap();
+
+    rows.assert_columns(&["x"]);
+    assert_eq!(
+        rows.rows,
+        vec![vec![Value::Integer(1)], vec![Value::Text("a".to_string())],]
+    );
 }

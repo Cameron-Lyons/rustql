@@ -678,9 +678,17 @@ fn parse_integer_literal(literal: &str) -> Result<i64, RustqlError> {
 }
 
 fn parse_float_literal(literal: &str) -> Result<f64, RustqlError> {
-    literal
+    let value = literal
         .parse::<f64>()
-        .map_err(|_| RustqlError::ParseError(format!("Invalid float literal: {}", literal)))
+        .map_err(|_| RustqlError::ParseError(format!("Invalid float literal: {}", literal)))?;
+    if value.is_finite() {
+        Ok(value)
+    } else {
+        Err(RustqlError::ParseError(format!(
+            "Invalid float literal: {}",
+            literal
+        )))
+    }
 }
 
 fn read_string(

@@ -164,26 +164,48 @@ pub fn apply_arithmetic(
 }
 
 pub fn compare_values_same_type(left: &Value, right: &Value) -> Ordering {
+    compare_values_for_sort(left, right)
+}
+
+pub fn compare_values_for_sort(left: &Value, right: &Value) -> Ordering {
     match (left, right) {
+        (Value::Null, Value::Null) => Ordering::Equal,
+        (Value::Null, _) => Ordering::Greater,
+        (_, Value::Null) => Ordering::Less,
         (Value::Integer(l), Value::Integer(r)) => l.cmp(r),
-        (Value::Float(l), Value::Float(r)) => {
-            if l < r {
-                Ordering::Less
-            } else if l > r {
-                Ordering::Greater
-            } else {
-                Ordering::Equal
-            }
-        }
+        (Value::Float(l), Value::Float(r)) => compare_floats_for_sort(*l, *r),
+        (Value::Integer(l), Value::Float(r)) => compare_floats_for_sort(*l as f64, *r),
+        (Value::Float(l), Value::Integer(r)) => compare_floats_for_sort(*l, *r as f64),
         (Value::Text(l), Value::Text(r)) => l.cmp(r),
         (Value::Boolean(l), Value::Boolean(r)) => l.cmp(r),
         (Value::Date(l), Value::Date(r)) => l.cmp(r),
         (Value::Time(l), Value::Time(r)) => l.cmp(r),
         (Value::DateTime(l), Value::DateTime(r)) => l.cmp(r),
-        _ => Ordering::Equal,
+        _ => sort_rank(left).cmp(&sort_rank(right)),
     }
 }
 
-pub fn compare_values_for_sort(left: &Value, right: &Value) -> Ordering {
-    left.cmp(right)
+fn sort_rank(value: &Value) -> u8 {
+    match value {
+        Value::Integer(_) | Value::Float(_) => 0,
+        Value::Text(_) => 1,
+        Value::Boolean(_) => 2,
+        Value::Date(_) => 3,
+        Value::Time(_) => 4,
+        Value::DateTime(_) => 5,
+        Value::Null => 6,
+    }
+}
+
+fn compare_floats_for_sort(left: f64, right: f64) -> Ordering {
+    if left == right || (left.is_nan() && right.is_nan()) {
+        return Ordering::Equal;
+    }
+
+    match (left.is_nan(), right.is_nan()) {
+        (true, false) => Ordering::Greater,
+        (false, true) => Ordering::Less,
+        _ if left < right => Ordering::Less,
+        _ => Ordering::Greater,
+    }
 }

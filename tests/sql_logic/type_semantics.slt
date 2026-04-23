@@ -1,0 +1,147 @@
+# v1 type semantics contract coverage
+query exact
+SELECT CAST(' 42 ' AS INTEGER) AS i,
+       CAST(42 AS FLOAT) AS f,
+       CAST(3.9 AS INTEGER) AS pos,
+       CAST(-3.9 AS INTEGER) AS neg,
+       CAST(1 AS TEXT) AS txt,
+       CAST(' yes ' AS BOOLEAN) AS yes_bool,
+       CAST(0 AS BOOLEAN) AS zero_bool,
+       CAST(NULL AS FLOAT) AS null_float;
+----
+i\tf\tpos\tneg\ttxt\tyes_bool\tzero_bool\tnull_float
+42\t42\t3\t-3\t1\ttrue\tfalse\tNULL
+
+query error value must be finite
+SELECT CAST('NaN' AS FLOAT);
+
+query error value must be finite
+SELECT CAST('inf' AS FLOAT);
+
+query error outside the i64 range
+SELECT CAST(100000000000000000000.0 AS INTEGER);
+
+statement ok
+CREATE TABLE slt_type_float_writes (id INTEGER, value FLOAT);
+
+statement error value must be finite
+INSERT INTO slt_type_float_writes VALUES (1, 'NaN');
+
+statement ok
+INSERT INTO slt_type_float_writes VALUES (1, '3.5'), (2, 4);
+
+query exact
+SELECT id, value FROM slt_type_float_writes ORDER BY value;
+----
+id\tvalue
+1\t3.5
+2\t4
+
+query exact
+SELECT id
+FROM (VALUES (1, 1, 1.0), (2, 1, 1.5), (3, 2, 1.5)) AS v(id, i, f)
+WHERE i <= f
+ORDER BY id;
+----
+id
+1
+2
+
+query error incompatible types
+SELECT id
+FROM (VALUES (1, 1, '1')) AS v(id, i, s)
+WHERE i = s;
+
+query exact
+SELECT id
+FROM (VALUES (1, NULL), (2, 10)) AS v(id, value)
+WHERE value = NULL
+ORDER BY id;
+----
+id
+
+statement ok
+CREATE TABLE slt_type_sort (id INTEGER, label TEXT);
+
+statement ok
+INSERT INTO slt_type_sort VALUES (1, NULL), (2, 'b'), (3, 'a');
+
+query exact
+SELECT id, label FROM slt_type_sort ORDER BY label ASC;
+----
+id\tlabel
+3\ta
+2\tb
+1\tNULL
+
+query exact
+SELECT id, label FROM slt_type_sort ORDER BY label DESC;
+----
+id\tlabel
+1\tNULL
+2\tb
+3\ta
+
+query exact
+SELECT id, sort_value
+FROM (VALUES
+    (5, NULL),
+    (3, 1),
+    (4, 1.5),
+    (2, 'text'),
+    (6, CAST('false' AS BOOLEAN)),
+    (1, CAST('2024-01-01' AS DATE)),
+    (7, CAST('00:00:01' AS TIME)),
+    (8, CAST('2024-01-01 00:00:01' AS DATETIME))
+) AS v(id, sort_value)
+ORDER BY sort_value, id;
+----
+id\tsort_value
+3\t1
+4\t1.5
+2\ttext
+6\tfalse
+1\t2024-01-01
+7\t00:00:01
+8\t2024-01-01 00:00:01
+5\tNULL
+
+statement ok
+CREATE TABLE slt_type_temporal_norm (
+    id INTEGER,
+    d DATE,
+    t TIME,
+    dt DATETIME
+);
+
+statement ok
+INSERT INTO slt_type_temporal_norm VALUES
+    (1, '2024-02-29 09:05:03', '09:05:03', '2024-02-29 09:05:03');
+
+query exact
+SELECT d,
+       CAST(dt AS DATE) AS dt_date,
+       CAST(dt AS TIME) AS dt_time,
+       CAST(d AS DATETIME) AS d_midnight
+FROM slt_type_temporal_norm
+WHERE id = 1;
+----
+d\tdt_date\tdt_time\td_midnight
+2024-02-29\t2024-02-29\t09:05:03\t2024-02-29 00:00:00
+
+statement ok
+CREATE TABLE slt_type_float_edges (id INTEGER, lhs FLOAT, rhs FLOAT);
+
+statement ok
+INSERT INTO slt_type_float_edges VALUES
+    (1, 0.30000000000000004, 0.3),
+    (2, 0.30000000000000004, 0.31);
+
+query exact
+SELECT id FROM slt_type_float_edges WHERE lhs = rhs ORDER BY id;
+----
+id
+1
+
+query error Division by zero
+SELECT 1.0 / 0.0;

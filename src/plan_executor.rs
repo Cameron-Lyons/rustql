@@ -3,8 +3,8 @@ use crate::database::{DatabaseCatalog, RowId, ScopedDatabase};
 use crate::error::RustqlError;
 use crate::executor::aggregate::{DEFAULT_PERCENTILE_FRACTION, format_aggregate_header};
 use crate::executor::expr::{
-    apply_arithmetic, compare_values, compare_values_same_type, evaluate_expression,
-    evaluate_value_expression_with_db, format_value,
+    apply_arithmetic, compare_values, compare_values_for_sort, compare_values_same_type,
+    evaluate_expression, evaluate_value_expression_with_db, format_value,
 };
 use crate::planner::{self, PlanNode};
 use std::cmp::Ordering;

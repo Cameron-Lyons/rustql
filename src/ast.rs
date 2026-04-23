@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::fmt;
+use std::{cmp::Ordering, fmt};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Statement {
@@ -589,7 +589,7 @@ pub enum UnaryOperator {
     Minus,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Value {
     Null,
     Integer(i64),
@@ -599,6 +599,21 @@ pub enum Value {
     Date(String),
     Time(String),
     DateTime(String),
+}
+
+impl Value {
+    fn sort_rank(&self) -> u8 {
+        match self {
+            Value::Null => 0,
+            Value::Integer(_) => 1,
+            Value::Float(_) => 2,
+            Value::Text(_) => 3,
+            Value::Boolean(_) => 4,
+            Value::Date(_) => 5,
+            Value::Time(_) => 6,
+            Value::DateTime(_) => 7,
+        }
+    }
 }
 
 impl fmt::Display for Value {
@@ -622,57 +637,45 @@ pub struct OrderByExpr {
     pub asc: bool,
 }
 
+impl PartialEq for Value {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == Ordering::Equal
+    }
+}
+
 impl Eq for Value {}
 
 impl PartialOrd for Value {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
 impl Ord for Value {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        use std::cmp::Ordering;
+    fn cmp(&self, other: &Self) -> Ordering {
         match (self, other) {
             (Value::Null, Value::Null) => Ordering::Equal,
-            (Value::Null, _) => Ordering::Less,
-            (_, Value::Null) => Ordering::Greater,
             (Value::Integer(a), Value::Integer(b)) => a.cmp(b),
-            (Value::Float(a), Value::Float(b)) => {
-                if a < b {
-                    Ordering::Less
-                } else if a > b {
-                    Ordering::Greater
-                } else {
-                    Ordering::Equal
-                }
-            }
-            (Value::Integer(a), Value::Float(b)) => {
-                let a = *a as f64;
-                if a < *b {
-                    Ordering::Less
-                } else if a > *b {
-                    Ordering::Greater
-                } else {
-                    Ordering::Equal
-                }
-            }
-            (Value::Float(a), Value::Integer(b)) => {
-                let b = *b as f64;
-                if a < &b {
-                    Ordering::Less
-                } else if a > &b {
-                    Ordering::Greater
-                } else {
-                    Ordering::Equal
-                }
-            }
+            (Value::Float(a), Value::Float(b)) => compare_floats(*a, *b),
             (Value::Text(a), Value::Text(b)) => a.cmp(b),
             (Value::Boolean(a), Value::Boolean(b)) => a.cmp(b),
             (Value::Date(a), Value::Date(b)) => a.cmp(b),
             (Value::Time(a), Value::Time(b)) => a.cmp(b),
             (Value::DateTime(a), Value::DateTime(b)) => a.cmp(b),
-            _ => Ordering::Equal,
+            _ => self.sort_rank().cmp(&other.sort_rank()),
         }
+    }
+}
+
+fn compare_floats(left: f64, right: f64) -> Ordering {
+    if left == right || (left.is_nan() && right.is_nan()) {
+        return Ordering::Equal;
+    }
+
+    match (left.is_nan(), right.is_nan()) {
+        (true, false) => Ordering::Greater,
+        (false, true) => Ordering::Less,
+        _ if left < right => Ordering::Less,
+        _ => Ordering::Greater,
     }
 }

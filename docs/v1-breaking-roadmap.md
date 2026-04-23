@@ -1,6 +1,6 @@
 # RustQL v1 Current Status Matrix
 
-Last audited: 2026-04-22.
+Last audited: 2026-04-23.
 
 This document replaces the old milestone roadmap with the current state of the
 v1 work in this repository. It records what is implemented now, where the
@@ -43,7 +43,7 @@ runtime still has compatibility or fallback paths, and what remains open.
 | Transactions and WAL | Partial | `WalState` supports rollback and savepoints. B-tree storage writes whole-file B-tree snapshots and a versioned `.wal` transaction journal for pending and committed states; committed journals are recovered on load. JSON storage is intentionally debug/demo snapshot storage, not a durable transactional backend. | The B-tree journal is commit-recovery support for prepared snapshots, not a general replay log of every mutation. |
 | Storage format versioning | Done | B-tree files use magic/version headers and currently read legacy version 2 plus the current version 3. The B-tree journal also has a magic/version header. JSON storage remains raw JSON by design because it is not a durable storage format. | Add a JSON envelope only if JSON is promoted beyond debug/demo snapshot storage. |
 | Migration tooling | Open | There is no `src/bin` migration tool and no `rustql migrate` command. | Add a converter and validator only if v0 files need one-way migration into the current storage format. |
-| Type semantics | Partial | Mixed nonnumeric comparisons return type mismatch errors; integer/float comparisons are intentionally numeric-compatible; date/time casts exist. | Normalize date/time values on write, tighten casts that still accept arbitrary text, and document sort/coercion rules. |
+| Type semantics | Done | `docs/type-semantics.md` defines the v1 contract for casts, mixed-type comparison, sort ordering, null ordering, temporal normalization, and float edge cases. SQL logic coverage exercises the contract. | Keep future expression, aggregate, and storage work aligned with the contract. |
 | Compatibility mode and shims | Deferred | No runtime compatibility mode, public legacy module, or hidden `Database::load/save` env shim exists. | Reopen only if users need a supported transition window. |
 | Test and CI gates | Partial | GitHub Actions runs MSRV check, fmt, clippy, build, tests, and a benchmark smoke profile. Tests cover API, planner, recovery, typed rows, and row IDs. | There are no separate v0/v1 jobs, ADRs, storage fuzz tests, or migration validation suite. |
 
@@ -54,4 +54,4 @@ runtime still has compatibility or fallback paths, and what remains open.
 | 1 | Keep planner-backed SELECT execution as the only runtime path. | New SELECT features should be implemented in the planner and `PlanExecutor` instead of adding side execution paths. |
 | 2 | Add migration/export tooling only if v0 users need it. | JSON is now documented as debug/demo snapshot storage; durable storage guarantees belong to B-tree. |
 | 3 | Keep stale internal compatibility helpers out. | The typed execution boundary is now cleaner; new compatibility helpers should be added only with an explicit migration need. |
-| 4 | Document and test type coercion rules. | Mixed-type comparisons are stricter now, but cast and date/time behavior still needs a crisp contract. |
+| 4 | Keep the type semantics contract enforced. | Casts, comparisons, sorting, nulls, temporal values, and float edge cases now have documented v1 behavior and SQL logic coverage. |
