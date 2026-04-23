@@ -24,6 +24,8 @@ jobs:
       run: cargo +"${RUSTQL_MSRV}" check --workspace --all-targets --all-features
     - name: Format check
       run: cargo fmt --all -- --check
+    - name: Format check (fuzz crate)
+      run: cargo fmt --all --manifest-path fuzz/Cargo.toml -- --check
     - name: Clippy (deny warnings)
       run: cargo clippy --workspace --all-targets --all-features -- -D warnings
     - name: Build
@@ -32,3 +34,19 @@ jobs:
       run: cargo test --workspace --all-features --verbose
     - name: Run benchmark smoke profile
       run: cargo bench --bench engine -- --profile smoke --samples 1 --warmup 0
+
+  fuzz-build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+    - name: Install nightly toolchain
+      run: rustup toolchain install nightly --profile minimal
+    - name: Install cargo-fuzz
+      run: cargo +nightly install cargo-fuzz --locked
+    - name: Build fuzz target parse_sql
+      run: cargo +nightly fuzz build parse_sql
+    - name: Build fuzz target parse_spanned_sql
+      run: cargo +nightly fuzz build parse_spanned_sql
+    - name: Build fuzz target btree_load_recovery
+      run: cargo +nightly fuzz build btree_load_recovery

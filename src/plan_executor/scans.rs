@@ -57,7 +57,7 @@ impl<'a> PlanExecutor<'a> {
         let table = self
             .db
             .get_table(table_name)
-            .ok_or_else(|| format!("Table '{}' does not exist", table_name))?;
+            .ok_or_else(|| RustqlError::TableNotFound(table_name.to_string()))?;
 
         let mut rows = Vec::new();
 
@@ -88,7 +88,7 @@ impl<'a> PlanExecutor<'a> {
         let table = self
             .db
             .get_table(table_name)
-            .ok_or_else(|| format!("Table '{}' does not exist", table_name))?;
+            .ok_or_else(|| RustqlError::TableNotFound(table_name.to_string()))?;
 
         let row_ids = if let Some(filter_expr) = filter {
             if let Some(index_usage) =
@@ -140,10 +140,9 @@ impl<'a> PlanExecutor<'a> {
             return Ok(row_ids);
         }
 
-        Err(RustqlError::Internal(format!(
-            "Index '{}' does not exist",
-            index_name
-        )))
+        Err(RustqlError::IndexNotFound {
+            name: index_name.to_string(),
+        })
     }
 
     pub(super) fn execute_function_scan(

@@ -30,6 +30,7 @@ testing-api = []
 [dev-dependencies]
 # Integration tests opt into hidden internals without making them part of
 # the default public API.
+proptest = "1.11.0"
 rustql = { path = ".", features = ["testing-api"] }
 
 [[bench]]

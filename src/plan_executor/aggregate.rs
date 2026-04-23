@@ -1,4 +1,5 @@
 use super::*;
+use crate::error::QueryClause;
 
 struct PreparedAggregateInput {
     count_star: bool,
@@ -584,7 +585,10 @@ impl<'a> PlanExecutor<'a> {
                     .result_columns
                     .iter()
                     .position(|c| column_names_match(&c.name, col_name))
-                    .ok_or_else(|| format!("Column '{}' not found in HAVING clause", name))?;
+                    .ok_or_else(|| RustqlError::ColumnNotFoundInClause {
+                        name: name.clone(),
+                        clause: QueryClause::Having,
+                    })?;
                 Ok(context.result_row.get(idx).cloned().unwrap_or(Value::Null))
             }
             Expression::BinaryOp { left, op, right } => {

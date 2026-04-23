@@ -53,6 +53,10 @@ pub mod planner;
 #[allow(dead_code)]
 pub(crate) mod planner;
 
+#[cfg(feature = "testing-api")]
+#[doc(hidden)]
+pub mod storage;
+#[cfg(not(feature = "testing-api"))]
 #[allow(dead_code)]
 mod storage;
 #[allow(dead_code)]

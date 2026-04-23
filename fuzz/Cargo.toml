@@ -1,0 +1,39 @@
+[package]
+name = "rustql-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4.12"
+
+[dependencies.rustql]
+path = ".."
+features = ["testing-api"]
+
+[[bin]]
+name = "parse_sql"
+path = "fuzz_targets/parse_sql.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "parse_spanned_sql"
+path = "fuzz_targets/parse_spanned_sql.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "btree_load_recovery"
+path = "fuzz_targets/btree_load_recovery.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = ["."]

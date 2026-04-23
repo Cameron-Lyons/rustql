@@ -166,10 +166,9 @@ pub fn execute_alter_table(
     match stmt.operation {
         AlterOperation::AddColumn(col_def) => {
             if table.columns.iter().any(|c| c.name == col_def.name) {
-                return Err(RustqlError::Internal(format!(
-                    "Column '{}' already exists",
-                    col_def.name
-                )));
+                return Err(RustqlError::ColumnAlreadyExists {
+                    name: col_def.name.clone(),
+                });
             }
             table.columns.push(col_def.clone());
             let default_value = match col_def.data_type {
@@ -199,7 +198,9 @@ pub fn execute_alter_table(
                 .columns
                 .iter()
                 .position(|c| c.name == col_name)
-                .ok_or_else(|| format!("Column '{}' does not exist", col_name))?;
+                .ok_or_else(|| RustqlError::ColumnDoesNotExist {
+                    name: col_name.clone(),
+                })?;
             let removed_col = table.columns.remove(col_index);
             let mut removed_values = Vec::new();
             for row in &mut table.rows {
@@ -222,13 +223,10 @@ pub fn execute_alter_table(
         AlterOperation::RenameColumn { old, new } => {
             let col_exists = table.columns.iter().any(|c| c.name == old);
             if !col_exists {
-                return Err(RustqlError::ColumnNotFound(old.clone()));
+                return Err(RustqlError::ColumnDoesNotExist { name: old.clone() });
             }
             if table.columns.iter().any(|c| c.name == new && c.name != old) {
-                return Err(RustqlError::Internal(format!(
-                    "Column '{}' already exists",
-                    new
-                )));
+                return Err(RustqlError::ColumnAlreadyExists { name: new.clone() });
             }
             for column in &mut table.columns {
                 if column.name == old {
@@ -574,7 +572,7 @@ pub fn update_indexes_on_insert(
                 .columns
                 .iter()
                 .position(|col| col.name == index.column)
-                .ok_or_else(|| format!("Column '{}' not found", index.column))?;
+                .ok_or_else(|| RustqlError::ColumnNotFound(index.column.clone()))?;
 
             let value = row.get(col_idx).cloned().unwrap_or(Value::Null);
             index.entries.entry(value).or_default().push(row_id);
@@ -639,7 +637,7 @@ pub fn update_indexes_on_update(
                 .columns
                 .iter()
                 .position(|col| col.name == index.column)
-                .ok_or_else(|| format!("Column '{}' not found", index.column))?;
+                .ok_or_else(|| RustqlError::ColumnNotFound(index.column.clone()))?;
 
             let old_value = old_row.get(col_idx).cloned().unwrap_or(Value::Null);
             let new_value = new_row.get(col_idx).cloned().unwrap_or(Value::Null);
@@ -1057,17 +1055,21 @@ pub fn get_indexed_rows(
 
     match usage {
         IndexUsage::Equality { value, .. } => {
-            let index = db
-                .get_index(usage.index_name())
-                .ok_or_else(|| "Index not found".to_string())?;
+            let index =
+                db.get_index(usage.index_name())
+                    .ok_or_else(|| RustqlError::IndexNotFound {
+                        name: usage.index_name().to_string(),
+                    })?;
             if let Some(rows) = index.entries.get(value) {
                 row_ids.extend(rows.iter().copied());
             }
         }
         IndexUsage::In { values, .. } => {
-            let index = db
-                .get_index(usage.index_name())
-                .ok_or_else(|| "Index not found".to_string())?;
+            let index =
+                db.get_index(usage.index_name())
+                    .ok_or_else(|| RustqlError::IndexNotFound {
+                        name: usage.index_name().to_string(),
+                    })?;
             for value in values {
                 if let Some(rows) = index.entries.get(value) {
                     row_ids.extend(rows.iter().copied());
@@ -1077,9 +1079,11 @@ pub fn get_indexed_rows(
         IndexUsage::RangeGreater {
             value, inclusive, ..
         } => {
-            let index = db
-                .get_index(usage.index_name())
-                .ok_or_else(|| "Index not found".to_string())?;
+            let index =
+                db.get_index(usage.index_name())
+                    .ok_or_else(|| RustqlError::IndexNotFound {
+                        name: usage.index_name().to_string(),
+                    })?;
             if *inclusive {
                 for (_, rows) in index.entries.range(value..) {
                     row_ids.extend(rows.iter().copied());
@@ -1097,9 +1101,11 @@ pub fn get_indexed_rows(
         IndexUsage::RangeLess {
             value, inclusive, ..
         } => {
-            let index = db
-                .get_index(usage.index_name())
-                .ok_or_else(|| "Index not found".to_string())?;
+            let index =
+                db.get_index(usage.index_name())
+                    .ok_or_else(|| RustqlError::IndexNotFound {
+                        name: usage.index_name().to_string(),
+                    })?;
             if *inclusive {
                 for (_, rows) in index.entries.range(..=value) {
                     row_ids.extend(rows.iter().copied());
@@ -1111,17 +1117,21 @@ pub fn get_indexed_rows(
             }
         }
         IndexUsage::RangeBetween { lower, upper, .. } => {
-            let index = db
-                .get_index(usage.index_name())
-                .ok_or_else(|| "Index not found".to_string())?;
+            let index =
+                db.get_index(usage.index_name())
+                    .ok_or_else(|| RustqlError::IndexNotFound {
+                        name: usage.index_name().to_string(),
+                    })?;
             for (_, rows) in index.entries.range(lower..=upper) {
                 row_ids.extend(rows.iter().copied());
             }
         }
         IndexUsage::CompositePrefix { values, .. } => {
-            let index = db
-                .get_composite_index(usage.index_name())
-                .ok_or_else(|| "Index not found".to_string())?;
+            let index = db.get_composite_index(usage.index_name()).ok_or_else(|| {
+                RustqlError::IndexNotFound {
+                    name: usage.index_name().to_string(),
+                }
+            })?;
 
             if values.len() == index.columns.len() {
                 if let Some(rows) = index.entries.get(values) {

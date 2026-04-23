@@ -295,7 +295,12 @@ impl BTreeFile {
                 constraints: table.constraints.clone(),
                 next_row_id: table.next_row_id,
             })
-            .map_err(|e| format!("Failed to serialize schema for table {}: {}", table_name, e))?;
+            .map_err(|e| {
+                RustqlError::StorageError(format!(
+                    "Failed to serialize schema for table {}: {}",
+                    table_name, e
+                ))
+            })?;
             current_root_id = self.insert_entry(
                 BTreeEntry::with_inline_data(schema_key, schema_json),
                 current_root_id,
@@ -306,10 +311,10 @@ impl BTreeFile {
             for (row_id, row) in table.iter_rows_with_ids() {
                 let row_key = Value::Text(format_row_storage_key(table_name, row_id));
                 let row_json = serde_json::to_string(row).map_err(|e| {
-                    format!(
+                    RustqlError::StorageError(format!(
                         "Failed to serialize row {} for table {}: {}",
                         row_id.0, table_name, e
-                    )
+                    ))
                 })?;
                 current_root_id = self.insert_entry(
                     BTreeEntry::with_inline_data(row_key, row_json),
@@ -320,8 +325,12 @@ impl BTreeFile {
 
         for (index_name, index) in &db.indexes {
             let index_key = Value::Text(format!("index:{}", index_name));
-            let index_json = serde_json::to_string(index)
-                .map_err(|e| format!("Failed to serialize index {}: {}", index_name, e))?;
+            let index_json = serde_json::to_string(index).map_err(|e| {
+                RustqlError::StorageError(format!(
+                    "Failed to serialize index {}: {}",
+                    index_name, e
+                ))
+            })?;
             current_root_id = self.insert_entry(
                 BTreeEntry::with_inline_data(index_key, index_json),
                 current_root_id,
@@ -331,7 +340,10 @@ impl BTreeFile {
         for (index_name, index) in &db.composite_indexes {
             let index_key = Value::Text(format!("cindex:{}", index_name));
             let index_json = serde_json::to_string(index).map_err(|e| {
-                format!("Failed to serialize composite index {}: {}", index_name, e)
+                RustqlError::StorageError(format!(
+                    "Failed to serialize composite index {}: {}",
+                    index_name, e
+                ))
             })?;
             current_root_id = self.insert_entry(
                 BTreeEntry::with_inline_data(index_key, index_json),
@@ -341,8 +353,9 @@ impl BTreeFile {
 
         for (view_name, view) in &db.views {
             let view_key = Value::Text(format!("view:{}", view_name));
-            let view_json = serde_json::to_string(view)
-                .map_err(|e| format!("Failed to serialize view {}: {}", view_name, e))?;
+            let view_json = serde_json::to_string(view).map_err(|e| {
+                RustqlError::StorageError(format!("Failed to serialize view {}: {}", view_name, e))
+            })?;
             current_root_id = self.insert_entry(
                 BTreeEntry::with_inline_data(view_key, view_json),
                 current_root_id,
@@ -514,7 +527,9 @@ impl BTreeFile {
                     }
                     current_page_id = next_page_id
                         .or_else(|| page.entries.last().map(|e| e.pointer))
-                        .ok_or_else(|| "Invalid internal page structure".to_string())?;
+                        .ok_or_else(|| {
+                            RustqlError::StorageError("Invalid internal page structure".to_string())
+                        })?;
                 }
                 PageKind::Meta => {
                     return Err(RustqlError::StorageError(

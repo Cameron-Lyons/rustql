@@ -31,14 +31,9 @@ impl Parser {
     }
 
     pub(super) fn with_current_location(&self, err: RustqlError) -> RustqlError {
-        match (err, self.current_span()) {
-            (RustqlError::ParseError(message), Some(span)) if !message.contains(" at line ") => {
-                RustqlError::ParseError(format!(
-                    "{} at line {}, column {}",
-                    message, span.start.line, span.start.column
-                ))
-            }
-            (err, _) => err,
+        match self.current_span() {
+            Some(span) => err.with_parse_span(span),
+            None => err,
         }
     }
 

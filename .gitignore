@@ -1,4 +1,7 @@
 /target
+/fuzz/artifacts
+/fuzz/corpus
+/fuzz/target
 rustql.db
 rustql_btree.dat
 rustql_data.json

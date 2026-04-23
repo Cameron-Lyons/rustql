@@ -1,4 +1,4 @@
-use crate::error::RustqlError;
+use crate::error::{RustqlError, SourceLocation, SourceSpan};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Token {
@@ -247,18 +247,6 @@ pub enum Token {
     Eof,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SourceLocation {
-    pub line: usize,
-    pub column: usize,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SourceSpan {
-    pub start: SourceLocation,
-    pub end: SourceLocation,
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub struct SpannedToken {
     pub token: Token,
@@ -273,35 +261,43 @@ pub fn tokenize_spanned(input: &str) -> Result<Vec<SpannedToken>, RustqlError> {
 pub fn tokenize(input: &str) -> Result<Vec<Token>, RustqlError> {
     let mut tokens = Vec::new();
     let mut chars = input.chars().peekable();
+    let mut can_extend_last_identifier_with_dot = false;
 
     while let Some(&ch) = chars.peek() {
         match ch {
             ' ' | '\t' | '\n' | '\r' => {
                 chars.next();
+                can_extend_last_identifier_with_dot = false;
             }
             '(' => {
                 tokens.push(Token::LeftParen);
                 chars.next();
+                can_extend_last_identifier_with_dot = false;
             }
             ')' => {
                 tokens.push(Token::RightParen);
                 chars.next();
+                can_extend_last_identifier_with_dot = false;
             }
             ',' => {
                 tokens.push(Token::Comma);
                 chars.next();
+                can_extend_last_identifier_with_dot = false;
             }
             ';' => {
                 tokens.push(Token::Semicolon);
                 chars.next();
+                can_extend_last_identifier_with_dot = false;
             }
             '*' => {
                 tokens.push(Token::Star);
                 chars.next();
+                can_extend_last_identifier_with_dot = false;
             }
             '+' => {
                 tokens.push(Token::Plus);
                 chars.next();
+                can_extend_last_identifier_with_dot = false;
             }
             '-' => {
                 chars.next();
@@ -320,14 +316,17 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, RustqlError> {
                 } else {
                     tokens.push(Token::Minus);
                 }
+                can_extend_last_identifier_with_dot = false;
             }
             '/' => {
                 tokens.push(Token::Divide);
                 chars.next();
+                can_extend_last_identifier_with_dot = false;
             }
             '=' => {
                 tokens.push(Token::Equal);
                 chars.next();
+                can_extend_last_identifier_with_dot = false;
             }
             '<' => {
                 chars.next();
@@ -340,6 +339,7 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, RustqlError> {
                 } else {
                     tokens.push(Token::LessThan);
                 }
+                can_extend_last_identifier_with_dot = false;
             }
             '>' => {
                 chars.next();
@@ -349,12 +349,14 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, RustqlError> {
                 } else {
                     tokens.push(Token::GreaterThan);
                 }
+                can_extend_last_identifier_with_dot = false;
             }
             '|' => {
                 chars.next();
                 if let Some(&'|') = chars.peek() {
                     tokens.push(Token::Concat);
                     chars.next();
+                    can_extend_last_identifier_with_dot = false;
                 } else {
                     return Err(RustqlError::ParseError(
                         "Unexpected character: |".to_string(),
@@ -366,6 +368,7 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, RustqlError> {
                 if let Some(&'=') = chars.peek() {
                     tokens.push(Token::NotEqual);
                     chars.next();
+                    can_extend_last_identifier_with_dot = false;
                 } else {
                     return Err(RustqlError::ParseError(
                         "Unexpected character: !".to_string(),
@@ -377,6 +380,7 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, RustqlError> {
                 if let Some(&':') = chars.peek() {
                     tokens.push(Token::DoubleColon);
                     chars.next();
+                    can_extend_last_identifier_with_dot = false;
                 } else {
                     return Err(RustqlError::ParseError(
                         "Unexpected character: :".to_string(),
@@ -387,11 +391,13 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, RustqlError> {
                 chars.next();
                 let string_val = read_string(&mut chars, '\'')?;
                 tokens.push(Token::StringLiteral(string_val));
+                can_extend_last_identifier_with_dot = false;
             }
             '"' => {
                 chars.next();
                 let string_val = read_string(&mut chars, '"')?;
                 tokens.push(Token::StringLiteral(string_val));
+                can_extend_last_identifier_with_dot = false;
             }
             _ if ch.is_ascii_digit() => {
                 let num = read_number(&mut chars);
@@ -400,10 +406,13 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, RustqlError> {
                 } else {
                     tokens.push(Token::Number(parse_integer_literal(&num)?));
                 }
+                can_extend_last_identifier_with_dot = false;
             }
             _ if ch.is_ascii_alphabetic() || ch == '_' => {
                 let ident = read_identifier(&mut chars);
                 tokens.push(match_keyword(&ident));
+                can_extend_last_identifier_with_dot =
+                    matches!(tokens.last(), Some(Token::Identifier(_)));
             }
             '`' => {
                 chars.next();
@@ -425,26 +434,31 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, RustqlError> {
                     ));
                 }
                 tokens.push(Token::Identifier(ident));
+                can_extend_last_identifier_with_dot = true;
             }
             '.' => {
-                if let Some(Token::Identifier(last_ident)) = tokens.last_mut() {
+                if can_extend_last_identifier_with_dot
+                    && let Some(Token::Identifier(last_ident)) = tokens.last_mut()
+                {
                     chars.next();
                     if let Some(&ch) = chars.peek() {
                         if ch.is_ascii_alphanumeric() || ch == '_' {
                             let rest = read_identifier(&mut chars);
                             last_ident.push('.');
                             last_ident.push_str(&rest);
+                            can_extend_last_identifier_with_dot = true;
                         } else {
                             tokens.push(Token::Dot);
-                            chars.next();
+                            can_extend_last_identifier_with_dot = false;
                         }
                     } else {
                         tokens.push(Token::Dot);
-                        chars.next();
+                        can_extend_last_identifier_with_dot = false;
                     }
                 } else {
                     tokens.push(Token::Dot);
                     chars.next();
+                    can_extend_last_identifier_with_dot = false;
                 }
             }
             _ => {
@@ -603,7 +617,7 @@ fn assign_spans(input: &str, tokens: Vec<Token>) -> Vec<SpannedToken> {
                     if let Some(text) = fixed_token_text(&token) {
                         cursor.consume_fixed(text);
                     } else {
-                        cursor.consume_identifier_token();
+                        cursor.consume_identifier_part();
                     }
                 }
             }

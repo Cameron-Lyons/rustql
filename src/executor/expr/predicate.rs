@@ -55,8 +55,11 @@ pub fn evaluate_expression(
                 let left_val = evaluate_value_expression_with_db(left, columns, row, db)?;
                 match &**right {
                     Expression::Subquery(subquery_stmt) => {
-                        let db_ref =
-                            db.ok_or_else(|| "Subquery not allowed in this context".to_string())?;
+                        let db_ref = db.ok_or_else(|| {
+                            RustqlError::Internal(
+                                "Subquery not allowed in this context".to_string(),
+                            )
+                        })?;
                         let sub_vals =
                             crate::plan_executor::evaluate_planned_subquery_values_with_outer(
                                 db_ref,
@@ -83,8 +86,9 @@ pub fn evaluate_expression(
             Ok(values.contains(&left_val))
         }
         Expression::Exists(subquery_stmt) => {
-            let db_ref =
-                db.ok_or_else(|| "EXISTS subquery not allowed in this context".to_string())?;
+            let db_ref = db.ok_or_else(|| {
+                RustqlError::Internal("EXISTS subquery not allowed in this context".to_string())
+            })?;
             crate::plan_executor::evaluate_planned_subquery_exists_with_outer(
                 db_ref,
                 subquery_stmt,
@@ -94,8 +98,9 @@ pub fn evaluate_expression(
         }
         Expression::Any { left, op, subquery } => {
             let left_val = evaluate_value_expression_with_db(left, columns, row, db)?;
-            let db_ref =
-                db.ok_or_else(|| "ANY subquery not allowed in this context".to_string())?;
+            let db_ref = db.ok_or_else(|| {
+                RustqlError::Internal("ANY subquery not allowed in this context".to_string())
+            })?;
             let sub_vals = crate::plan_executor::evaluate_planned_subquery_values_with_outer(
                 db_ref, subquery, columns, row,
             )?;
@@ -108,8 +113,9 @@ pub fn evaluate_expression(
         }
         Expression::All { left, op, subquery } => {
             let left_val = evaluate_value_expression_with_db(left, columns, row, db)?;
-            let db_ref =
-                db.ok_or_else(|| "ALL subquery not allowed in this context".to_string())?;
+            let db_ref = db.ok_or_else(|| {
+                RustqlError::Internal("ALL subquery not allowed in this context".to_string())
+            })?;
             let sub_vals = crate::plan_executor::evaluate_planned_subquery_values_with_outer(
                 db_ref, subquery, columns, row,
             )?;

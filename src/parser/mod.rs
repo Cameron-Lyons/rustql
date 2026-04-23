@@ -1,6 +1,7 @@
 use crate::ast::*;
 use crate::error::RustqlError;
-use crate::lexer::{SourceSpan, SpannedToken, Token};
+use crate::error::SourceSpan;
+use crate::lexer::{SpannedToken, Token};
 
 type ParseOverClauseResult =
     Result<(Vec<Expression>, Vec<OrderByExpr>, Option<WindowFrame>), RustqlError>;

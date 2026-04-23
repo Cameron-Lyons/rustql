@@ -113,6 +113,21 @@ in-memory database into a fresh B-tree page image, syncs it, and swaps it into
 place. It should not be treated as an incremental storage engine for large
 write-heavy datasets yet.
 
+## Hardening the Core
+
+`cargo test` includes `proptest` coverage for lexer spans, generated parser
+scripts, B-tree snapshot round trips, and commit-journal recovery round trips.
+
+For coverage that benefits from arbitrary corrupt inputs, install
+[`cargo-fuzz`](https://github.com/rust-fuzz/cargo-fuzz) and run the bundled
+targets:
+
+```sh
+cargo fuzz run parse_sql
+cargo fuzz run parse_spanned_sql
+cargo fuzz run btree_load_recovery
+```
+
 ## Project structure
 
 | File | Purpose |

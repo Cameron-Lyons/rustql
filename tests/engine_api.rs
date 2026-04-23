@@ -261,6 +261,17 @@ fn execute_script_requires_statement_separator() {
 }
 
 #[test]
+fn parse_script_spanned_retains_error_span_data() {
+    let tokens = lexer::tokenize_spanned("SELECT 1\nSELECT 2").unwrap();
+    let error = parser::parse_script_spanned(tokens).unwrap_err();
+
+    let span = error.span().expect("expected parse span");
+    assert_eq!(span.start.line, 2);
+    assert_eq!(span.start.column, 1);
+    assert!(error.to_string().contains("line 2, column 1"));
+}
+
+#[test]
 fn delete_where_invalid_column_returns_error() {
     let engine = Engine::in_memory().unwrap();
     let mut session = engine.session();
