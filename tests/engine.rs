@@ -43,6 +43,39 @@ fn transaction_state_is_per_engine() {
 }
 
 #[test]
+fn transaction_state_is_shared_by_sessions_from_one_engine() {
+    let engine = open_memory_engine();
+    let mut session_a = engine.session();
+    let mut session_b = engine.session();
+
+    session_a
+        .execute_one("CREATE TABLE shared_tx (id INTEGER)")
+        .unwrap();
+    session_a.execute_one("BEGIN TRANSACTION").unwrap();
+    session_a
+        .execute_one("INSERT INTO shared_tx VALUES (1)")
+        .unwrap();
+
+    let begin_result = session_b.execute_one("BEGIN TRANSACTION");
+    assert!(begin_result.is_err(), "{begin_result:?}");
+    assert!(
+        begin_result
+            .unwrap_err()
+            .to_string()
+            .contains("Transaction already in progress"),
+        "expected shared transaction error"
+    );
+
+    session_b.execute_one("ROLLBACK").unwrap();
+
+    let result = session_a.execute_one("SELECT * FROM shared_tx").unwrap();
+    match result {
+        QueryResult::Rows(rows) => assert!(rows.rows.is_empty(), "got: {rows:?}"),
+        other => panic!("expected row result, got: {other:?}"),
+    }
+}
+
+#[test]
 fn scalar_subqueries_use_current_engine_context() {
     let engine = open_memory_engine();
     let mut session = engine.session();

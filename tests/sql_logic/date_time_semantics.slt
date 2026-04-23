@@ -1,0 +1,91 @@
+# canonical temporal coercion, casts, and sorting
+statement ok
+CREATE TABLE slt_temporal_values (
+    id INTEGER,
+    d DATE,
+    t TIME,
+    dt DATETIME
+);
+
+statement ok
+INSERT INTO slt_temporal_values VALUES
+    (1, '2024-02-29', '09:05:03', '2024-02-29 09:05:03'),
+    (2, '2023-12-31', '23:59:59', '2023-12-31 23:59:59'),
+    (3, '2024-10-01', '00:00:00', '2024-10-01 00:00:00');
+
+query exact
+SELECT CAST(d AS DATETIME) AS dt_midnight,
+       CAST(dt AS DATE) AS dt_date,
+       CAST(dt AS TIME) AS dt_time
+FROM slt_temporal_values
+WHERE id = 1;
+----
+dt_midnight\tdt_date\tdt_time
+2024-02-29 00:00:00\t2024-02-29\t09:05:03
+
+query exact
+SELECT CAST('2024-02-29 09:05:03' AS DATETIME) AS dt,
+       CAST('09:05:03' AS TIME) AS t,
+       CAST('2024-02-29' AS DATE) AS d;
+----
+dt\tt\td
+2024-02-29 09:05:03\t09:05:03\t2024-02-29
+
+query exact
+SELECT id, d FROM slt_temporal_values ORDER BY d;
+----
+id\td
+2\t2023-12-31
+1\t2024-02-29
+3\t2024-10-01
+
+query exact
+SELECT id, t FROM slt_temporal_values ORDER BY t;
+----
+id\tt
+3\t00:00:00
+1\t09:05:03
+2\t23:59:59
+
+query exact
+SELECT id, dt FROM slt_temporal_values ORDER BY dt;
+----
+id\tdt
+2\t2023-12-31 23:59:59
+1\t2024-02-29 09:05:03
+3\t2024-10-01 00:00:00
+
+statement ok
+UPDATE slt_temporal_values SET t = '08:00:00' WHERE id = 2;
+
+query exact
+SELECT id, t FROM slt_temporal_values ORDER BY t;
+----
+id\tt
+3\t00:00:00
+2\t08:00:00
+1\t09:05:03
+
+query error expected HH:MM:SS
+SELECT CAST('9:05:03' AS TIME);
+
+query error expected YYYY-MM-DD HH:MM:SS
+SELECT CAST('2024-02-29' AS DATETIME);
+
+query error expected YYYY-MM-DD
+SELECT CAST('2024-02-30' AS DATE);
+
+statement error expected HH:MM:SS
+INSERT INTO slt_temporal_values VALUES (4, '2024-01-01', '8am', '2024-01-01 08:00:00');
+
+statement error expected YYYY-MM-DD HH:MM:SS
+INSERT INTO slt_temporal_values VALUES (4, '2024-01-01', '08:00:00', '2024-01-01');
+
+statement error expected HH:MM:SS
+UPDATE slt_temporal_values SET t = '08:00' WHERE id = 2;
+
+query exact
+SELECT id, t FROM slt_temporal_values WHERE id = 2;
+----
+id\tt
+2\t08:00:00

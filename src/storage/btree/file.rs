@@ -261,6 +261,9 @@ impl BTreeFile {
     }
 
     pub(super) fn write_database_via_pages(&mut self, db: &Database) -> Result<(), RustqlError> {
+        // This serializes the full logical database into a new B-tree image.
+        // It uses page primitives internally, but callers should treat it as a
+        // snapshot writer rather than an incremental mutation path.
         write_versioned_header(
             &mut self.file,
             Self::MAGIC,

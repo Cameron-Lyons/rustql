@@ -1,6 +1,6 @@
 use super::*;
 
-pub(super) fn resolve_window_definitions(stmt: &mut SelectStatement) {
+pub(crate) fn resolve_window_definitions(stmt: &mut SelectStatement) {
     if stmt.window_definitions.is_empty() {
         return;
     }

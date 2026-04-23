@@ -10,6 +10,7 @@ mod functions;
 mod predicate;
 mod value;
 
+pub(crate) use cast::coerce_value_for_type;
 pub use compare::{
     apply_arithmetic, compare_values, compare_values_for_sort, compare_values_same_type,
     format_value,

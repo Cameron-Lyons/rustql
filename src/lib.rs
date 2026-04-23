@@ -18,6 +18,13 @@ pub mod database;
 #[allow(dead_code)]
 pub(crate) mod database;
 
+#[cfg(feature = "testing-api")]
+#[doc(hidden)]
+pub mod binder;
+#[cfg(not(feature = "testing-api"))]
+#[allow(dead_code)]
+pub(crate) mod binder;
+
 pub mod engine;
 pub mod error;
 mod executor;

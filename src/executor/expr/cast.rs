@@ -1,6 +1,13 @@
 use super::*;
 
 pub(super) fn execute_cast(val: Value, target_type: &DataType) -> Result<Value, RustqlError> {
+    coerce_value_for_type(val, target_type)
+}
+
+pub(crate) fn coerce_value_for_type(
+    val: Value,
+    target_type: &DataType,
+) -> Result<Value, RustqlError> {
     if matches!(val, Value::Null) {
         return Ok(Value::Null);
     }
@@ -50,51 +57,56 @@ pub(super) fn execute_cast(val: Value, target_type: &DataType) -> Result<Value, 
             ))),
         },
         DataType::Date => match &val {
-            Value::Date(_) => Ok(val),
-            Value::DateTime(dt) | Value::Text(dt) => {
-                let date_part = dt.split(' ').next().unwrap_or(dt);
-                if super::date::parse_date_components(date_part).is_some() {
-                    Ok(Value::Date(date_part.to_string()))
-                } else {
-                    Err(RustqlError::TypeMismatch(format!(
-                        "Cannot cast '{}' to DATE",
-                        dt
-                    )))
-                }
-            }
+            Value::Date(d) | Value::Text(d) => super::date::normalize_date(d)
+                .map(Value::Date)
+                .or_else(|| super::date::datetime_date_part(d).map(Value::Date))
+                .ok_or_else(|| temporal_cast_error(d, "DATE", super::date::CANONICAL_DATE_FORMAT)),
+            Value::DateTime(dt) => super::date::datetime_date_part(dt)
+                .map(Value::Date)
+                .ok_or_else(|| {
+                    temporal_cast_error(dt, "DATE", super::date::CANONICAL_DATETIME_FORMAT)
+                }),
             _ => Err(RustqlError::TypeMismatch(format!(
                 "Cannot cast {:?} to DATE",
                 val
             ))),
         },
         DataType::DateTime => match &val {
-            Value::DateTime(_) => Ok(val),
-            Value::Date(d) => Ok(Value::DateTime(format!("{} 00:00:00", d))),
-            Value::Text(s) => {
-                if s.contains(' ') {
-                    Ok(Value::DateTime(s.clone()))
-                } else if super::date::parse_date_components(s).is_some() {
-                    Ok(Value::DateTime(format!("{} 00:00:00", s)))
-                } else {
-                    Ok(Value::DateTime(s.clone()))
-                }
-            }
+            Value::DateTime(dt) | Value::Text(dt) => super::date::normalize_datetime(dt)
+                .map(Value::DateTime)
+                .ok_or_else(|| {
+                    temporal_cast_error(dt, "DATETIME", super::date::CANONICAL_DATETIME_FORMAT)
+                }),
+            Value::Date(d) => super::date::normalize_date(d)
+                .map(|date| Value::DateTime(format!("{} 00:00:00", date)))
+                .ok_or_else(|| {
+                    temporal_cast_error(d, "DATETIME", super::date::CANONICAL_DATE_FORMAT)
+                }),
             _ => Err(RustqlError::TypeMismatch(format!(
                 "Cannot cast {:?} to DATETIME",
                 val
             ))),
         },
         DataType::Time => match &val {
-            Value::Time(_) => Ok(val),
-            Value::DateTime(dt) => {
-                let time_part = dt.split(' ').nth(1).unwrap_or("00:00:00");
-                Ok(Value::Time(time_part.to_string()))
-            }
-            Value::Text(s) => Ok(Value::Time(s.clone())),
+            Value::Time(t) | Value::Text(t) => super::date::normalize_time(t)
+                .map(Value::Time)
+                .ok_or_else(|| temporal_cast_error(t, "TIME", super::date::CANONICAL_TIME_FORMAT)),
+            Value::DateTime(dt) => super::date::datetime_time_part(dt)
+                .map(Value::Time)
+                .ok_or_else(|| {
+                    temporal_cast_error(dt, "TIME", super::date::CANONICAL_DATETIME_FORMAT)
+                }),
             _ => Err(RustqlError::TypeMismatch(format!(
                 "Cannot cast {:?} to TIME",
                 val
             ))),
         },
     }
+}
+
+fn temporal_cast_error(value: &str, target: &str, expected_format: &str) -> RustqlError {
+    RustqlError::TypeMismatch(format!(
+        "Cannot cast '{}' to {}; expected {}",
+        value, target, expected_format
+    ))
 }

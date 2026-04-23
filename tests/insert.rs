@@ -52,3 +52,39 @@ fn test_insert() {
 
     assert_command(execute(insert).unwrap(), CommandTag::Insert, 1);
 }
+
+#[test]
+fn failed_multi_row_insert_rolls_back_prior_rows() {
+    reset_database();
+    execute_sql("CREATE TABLE t (id INTEGER PRIMARY KEY)").unwrap();
+
+    let result = execute_sql("INSERT INTO t VALUES (1), (1)");
+    assert!(result.is_err());
+
+    assert_rows("SELECT * FROM t", &["id"], vec![]);
+}
+
+#[test]
+fn failed_insert_rolls_back_inside_explicit_transaction() {
+    reset_database();
+    execute_sql("CREATE TABLE t (id INTEGER PRIMARY KEY)").unwrap();
+    execute_sql("BEGIN TRANSACTION").unwrap();
+    execute_sql("INSERT INTO t VALUES (0)").unwrap();
+
+    let result = execute_sql("INSERT INTO t VALUES (1), (1)");
+    assert!(result.is_err());
+
+    assert_rows("SELECT * FROM t", &["id"], vec![vec![Value::Integer(0)]]);
+    execute_sql("COMMIT").unwrap();
+}
+
+#[test]
+fn failed_returning_rolls_back_insert() {
+    reset_database();
+    execute_sql("CREATE TABLE t (id INTEGER PRIMARY KEY)").unwrap();
+
+    let result = execute_sql("INSERT INTO t VALUES (1) RETURNING missing_column");
+    assert!(result.is_err());
+
+    assert_rows("SELECT * FROM t", &["id"], vec![]);
+}

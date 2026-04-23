@@ -56,6 +56,11 @@ pub enum StorageMode {
     Json {
         path: PathBuf,
     },
+    /// Page-formatted snapshot storage.
+    ///
+    /// Saves write a complete database image to a temporary file and atomically
+    /// replace the storage file. The `.wal` file is a commit-recovery journal
+    /// for prepared snapshots, not an incremental mutation log.
     BTree {
         path: PathBuf,
     },
@@ -141,6 +146,12 @@ fn storage_path_from_env(default_path: &str) -> Result<PathBuf, RustqlError> {
     }
 }
 
+/// An open RustQL connection.
+///
+/// `Engine` is the transaction boundary: database state, transaction state, and
+/// optional storage are owned by the engine's execution context. Sessions
+/// created from the same engine share that state. Open a separate `Engine` when
+/// you need an independent transaction context.
 pub struct Engine {
     context: executor::ExecutionContext,
 }
@@ -185,6 +196,13 @@ impl Engine {
         })
     }
 
+    /// Creates a lightweight session handle for executing SQL against this
+    /// engine.
+    ///
+    /// A session borrows the engine; it does not own separate transaction
+    /// state. `BEGIN`, `COMMIT`, `ROLLBACK`, and savepoints apply to the
+    /// engine, so other sessions created from this engine observe the same
+    /// transaction.
     pub fn session(&self) -> Session<'_> {
         Session { engine: self }
     }
@@ -195,6 +213,10 @@ impl Engine {
     }
 }
 
+/// A lightweight SQL execution handle borrowed from an [`Engine`].
+///
+/// `Session` is not an independent connection. Transaction ownership remains
+/// with the engine that created the session.
 pub struct Session<'e> {
     engine: &'e Engine,
 }

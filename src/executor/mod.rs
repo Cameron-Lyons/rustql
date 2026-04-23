@@ -18,9 +18,15 @@ use crate::wal::{self, WalState};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 
+/// Per-engine execution state.
+///
+/// The WAL state lives here because an `Engine` is the connection and
+/// transaction boundary. Public `Session` values are borrowed execution
+/// handles over this shared context.
 pub(crate) struct ExecutionContext {
     database: RwLock<Database>,
     wal_state: Mutex<WalState>,
+    statement_lock: Mutex<()>,
     storage: Option<Arc<dyn StorageEngine>>,
 }
 
@@ -29,6 +35,7 @@ impl ExecutionContext {
         Self {
             database: RwLock::new(database),
             wal_state: Mutex::new(WalState::default()),
+            statement_lock: Mutex::new(()),
             storage,
         }
     }
@@ -47,6 +54,12 @@ impl ExecutionContext {
 
     pub(crate) fn database_write(&self) -> std::sync::RwLockWriteGuard<'_, Database> {
         self.database.write().unwrap_or_else(|err| err.into_inner())
+    }
+
+    fn statement_guard(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.statement_lock
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
     }
 
     fn persist_database(&self, db: &Database) -> Result<(), RustqlError> {
@@ -162,6 +175,19 @@ pub(crate) fn execute(
     context: &ExecutionContext,
     statement: Statement,
 ) -> Result<QueryResult, RustqlError> {
+    let _statement_guard = context.statement_guard();
+
+    if requires_statement_savepoint(&statement) {
+        return execute_atomic_statement(context, statement);
+    }
+
+    execute_statement_inner(context, statement)
+}
+
+fn execute_statement_inner(
+    context: &ExecutionContext,
+    statement: Statement,
+) -> Result<QueryResult, RustqlError> {
     match statement {
         Statement::CreateTable(stmt) => ddl::execute_create_table(context, stmt),
         Statement::DropTable(stmt) => ddl::execute_drop_table(context, stmt),
@@ -192,7 +218,7 @@ pub(crate) fn execute(
         Statement::Do { statements } => {
             let mut affected = 0u64;
             for statement in statements {
-                if let QueryResult::Command(result) = execute(context, statement)? {
+                if let QueryResult::Command(result) = execute_statement_inner(context, statement)? {
                     affected += result.affected;
                 }
             }
@@ -201,11 +227,69 @@ pub(crate) fn execute(
     }
 }
 
+fn requires_statement_savepoint(statement: &Statement) -> bool {
+    matches!(
+        statement,
+        Statement::CreateTable(_)
+            | Statement::DropTable(_)
+            | Statement::Insert(_)
+            | Statement::Update(_)
+            | Statement::Delete(_)
+            | Statement::AlterTable(_)
+            | Statement::CreateIndex(_)
+            | Statement::DropIndex(_)
+            | Statement::Analyze(_)
+            | Statement::TruncateTable { .. }
+            | Statement::CreateView { .. }
+            | Statement::DropView { .. }
+            | Statement::Merge(_)
+            | Statement::Do { .. }
+    )
+}
+
+fn execute_atomic_statement(
+    context: &ExecutionContext,
+    statement: Statement,
+) -> Result<QueryResult, RustqlError> {
+    let savepoint = context.with_wal_state_mut(|state| state.begin_statement())?;
+    let result = execute_statement_inner(context, statement);
+
+    match result {
+        Ok(result) => {
+            if savepoint.is_autocommit_statement() {
+                let persist_result = {
+                    let db = get_database_read(context);
+                    context.persist_database(&db)
+                };
+                if let Err(err) = persist_result {
+                    rollback_statement(context, savepoint)?;
+                    return Err(err);
+                }
+            }
+
+            context.with_wal_state_mut(|state| state.commit_statement(savepoint))?;
+            Ok(result)
+        }
+        Err(err) => {
+            rollback_statement(context, savepoint)?;
+            Err(err)
+        }
+    }
+}
+
+fn rollback_statement(
+    context: &ExecutionContext,
+    savepoint: wal::StatementSavepoint,
+) -> Result<(), RustqlError> {
+    let mut db = get_database_write(context);
+    context.with_wal_state_mut(|state| state.rollback_statement(savepoint, &mut db))
+}
+
 pub(crate) fn save_if_not_in_transaction(
     context: &ExecutionContext,
     db: &Database,
 ) -> Result<(), RustqlError> {
-    if !context.with_wal_state(|state| state.is_in_transaction()) {
+    if !context.with_wal_state(|state| state.has_active_log()) {
         context.persist_database(db)?;
     }
     Ok(())

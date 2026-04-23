@@ -89,18 +89,29 @@ session.execute_one("CREATE TABLE users (id INTEGER)").unwrap();
 let results = session.execute("SELECT * FROM users").unwrap();
 ```
 
+`Engine` is the connection boundary. A `Session` is a lightweight borrow of an
+engine, so transactions and savepoints are shared by all sessions created from
+the same engine. Open a separate `Engine` when you need an independent
+transaction context.
+
 ## Storage modes
 
 | Mode | Description | Default | Storage guarantee |
 |------|-------------|---------|-------------------|
 | `StorageMode::Memory` | In-memory engine state | no | No persistence. |
 | `StorageMode::Json { path }` | Human-readable snapshot storage for debugging, tests, and demos | `rustql_data.json` | Raw JSON database snapshot with atomic whole-file replacement. It has no format version, no durable transaction journal, and no recovery path for interrupted transactions. |
-| `StorageMode::BTree { path }` | Page-based B-tree storage | no | Versioned file format with a versioned `.wal` transaction journal. Committed journals are recovered on load. |
+| `StorageMode::BTree { path }` | Page-formatted B-tree snapshot storage | no | Versioned file format with atomic whole-file snapshot replacement. The versioned `.wal` journal records prepared snapshot redo frames for committed transaction recovery, not incremental per-mutation replay. |
 | `StorageMode::Disk { path }` | Deprecated alias for B-tree storage | no | Same guarantee as `StorageMode::BTree`. |
 
 Use `EngineOptions::default()` to open the compatibility default JSON-backed engine at `rustql_data.json`.
 Use `StorageMode::BTree` or set `RUSTQL_STORAGE=btree` for the durable CLI store at `rustql_btree.dat`.
 Set `RUSTQL_STORAGE_PATH=/path/to/file` to override the selected storage file.
+
+`StorageMode::BTree` has a page-based file layout for compatibility and
+recovery, but saves are snapshot writes: RustQL serializes the current
+in-memory database into a fresh B-tree page image, syncs it, and swaps it into
+place. It should not be treated as an incremental storage engine for large
+write-heavy datasets yet.
 
 ## Project structure
 

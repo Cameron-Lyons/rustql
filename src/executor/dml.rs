@@ -6,7 +6,8 @@ use crate::wal::WalEntry;
 use std::collections::HashSet;
 
 use super::expr::{
-    evaluate_expression, evaluate_value_expression, evaluate_value_expression_with_db,
+    coerce_value_for_type, evaluate_expression, evaluate_value_expression,
+    evaluate_value_expression_with_db,
 };
 use super::{
     ExecutionContext, SelectResult, command_result, get_database_read, get_database_write,
@@ -200,6 +201,7 @@ pub fn execute_insert(
 
     for values in &mut mapped_values {
         evaluate_generated_columns(&table_ref.columns, values, &stmt.columns)?;
+        coerce_row_to_column_types(&table_ref.columns, values)?;
     }
 
     let columns_snapshot = table_ref.columns.clone();
@@ -260,6 +262,25 @@ pub fn execute_insert(
                                     )?;
                                 }
                             }
+                            evaluate_generated_columns_update(&columns_snapshot, &mut updated_row)?;
+                            coerce_row_to_column_types(&columns_snapshot, &mut updated_row)?;
+                            validate_not_null_constraints(&columns_snapshot, &updated_row)?;
+                            validate_unique_constraints_for_insert(
+                                &db,
+                                &columns_snapshot,
+                                &updated_row,
+                                &stmt.table,
+                                Some(row_idx),
+                            )?;
+                            validate_foreign_keys_for_update(&db, &columns_snapshot, &updated_row)?;
+                            validate_check_constraints(&columns_snapshot, &updated_row)?;
+                            validate_table_constraints_for_insert(
+                                &db,
+                                &columns_snapshot,
+                                &updated_row,
+                                &stmt.table,
+                                Some(row_idx),
+                            )?;
                             let table = db
                                 .tables
                                 .get_mut(&stmt.table)
@@ -410,6 +431,7 @@ pub fn execute_update(
                 }
             }
             evaluate_generated_columns_update(&table_ref.columns, &mut updated_row)?;
+            coerce_row_to_column_types(&table_ref.columns, &mut updated_row)?;
             validate_not_null_constraints(&table_ref.columns, &updated_row)?;
             validate_unique_constraints_for_insert(
                 &db,
@@ -718,6 +740,19 @@ pub fn execute_delete(
     }
 
     Ok(command_result(CommandTag::Delete, deleted_count as u64))
+}
+
+fn coerce_row_to_column_types(
+    columns: &[ColumnDefinition],
+    row: &mut [Value],
+) -> Result<(), RustqlError> {
+    for (col_idx, col_def) in columns.iter().enumerate() {
+        if col_idx >= row.len() {
+            continue;
+        }
+        row[col_idx] = coerce_value_for_type(row[col_idx].clone(), &col_def.data_type)?;
+    }
+    Ok(())
 }
 
 pub fn validate_not_null_constraints(
@@ -1359,6 +1394,7 @@ pub fn execute_merge(
                                         )?;
                                     }
                                 }
+                                coerce_row_to_column_types(&target_columns, &mut updated_row)?;
                                 let table =
                                     db.tables.get_mut(&stmt.target_table).ok_or_else(|| {
                                         RustqlError::TableNotFound(stmt.target_table.clone())
@@ -1453,6 +1489,7 @@ pub fn execute_merge(
                                     }
                                 }
                             }
+                            coerce_row_to_column_types(&target_columns, &mut new_row)?;
 
                             let table = db.tables.get_mut(&stmt.target_table).ok_or_else(|| {
                                 RustqlError::TableNotFound(stmt.target_table.clone())

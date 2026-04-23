@@ -89,6 +89,18 @@ pub struct WalLog {
     savepoints: HashMap<String, usize>,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct StatementSavepoint {
+    position: usize,
+    started_log: bool,
+}
+
+impl StatementSavepoint {
+    pub fn is_autocommit_statement(&self) -> bool {
+        self.started_log
+    }
+}
+
 impl WalLog {
     pub fn new() -> Self {
         Self::default()
@@ -117,6 +129,19 @@ impl WalLog {
         let position = self.savepoints.get(name).copied().ok_or_else(|| {
             RustqlError::TransactionError(format!("Savepoint '{}' does not exist", name))
         })?;
+        self.rollback_to_position(position, db)
+    }
+
+    pub fn rollback_to_position(
+        &mut self,
+        position: usize,
+        db: &mut Database,
+    ) -> Result<(), RustqlError> {
+        if position > self.entries.len() {
+            return Err(RustqlError::TransactionError(
+                "Statement savepoint is no longer valid".to_string(),
+            ));
+        }
         let entries_to_rollback: Vec<WalEntry> = self.entries.drain(position..).collect();
         for entry in entries_to_rollback.into_iter().rev() {
             rollback_single_entry(entry, db);
@@ -497,39 +522,51 @@ fn rebuild_all_indexes(db: &mut Database) -> Result<(), RustqlError> {
 #[derive(Debug, Default)]
 pub struct WalState {
     current: Option<WalLog>,
+    explicit_transaction: bool,
 }
 
 impl WalState {
     pub fn begin_transaction(&mut self) -> Result<(), RustqlError> {
-        if self.current.is_some() {
+        if self.current.is_some() || self.explicit_transaction {
             return Err(RustqlError::TransactionError(
                 "Transaction already in progress".to_string(),
             ));
         }
         self.current = Some(WalLog::new());
+        self.explicit_transaction = true;
         Ok(())
     }
 
     pub fn commit_transaction(&mut self) -> Result<(), RustqlError> {
-        if self.current.is_none() {
+        if !self.explicit_transaction {
             return Err(RustqlError::TransactionError(
                 "No transaction in progress".to_string(),
             ));
         }
         self.current = None;
+        self.explicit_transaction = false;
         Ok(())
     }
 
     pub fn rollback_transaction(&mut self, db: &mut Database) -> Result<(), RustqlError> {
+        if !self.explicit_transaction {
+            return Err(RustqlError::TransactionError(
+                "No transaction in progress".to_string(),
+            ));
+        }
+
+        self.explicit_transaction = false;
         match self.current.take() {
             Some(wal_log) => wal_log.rollback(db),
-            None => Err(RustqlError::TransactionError(
-                "No transaction in progress".to_string(),
-            )),
+            None => Ok(()),
         }
     }
 
     pub fn is_in_transaction(&self) -> bool {
+        self.explicit_transaction
+    }
+
+    pub fn has_active_log(&self) -> bool {
         self.current.is_some()
     }
 
@@ -541,9 +578,64 @@ impl WalState {
 
     pub fn reset(&mut self) {
         self.current = None;
+        self.explicit_transaction = false;
+    }
+
+    pub fn begin_statement(&mut self) -> Result<StatementSavepoint, RustqlError> {
+        match self.current.as_ref() {
+            Some(log) => Ok(StatementSavepoint {
+                position: log.entries.len(),
+                started_log: false,
+            }),
+            None => {
+                self.current = Some(WalLog::new());
+                Ok(StatementSavepoint {
+                    position: 0,
+                    started_log: true,
+                })
+            }
+        }
+    }
+
+    pub fn commit_statement(&mut self, savepoint: StatementSavepoint) -> Result<(), RustqlError> {
+        if self.current.is_none() {
+            return Err(RustqlError::TransactionError(
+                "No statement savepoint in progress".to_string(),
+            ));
+        }
+        if savepoint.started_log {
+            self.current = None;
+            self.explicit_transaction = false;
+        }
+        Ok(())
+    }
+
+    pub fn rollback_statement(
+        &mut self,
+        savepoint: StatementSavepoint,
+        db: &mut Database,
+    ) -> Result<(), RustqlError> {
+        match self.current.as_mut() {
+            Some(log) => log.rollback_to_position(savepoint.position, db)?,
+            None => {
+                return Err(RustqlError::TransactionError(
+                    "No statement savepoint in progress".to_string(),
+                ));
+            }
+        }
+        if savepoint.started_log {
+            self.current = None;
+            self.explicit_transaction = false;
+        }
+        Ok(())
     }
 
     pub fn savepoint(&mut self, name: &str) -> Result<(), RustqlError> {
+        if !self.explicit_transaction {
+            return Err(RustqlError::TransactionError(
+                "No transaction in progress".to_string(),
+            ));
+        }
         match self.current.as_mut() {
             Some(log) => {
                 log.savepoint(name);
@@ -556,6 +648,11 @@ impl WalState {
     }
 
     pub fn release_savepoint(&mut self, name: &str) -> Result<(), RustqlError> {
+        if !self.explicit_transaction {
+            return Err(RustqlError::TransactionError(
+                "No transaction in progress".to_string(),
+            ));
+        }
         match self.current.as_mut() {
             Some(log) => log.release_savepoint(name),
             None => Err(RustqlError::TransactionError(
@@ -569,6 +666,11 @@ impl WalState {
         name: &str,
         db: &mut Database,
     ) -> Result<(), RustqlError> {
+        if !self.explicit_transaction {
+            return Err(RustqlError::TransactionError(
+                "No transaction in progress".to_string(),
+            ));
+        }
         match self.current.as_mut() {
             Some(log) => log.rollback_to_savepoint(name, db),
             None => Err(RustqlError::TransactionError(

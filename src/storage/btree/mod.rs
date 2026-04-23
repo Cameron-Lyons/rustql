@@ -22,6 +22,13 @@ use page::BTreePage;
 
 const MAX_CACHE_SIZE: usize = 1000;
 
+/// Snapshot-oriented B-tree storage backend.
+///
+/// The on-disk format is page-based and versioned, but persistence is not
+/// incremental: each save normalizes the whole [`Database`], writes a complete
+/// page image to a temporary file, syncs it, and atomically replaces the
+/// storage file. The transaction journal records enough redo frames to recover
+/// a committed snapshot, not a mutation log for replaying individual writes.
 pub struct BTreeStorageEngine {
     data_path: PathBuf,
     path_lock: Arc<RwLock<()>>,
@@ -95,6 +102,9 @@ impl BTreeStorageEngine {
     }
 
     pub(super) fn save_locked(&self, db: &Database) -> Result<(), RustqlError> {
+        // Snapshot write: build a fresh page image and atomically replace the
+        // current file. This keeps crash semantics simple, but it is not an
+        // incremental page-delta update.
         let mut db = db.clone();
         db.normalize_row_ids();
         let temp_path = storage_temp_path(&self.data_path);

@@ -13,4 +13,4 @@ mod window;
 pub use core::execute_select;
 pub(crate) use core::{execute_select_internal, explain_select};
 
-use window::resolve_window_definitions;
+pub(crate) use window::resolve_window_definitions;

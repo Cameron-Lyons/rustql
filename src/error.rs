@@ -26,6 +26,7 @@ pub enum RustqlError {
     TableNotFound(String),
     TableAlreadyExists(String),
     ColumnNotFound(String),
+    AmbiguousColumn(String),
     ConstraintViolation {
         kind: ConstraintKind,
         message: String,
@@ -51,6 +52,9 @@ impl fmt::Display for RustqlError {
             }
             RustqlError::ColumnNotFound(name) => {
                 write!(f, "Column '{}' not found", name)
+            }
+            RustqlError::AmbiguousColumn(name) => {
+                write!(f, "Column '{}' is ambiguous", name)
             }
             RustqlError::ConstraintViolation { kind: _, message } => {
                 write!(f, "{}", message)

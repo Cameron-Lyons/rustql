@@ -177,6 +177,9 @@ pub fn compare_values_same_type(left: &Value, right: &Value) -> Ordering {
         }
         (Value::Text(l), Value::Text(r)) => l.cmp(r),
         (Value::Boolean(l), Value::Boolean(r)) => l.cmp(r),
+        (Value::Date(l), Value::Date(r)) => l.cmp(r),
+        (Value::Time(l), Value::Time(r)) => l.cmp(r),
+        (Value::DateTime(l), Value::DateTime(r)) => l.cmp(r),
         _ => Ordering::Equal,
     }
 }
