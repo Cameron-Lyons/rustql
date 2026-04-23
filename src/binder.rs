@@ -592,6 +592,7 @@ impl<'a> Binder<'a> {
                 }
                 Column::Subquery(subquery) => {
                     let bound = self.bind_correlated_select(subquery, scope)?;
+                    ensure_single_column_subquery(&bound, "Scalar subquery")?;
                     let output_type = bound
                         .output_columns
                         .first()
@@ -1639,46 +1640,58 @@ impl<'a> Binder<'a> {
         for clause in &mut stmt.when_clauses {
             match clause {
                 MergeWhenClause::Matched { condition, action } => {
-                    if let Some(condition) = condition.as_ref() {
-                        let bound =
-                            self.bind_predicate_expr(condition, &scope, "MERGE WHEN condition")?;
-                        *condition = bound.expr;
+                    if let Some(condition_expr) = condition.as_mut() {
+                        let bound = self.bind_predicate_expr(
+                            condition_expr,
+                            &scope,
+                            "MERGE WHEN condition",
+                        )?;
+                        *condition_expr = bound.expr;
                     }
                     if let MergeMatchedAction::Update { assignments } = action {
                         self.bind_assignments(assignments, &target_columns, &scope)?;
                     }
                 }
                 MergeWhenClause::NotMatched { condition, action } => {
-                    if let Some(condition) = condition.as_ref() {
-                        let bound =
-                            self.bind_predicate_expr(condition, &scope, "MERGE WHEN condition")?;
-                        *condition = bound.expr;
+                    if let Some(condition_expr) = condition.as_mut() {
+                        let bound = self.bind_predicate_expr(
+                            condition_expr,
+                            &scope,
+                            "MERGE WHEN condition",
+                        )?;
+                        *condition_expr = bound.expr;
                     }
-                    let MergeNotMatchedAction::Insert { columns, values } = action;
-                    if let Some(columns) = columns {
-                        for column in columns.iter() {
-                            if !target_columns.iter().any(|candidate| candidate.name == *column) {
-                                return Err(RustqlError::ColumnNotFound(column.clone()));
+                    match action {
+                        MergeNotMatchedAction::Insert { columns, values } => {
+                            if let Some(columns) = columns {
+                                for column in columns.iter() {
+                                    if !target_columns
+                                        .iter()
+                                        .any(|candidate| candidate.name == *column)
+                                    {
+                                        return Err(RustqlError::ColumnNotFound(column.clone()));
+                                    }
+                                }
+                                if values.len() != columns.len() {
+                                    return Err(RustqlError::TypeMismatch(format!(
+                                        "Column count mismatch: expected {}, got {}",
+                                        columns.len(),
+                                        values.len()
+                                    )));
+                                }
+                            } else if values.len() != target_columns.len() {
+                                return Err(RustqlError::TypeMismatch(format!(
+                                    "Column count mismatch: expected {}, got {}",
+                                    target_columns.len(),
+                                    values.len()
+                                )));
+                            }
+
+                            for value in values {
+                                let bound = self.bind_expr(value, &scope)?;
+                                *value = bound.expr;
                             }
                         }
-                        if values.len() != columns.len() {
-                            return Err(RustqlError::TypeMismatch(format!(
-                                "Column count mismatch: expected {}, got {}",
-                                columns.len(),
-                                values.len()
-                            )));
-                        }
-                    } else if values.len() != target_columns.len() {
-                        return Err(RustqlError::TypeMismatch(format!(
-                            "Column count mismatch: expected {}, got {}",
-                            target_columns.len(),
-                            values.len()
-                        )));
-                    }
-
-                    for value in values {
-                        let bound = self.bind_expr(value, &scope)?;
-                        *value = bound.expr;
                     }
                 }
             }
