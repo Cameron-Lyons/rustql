@@ -243,10 +243,7 @@ pub(super) fn scalar_function_type(name: &ScalarFunctionType, args: &[BoundExpr]
     }
 }
 
-pub(super) fn window_function_type(
-    function: &WindowFunctionType,
-    args: &[BoundExpr],
-) -> BoundType {
+pub(super) fn window_function_type(function: &WindowFunctionType, args: &[BoundExpr]) -> BoundType {
     match function {
         WindowFunctionType::RowNumber
         | WindowFunctionType::Rank
