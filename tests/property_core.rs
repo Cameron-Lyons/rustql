@@ -688,13 +688,12 @@ fn column_names(column_count: usize) -> Vec<String> {
 }
 
 fn render_returning(column_count: usize, flags: Option<Vec<bool>>) -> Option<String> {
-    let Some(flags) = flags else {
-        return None;
-    };
+    let flags = flags?;
     let mut columns = flags
         .into_iter()
         .enumerate()
-        .filter_map(|(index, selected)| selected.then(|| format!("c{index}")))
+        .filter(|&(_, selected)| selected)
+        .map(|(index, _)| format!("c{index}"))
         .collect::<Vec<_>>();
 
     if columns.is_empty() && column_count > 0 {
