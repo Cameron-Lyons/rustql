@@ -271,8 +271,12 @@ impl<'a> Binder<'a> {
     ) -> Result<(), RustqlError> {
         if let Some(using_columns) = join.using_columns.as_ref() {
             for column in using_columns {
-                if !left_columns.iter().any(|candidate| candidate.name == *column)
-                    || !right_columns.iter().any(|candidate| candidate.name == *column)
+                if !left_columns
+                    .iter()
+                    .any(|candidate| candidate.name == *column)
+                    || !right_columns
+                        .iter()
+                        .any(|candidate| candidate.name == *column)
                 {
                     return Err(RustqlError::ColumnNotFound(column.clone()));
                 }
