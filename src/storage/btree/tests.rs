@@ -148,10 +148,7 @@ fn btree_storage_loads_legacy_row_keys_in_row_id_order() {
         .expect("Failed to write versioned header");
 
     let mut meta_page = BTreePage::new(0, PageKind::Meta);
-    meta_page
-        .entries
-        .push(BTreeEntry::new(Value::Text("root".to_string()), 1));
-    meta_page.header.entry_count = meta_page.entries.len() as u16;
+    meta_page.push_entry(BTreeEntry::new(Value::Text("root".to_string()), 1));
     file.write_page(&meta_page)
         .expect("Failed to write meta page");
 
@@ -211,7 +208,7 @@ fn btree_storage_loads_legacy_row_keys_in_row_id_order() {
         .find(|entry| matches!(&entry.key, Value::Text(text) if text == "root"))
         .expect("root entry should exist")
         .pointer = current_root_id;
-    meta_page.header.entry_count = meta_page.entries.len() as u16;
+    meta_page.refresh_entry_count();
     file.write_page(&meta_page)
         .expect("Failed to update root pointer");
     drop(file);
@@ -240,15 +237,11 @@ fn btree_search_insert_delete() {
     let mut file = BTreeFile::create(&temp_path).expect("Failed to create BTree file");
 
     let mut meta_page = BTreePage::new(0, PageKind::Meta);
-    meta_page
-        .entries
-        .push(BTreeEntry::new(Value::Text("root".to_string()), 1));
-    meta_page.header.entry_count = meta_page.entries.len() as u16;
+    meta_page.push_entry(BTreeEntry::new(Value::Text("root".to_string()), 1));
     file.write_page(&meta_page)
         .expect("Failed to write meta page");
 
-    let mut root_page = BTreePage::new(1, PageKind::Leaf);
-    root_page.header.entry_count = 0;
+    let root_page = BTreePage::new(1, PageKind::Leaf);
     file.write_page(&root_page)
         .expect("Failed to write root page");
 
@@ -307,15 +300,11 @@ fn btree_range_scan() {
     let mut file = BTreeFile::create(&temp_path).expect("Failed to create BTree file");
 
     let mut meta_page = BTreePage::new(0, PageKind::Meta);
-    meta_page
-        .entries
-        .push(BTreeEntry::new(Value::Text("root".to_string()), 1));
-    meta_page.header.entry_count = meta_page.entries.len() as u16;
+    meta_page.push_entry(BTreeEntry::new(Value::Text("root".to_string()), 1));
     file.write_page(&meta_page)
         .expect("Failed to write meta page");
 
-    let mut root_page = BTreePage::new(1, PageKind::Leaf);
-    root_page.header.entry_count = 0;
+    let root_page = BTreePage::new(1, PageKind::Leaf);
     file.write_page(&root_page)
         .expect("Failed to write root page");
 
@@ -349,15 +338,11 @@ fn btree_range_scan_after_split_stays_ordered() {
     let mut file = BTreeFile::create(&temp_path).expect("Failed to create BTree file");
 
     let mut meta_page = BTreePage::new(0, PageKind::Meta);
-    meta_page
-        .entries
-        .push(BTreeEntry::new(Value::Text("root".to_string()), 1));
-    meta_page.header.entry_count = meta_page.entries.len() as u16;
+    meta_page.push_entry(BTreeEntry::new(Value::Text("root".to_string()), 1));
     file.write_page(&meta_page)
         .expect("Failed to write meta page");
 
-    let mut root_page = BTreePage::new(1, PageKind::Leaf);
-    root_page.header.entry_count = 0;
+    let root_page = BTreePage::new(1, PageKind::Leaf);
     file.write_page(&root_page)
         .expect("Failed to write root page");
 

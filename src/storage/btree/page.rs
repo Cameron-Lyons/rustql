@@ -3,6 +3,7 @@ use crate::error::RustqlError;
 use serde::{Deserialize, Serialize};
 
 pub const BTREE_PAGE_SIZE: usize = 4096;
+pub(super) const BTREE_PAGE_HEADER_SIZE: usize = 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PageKind {
@@ -48,6 +49,33 @@ impl BTreePage {
         }
     }
 
+    pub(super) fn push_entry(&mut self, entry: BTreeEntry) {
+        self.entries.push(entry);
+        self.refresh_entry_count();
+    }
+
+    pub(super) fn insert_entry(&mut self, index: usize, entry: BTreeEntry) {
+        self.entries.insert(index, entry);
+        self.refresh_entry_count();
+    }
+
+    #[cfg(test)]
+    pub(super) fn remove_entry(&mut self, index: usize) -> BTreeEntry {
+        let entry = self.entries.remove(index);
+        self.refresh_entry_count();
+        entry
+    }
+
+    pub(super) fn replace_entries(&mut self, entries: Vec<BTreeEntry>) {
+        self.entries = entries;
+        self.refresh_entry_count();
+    }
+
+    pub(super) fn refresh_entry_count(&mut self) {
+        debug_assert!(self.entries.len() <= u16::MAX as usize);
+        self.header.entry_count = self.entries.len() as u16;
+    }
+
     fn stores_inline_leaf_data(&self) -> bool {
         self.header.kind == PageKind::Leaf && self.header.reserved & LEAF_INLINE_DATA_FLAG != 0
     }
@@ -59,13 +87,12 @@ impl BTreePage {
     }
 
     fn estimated_size(&self) -> usize {
-        let header_size = 16usize;
         let entries_size: usize = self
             .entries
             .iter()
             .map(|e| e.estimated_size(self.header.kind, self.header.reserved))
             .sum();
-        header_size + entries_size
+        BTREE_PAGE_HEADER_SIZE + entries_size
     }
 }
 
@@ -278,14 +305,14 @@ impl BTreePage {
             }
         }
 
-        let header_size = 16usize;
-        if header_size + payload.len() > BTREE_PAGE_SIZE {
+        if BTREE_PAGE_HEADER_SIZE + payload.len() > BTREE_PAGE_SIZE {
             return Err(RustqlError::StorageError(
                 "BTreePage too large to fit in fixed page size".to_string(),
             ));
         }
 
-        buf[header_size..header_size + payload.len()].copy_from_slice(&payload);
+        buf[BTREE_PAGE_HEADER_SIZE..BTREE_PAGE_HEADER_SIZE + payload.len()]
+            .copy_from_slice(&payload);
         Ok(buf)
     }
 
@@ -314,8 +341,6 @@ impl BTreePage {
             reserved,
         };
 
-        let header_size = 16usize;
-
         if entry_count == 0 {
             return Ok(BTreePage {
                 header,
@@ -323,8 +348,8 @@ impl BTreePage {
             });
         }
 
-        if buf[header_size] == b'[' {
-            let mut payload = &buf[header_size..];
+        if buf[BTREE_PAGE_HEADER_SIZE] == b'[' {
+            let mut payload = &buf[BTREE_PAGE_HEADER_SIZE..];
             if let Some(last) = payload.iter().rposition(|b| *b != 0) {
                 payload = &payload[..=last];
             } else {
@@ -344,7 +369,7 @@ impl BTreePage {
         }
 
         let mut entries = Vec::with_capacity(entry_count as usize);
-        let mut offset = header_size;
+        let mut offset = BTREE_PAGE_HEADER_SIZE;
         for _ in 0..entry_count {
             let key = decode_value(buf, &mut offset)?;
             if kind == PageKind::Leaf && reserved & LEAF_INLINE_DATA_FLAG != 0 {

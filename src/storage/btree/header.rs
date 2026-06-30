@@ -12,15 +12,6 @@ pub(super) enum VersionedFileState {
     Valid { version: u32 },
 }
 
-pub(super) fn read_versioned_header(
-    path: &Path,
-    expected_magic: [u8; 8],
-    expected_version: u32,
-    label: &str,
-) -> Result<VersionedFileState, RustqlError> {
-    read_versioned_header_with_versions(path, expected_magic, &[expected_version], label)
-}
-
 pub(super) fn read_versioned_header_with_versions(
     path: &Path,
     expected_magic: [u8; 8],
