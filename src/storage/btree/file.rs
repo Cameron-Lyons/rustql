@@ -251,10 +251,7 @@ impl BTreeFile {
         let page_id = self.get_next_page_id()?;
         let mut data_page = BTreePage::new(page_id, PageKind::Leaf);
 
-        data_page
-            .entries
-            .push(BTreeEntry::new(Value::Text(data.to_string()), 0));
-        data_page.header.entry_count = data_page.entries.len() as u16;
+        data_page.push_entry(BTreeEntry::new(Value::Text(data.to_string()), 0));
 
         self.write_page(&data_page)?;
         Ok(page_id)
@@ -272,13 +269,8 @@ impl BTreeFile {
         )?;
 
         let mut meta_page = BTreePage::new(0, PageKind::Meta);
-        meta_page
-            .entries
-            .push(BTreeEntry::new(Value::Text("root".to_string()), 1));
-        meta_page
-            .entries
-            .push(BTreeEntry::new(Value::Text("next_page_id".to_string()), 2));
-        meta_page.header.entry_count = meta_page.entries.len() as u16;
+        meta_page.push_entry(BTreeEntry::new(Value::Text("root".to_string()), 1));
+        meta_page.push_entry(BTreeEntry::new(Value::Text("next_page_id".to_string()), 2));
         self.write_page(&meta_page)?;
 
         let root_page_id = 1;
@@ -370,7 +362,7 @@ impl BTreeFile {
         {
             root_entry.pointer = current_root_id;
         }
-        meta_page.header.entry_count = meta_page.entries.len() as u16;
+        meta_page.refresh_entry_count();
         self.write_page(&meta_page)?;
 
         self.file.flush().map_err(|e| {
@@ -381,8 +373,7 @@ impl BTreeFile {
 
 impl BTreeFile {
     pub(super) fn read_page(&mut self, page_id: u64) -> Result<BTreePage, RustqlError> {
-        let header_size = 16u64;
-        let offset = header_size + page_id * BTREE_PAGE_SIZE as u64;
+        let offset = FILE_HEADER_SIZE as u64 + page_id * BTREE_PAGE_SIZE as u64;
 
         self.file.seek(SeekFrom::Start(offset)).map_err(|e| {
             RustqlError::StorageError(format!("Failed to seek to BTree page: {}", e))
@@ -397,8 +388,7 @@ impl BTreeFile {
     }
 
     pub(super) fn write_page(&mut self, page: &BTreePage) -> Result<(), RustqlError> {
-        let header_size = 16u64;
-        let offset = header_size + page.header.page_id * BTREE_PAGE_SIZE as u64;
+        let offset = FILE_HEADER_SIZE as u64 + page.header.page_id * BTREE_PAGE_SIZE as u64;
 
         let buf = page.to_bytes()?;
 
@@ -433,12 +423,12 @@ impl BTreeFile {
                 }) {
                     e.pointer = next_id + 1;
                 } else {
-                    new_meta.entries.push(BTreeEntry::new(
+                    new_meta.push_entry(BTreeEntry::new(
                         Value::Text("next_page_id".to_string()),
                         next_id + 1,
                     ));
                 }
-                new_meta.header.entry_count = new_meta.entries.len() as u16;
+                new_meta.refresh_entry_count();
                 self.write_page(&new_meta)?;
                 return Ok(next_id);
             }
@@ -446,11 +436,10 @@ impl BTreeFile {
 
         let next_id = 2;
         let mut new_meta = meta_page;
-        new_meta.entries.push(BTreeEntry::new(
+        new_meta.push_entry(BTreeEntry::new(
             Value::Text("next_page_id".to_string()),
             next_id + 1,
         ));
-        new_meta.header.entry_count = new_meta.entries.len() as u16;
         self.write_page(&new_meta)?;
         Ok(next_id)
     }
@@ -574,8 +563,7 @@ impl BTreeFile {
                 .entries
                 .binary_search_by(|e| e.key.cmp(&new_entry.key))
                 .unwrap_or_else(|pos| pos);
-            leaf_page.entries.insert(insert_pos, new_entry);
-            leaf_page.header.entry_count = leaf_page.entries.len() as u16;
+            leaf_page.insert_entry(insert_pos, new_entry);
             self.write_page(&leaf_page)?;
             Ok(root_page_id)
         } else {
@@ -600,14 +588,13 @@ impl BTreeFile {
         let right_entries = page.entries.split_off(mid);
         let split_key = right_entries[0].key.clone();
 
-        page.header.entry_count = page.entries.len() as u16;
+        page.refresh_entry_count();
         self.write_page(&page)?;
 
         let right_page_id = self.get_next_page_id()?;
         let mut right_page = BTreePage::new(right_page_id, page.header.kind);
         right_page.header.reserved = page.header.reserved;
-        right_page.entries = right_entries;
-        right_page.header.entry_count = right_page.entries.len() as u16;
+        right_page.replace_entries(right_entries);
         self.write_page(&right_page)?;
 
         if page.header.page_id == root_page_id {
@@ -616,13 +603,8 @@ impl BTreeFile {
 
             let left_key = page.entries[0].key.clone();
 
-            new_root
-                .entries
-                .push(BTreeEntry::new(left_key, page.header.page_id));
-            new_root
-                .entries
-                .push(BTreeEntry::new(split_key, right_page_id));
-            new_root.header.entry_count = new_root.entries.len() as u16;
+            new_root.push_entry(BTreeEntry::new(left_key, page.header.page_id));
+            new_root.push_entry(BTreeEntry::new(split_key, right_page_id));
             self.write_page(&new_root)?;
 
             let mut meta_page = self.read_page(0)?;
@@ -635,12 +617,12 @@ impl BTreeFile {
             }) {
                 root_entry.pointer = new_root_id;
             } else {
-                meta_page.entries.push(BTreeEntry::new(
+                meta_page.push_entry(BTreeEntry::new(
                     Value::Text("root".to_string()),
                     new_root_id,
                 ));
             }
-            meta_page.header.entry_count = meta_page.entries.len() as u16;
+            meta_page.refresh_entry_count();
             self.write_page(&meta_page)?;
 
             return Ok(new_root_id);
@@ -657,8 +639,7 @@ impl BTreeFile {
                     .entries
                     .binary_search_by(|e| e.key.cmp(&parent_entry.key))
                     .unwrap_or_else(|pos| pos);
-                parent_page.entries.insert(insert_pos, parent_entry);
-                parent_page.header.entry_count = parent_page.entries.len() as u16;
+                parent_page.insert_entry(insert_pos, parent_entry);
                 self.write_page(&parent_page)?;
                 Ok(root_page_id)
             } else {
@@ -674,8 +655,7 @@ impl BTreeFile {
         match self.search(key, root_page_id)? {
             Some((page_id, entry_idx)) => {
                 let mut page = self.read_page(page_id)?;
-                page.entries.remove(entry_idx);
-                page.header.entry_count = page.entries.len() as u16;
+                page.remove_entry(entry_idx);
                 self.write_page(&page)?;
                 Ok(true)
             }
