@@ -1,6 +1,7 @@
 use crate::ast::{ColumnDefinition, TableConstraint, Value};
 use crate::database::RowId;
 use serde::{Deserialize, Serialize};
+use std::fmt::Write as _;
 
 pub(super) const LEGACY_ROW_KEY_PREFIX: &str = "row:";
 pub(super) const ROW_KEY_PREFIX: &str = "table_row:";
@@ -14,11 +15,14 @@ pub(super) struct TableStorageRecord {
 }
 
 pub(super) fn format_row_storage_key(table_name: &str, row_id: RowId) -> String {
-    format!(
-        "{ROW_KEY_PREFIX}{table_name}:{:0width$}",
-        row_id.0,
-        width = ROW_ID_KEY_WIDTH
-    )
+    let mut key =
+        String::with_capacity(ROW_KEY_PREFIX.len() + table_name.len() + 1 + ROW_ID_KEY_WIDTH);
+    key.push_str(ROW_KEY_PREFIX);
+    key.push_str(table_name);
+    key.push(':');
+    write!(&mut key, "{:0width$}", row_id.0, width = ROW_ID_KEY_WIDTH)
+        .expect("writing to String cannot fail");
+    key
 }
 
 pub(super) fn parse_row_storage_key(key: &str) -> Option<(&str, RowId, bool)> {
@@ -57,5 +61,34 @@ pub(super) fn insert_loaded_row(
 
     if table.next_row_id <= row_id.0 {
         table.next_row_id = row_id.0 + 1;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_row_storage_key_uses_fixed_width_row_id() {
+        let key = format_row_storage_key("users", RowId(42));
+
+        assert_eq!(key, "table_row:users:00000000000000000042");
+        assert_eq!(
+            parse_row_storage_key(&key),
+            Some(("users", RowId(42), true))
+        );
+    }
+
+    #[test]
+    fn parse_row_storage_key_preserves_legacy_flag() {
+        assert_eq!(
+            parse_row_storage_key("row:users:7"),
+            Some(("users", RowId(7), false))
+        );
+    }
+
+    #[test]
+    fn parse_row_storage_key_rejects_invalid_row_id() {
+        assert_eq!(parse_row_storage_key("table_row:users:not-a-row-id"), None);
     }
 }
