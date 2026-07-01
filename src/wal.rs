@@ -142,8 +142,7 @@ impl WalLog {
                 "Statement savepoint is no longer valid".to_string(),
             ));
         }
-        let entries_to_rollback: Vec<WalEntry> = self.entries.drain(position..).collect();
-        for entry in entries_to_rollback.into_iter().rev() {
+        for entry in self.entries.drain(position..).rev() {
             rollback_single_entry(entry, db);
         }
         rebuild_all_indexes(db)?;
@@ -305,6 +304,75 @@ impl WalLog {
 
         rebuild_all_indexes(db)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ast::DataType;
+
+    fn integer_column(name: &str) -> ColumnDefinition {
+        ColumnDefinition {
+            name: name.to_string(),
+            data_type: DataType::Integer,
+            nullable: true,
+            primary_key: false,
+            unique: false,
+            default_value: None,
+            foreign_key: None,
+            check: None,
+            auto_increment: false,
+            generated: None,
+        }
+    }
+
+    #[test]
+    fn rollback_to_position_drains_suffix_in_reverse() {
+        let mut db = Database::new();
+        db.tables.insert(
+            "items".to_string(),
+            Table::with_rows_and_ids(
+                vec![integer_column("id")],
+                vec![vec![Value::Integer(1)], vec![Value::Integer(2)]],
+                vec![RowId(1), RowId(2)],
+                3,
+                Vec::new(),
+            ),
+        );
+
+        let mut log = WalLog::new();
+        log.record(WalEntry::UpdateRow {
+            table: "items".to_string(),
+            row_id: RowId(1),
+            old_row: vec![Value::Integer(0)],
+        });
+        let position = log.entries.len();
+
+        let table = db.tables.get_mut("items").unwrap();
+        table
+            .set_row_by_id(RowId(2), vec![Value::Integer(20)])
+            .unwrap();
+        log.record(WalEntry::UpdateRow {
+            table: "items".to_string(),
+            row_id: RowId(2),
+            old_row: vec![Value::Integer(2)],
+        });
+
+        let (deleted_position, deleted_row) = table.remove_row_by_id(RowId(1)).unwrap();
+        log.record(WalEntry::DeleteRow {
+            table: "items".to_string(),
+            row_id: RowId(1),
+            position: deleted_position,
+            old_row: deleted_row,
+        });
+
+        log.rollback_to_position(position, &mut db).unwrap();
+
+        let table = db.tables.get("items").unwrap();
+        assert_eq!(log.entries.len(), position);
+        assert_eq!(table.row_by_id(RowId(1)), Some(&vec![Value::Integer(1)]));
+        assert_eq!(table.row_by_id(RowId(2)), Some(&vec![Value::Integer(2)]));
     }
 }
 
