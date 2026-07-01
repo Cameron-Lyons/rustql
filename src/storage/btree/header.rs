@@ -73,11 +73,48 @@ pub(super) fn write_versioned_header(
     file.seek(SeekFrom::Start(0))
         .map_err(|e| RustqlError::StorageError(format!("Failed to seek {}: {}", label, e)))?;
 
-    let mut header = Vec::with_capacity(FILE_HEADER_SIZE);
-    header.extend_from_slice(&magic);
-    header.extend_from_slice(&version.to_le_bytes());
-    header.extend_from_slice(&HEADER_RESERVED.to_le_bytes());
+    let mut header = [0u8; FILE_HEADER_SIZE];
+    header[0..8].copy_from_slice(&magic);
+    header[8..12].copy_from_slice(&version.to_le_bytes());
+    header[12..16].copy_from_slice(&HEADER_RESERVED.to_le_bytes());
 
     file.write_all(&header)
         .map_err(|e| RustqlError::StorageError(format!("Failed to write {} header: {}", label, e)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Read;
+
+    #[test]
+    fn write_versioned_header_writes_fixed_header_bytes() {
+        let path = std::env::temp_dir().join(format!(
+            "rustql-versioned-header-{}-{}.dat",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .expect("failed to create temp header file");
+
+        write_versioned_header(&mut file, *b"RSTQLTST", 7, "test header")
+            .expect("failed to write header");
+
+        let mut bytes = Vec::new();
+        file.seek(SeekFrom::Start(0))
+            .expect("failed to seek header");
+        file.read_to_end(&mut bytes).expect("failed to read header");
+        std::fs::remove_file(&path).expect("failed to remove temp header file");
+
+        let mut expected = Vec::new();
+        expected.extend_from_slice(b"RSTQLTST");
+        expected.extend_from_slice(&7u32.to_le_bytes());
+        expected.extend_from_slice(&HEADER_RESERVED.to_le_bytes());
+        assert_eq!(bytes, expected);
+    }
 }
