@@ -83,16 +83,17 @@ impl BTreePage {
     pub fn can_accept_entry(&self, entry: &BTreeEntry) -> bool {
         let current_size = self.estimated_size();
         let added = entry.estimated_size(self.header.kind, self.header.reserved);
-        current_size + added <= BTREE_PAGE_SIZE
+        current_size.saturating_add(added) <= BTREE_PAGE_SIZE
     }
 
     fn estimated_size(&self) -> usize {
-        let entries_size: usize = self
-            .entries
-            .iter()
-            .map(|e| e.estimated_size(self.header.kind, self.header.reserved))
-            .sum();
-        BTREE_PAGE_HEADER_SIZE + entries_size
+        BTREE_PAGE_HEADER_SIZE.saturating_add(self.entries_size())
+    }
+
+    fn entries_size(&self) -> usize {
+        self.entries.iter().fold(0, |size, entry| {
+            size.saturating_add(entry.estimated_size(self.header.kind, self.header.reserved))
+        })
     }
 }
 
@@ -129,7 +130,7 @@ impl BTreeEntry {
             Value::Integer(_) => 9,
             Value::Float(_) => 9,
             Value::Boolean(_) => 2,
-            Value::Text(s) | Value::Date(s) | Value::Time(s) | Value::DateTime(s) => 1 + s.len(),
+            Value::Text(s) | Value::Date(s) | Value::Time(s) | Value::DateTime(s) => 5 + s.len(),
         };
         let value_size = if kind == PageKind::Leaf && reserved & LEAF_INLINE_DATA_FLAG != 0 {
             4 + self
@@ -289,7 +290,14 @@ impl BTreePage {
         buf[9..11].copy_from_slice(&self.header.entry_count.to_le_bytes());
         buf[11..13].copy_from_slice(&self.header.reserved.to_le_bytes());
 
-        let mut payload = Vec::new();
+        let payload_size = self.entries_size();
+        if payload_size > BTREE_PAGE_SIZE - BTREE_PAGE_HEADER_SIZE {
+            return Err(RustqlError::StorageError(
+                "BTreePage too large to fit in fixed page size".to_string(),
+            ));
+        }
+
+        let mut payload = Vec::with_capacity(payload_size);
         for entry in &self.entries {
             encode_value(&mut payload, &entry.key);
             if self.stores_inline_leaf_data() {
@@ -305,11 +313,7 @@ impl BTreePage {
             }
         }
 
-        if BTREE_PAGE_HEADER_SIZE + payload.len() > BTREE_PAGE_SIZE {
-            return Err(RustqlError::StorageError(
-                "BTreePage too large to fit in fixed page size".to_string(),
-            ));
-        }
+        debug_assert_eq!(payload.len(), payload_size);
 
         buf[BTREE_PAGE_HEADER_SIZE..BTREE_PAGE_HEADER_SIZE + payload.len()]
             .copy_from_slice(&payload);
