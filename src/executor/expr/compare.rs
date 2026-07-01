@@ -1,4 +1,5 @@
 use super::*;
+use std::fmt::Write as _;
 
 pub fn compare_values(
     left: &Value,
@@ -102,6 +103,10 @@ pub fn compare_values(
 
 pub fn format_value(value: &Value) -> String {
     value.to_string()
+}
+
+pub fn append_formatted_value(output: &mut String, value: &Value) {
+    write!(output, "{}", value).expect("writing to String cannot fail");
 }
 
 pub fn apply_arithmetic(

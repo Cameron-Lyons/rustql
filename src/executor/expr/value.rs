@@ -48,9 +48,10 @@ pub fn evaluate_value_expression_with_db(
                 | BinaryOperator::Multiply
                 | BinaryOperator::Divide => apply_arithmetic(&left_val, &right_val, op),
                 BinaryOperator::Concat => {
-                    let l = format_value(&left_val);
-                    let r = format_value(&right_val);
-                    Ok(Value::Text(format!("{}{}", l, r)))
+                    let mut result = String::new();
+                    append_formatted_value(&mut result, &left_val);
+                    append_formatted_value(&mut result, &right_val);
+                    Ok(Value::Text(result))
                 }
                 _ => Err(RustqlError::Internal(
                     "Only arithmetic operators are supported in SELECT expressions".to_string(),
