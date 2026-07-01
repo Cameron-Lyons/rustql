@@ -733,7 +733,22 @@ fn read_string(
 }
 
 fn match_keyword(ident: &str) -> Token {
-    match ident.to_uppercase().as_str() {
+    if let Some(token) = match_uppercase_keyword(ident) {
+        return token;
+    }
+
+    if ident.bytes().any(|byte| byte.is_ascii_lowercase()) {
+        let uppercase = ident.to_ascii_uppercase();
+        if let Some(token) = match_uppercase_keyword(&uppercase) {
+            return token;
+        }
+    }
+
+    Token::Identifier(ident.to_string())
+}
+
+fn match_uppercase_keyword(ident: &str) -> Option<Token> {
+    Some(match ident {
         "SELECT" => Token::Select,
         "EXISTS" => Token::Exists,
         "DISTINCT" => Token::Distinct,
@@ -950,6 +965,28 @@ fn match_keyword(ident: &str) -> Token {
         "CBRT" => Token::Cbrt,
         "GCD" => Token::Gcd,
         "LCM" => Token::Lcm,
-        _ => Token::Identifier(ident.to_string()),
+        _ => return None,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn keyword_matching_keeps_uppercase_fast_path() {
+        assert_eq!(match_keyword("SELECT"), Token::Select);
+        assert_eq!(match_keyword("GENERATE_SERIES"), Token::GenerateSeries);
+        assert_eq!(
+            match_keyword("USER_ID"),
+            Token::Identifier("USER_ID".to_string())
+        );
+    }
+
+    #[test]
+    fn keyword_matching_remains_case_insensitive() {
+        assert_eq!(match_keyword("select"), Token::Select);
+        assert_eq!(match_keyword("SubStr"), Token::Substring);
+        assert_eq!(match_keyword("dateadd"), Token::DateAdd);
     }
 }
