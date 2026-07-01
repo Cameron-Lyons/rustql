@@ -357,24 +357,18 @@ impl<'a> PlanExecutor<'a> {
                 Ok(max_val.unwrap_or(Value::Null))
             }
             AggregateFunctionType::Variance => {
-                let values = numeric_values(&input.values, "VARIANCE requires numeric values")?;
-                if values.is_empty() {
+                let summary = numeric_summary(&input.values, "VARIANCE requires numeric values")?;
+                if summary.is_empty() {
                     return Ok(Value::Null);
                 }
-                let mean = values.iter().sum::<f64>() / values.len() as f64;
-                let variance =
-                    values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / values.len() as f64;
-                Ok(Value::Float(variance))
+                Ok(Value::Float(summary.variance()))
             }
             AggregateFunctionType::Stddev => {
-                let values = numeric_values(&input.values, "STDDEV requires numeric values")?;
-                if values.is_empty() {
+                let summary = numeric_summary(&input.values, "STDDEV requires numeric values")?;
+                if summary.is_empty() {
                     return Ok(Value::Null);
                 }
-                let mean = values.iter().sum::<f64>() / values.len() as f64;
-                let variance =
-                    values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / values.len() as f64;
-                Ok(Value::Float(variance.sqrt()))
+                Ok(Value::Float(summary.variance().sqrt()))
             }
             AggregateFunctionType::GroupConcat => {
                 let sep = agg.separator.as_deref().unwrap_or(",");
@@ -624,6 +618,43 @@ fn numeric_values(values: &[Value], error: &str) -> Result<Vec<f64>, RustqlError
             _ => Err(RustqlError::AggregateError(error.to_string())),
         })
         .collect()
+}
+
+#[derive(Default)]
+struct NumericSummary {
+    count: usize,
+    mean: f64,
+    m2: f64,
+}
+
+impl NumericSummary {
+    fn push(&mut self, value: f64) {
+        self.count += 1;
+        let delta = value - self.mean;
+        self.mean += delta / self.count as f64;
+        let delta2 = value - self.mean;
+        self.m2 += delta * delta2;
+    }
+
+    fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    fn variance(&self) -> f64 {
+        self.m2 / self.count as f64
+    }
+}
+
+fn numeric_summary(values: &[Value], error: &str) -> Result<NumericSummary, RustqlError> {
+    let mut summary = NumericSummary::default();
+    for value in values {
+        match value {
+            Value::Integer(i) => summary.push(*i as f64),
+            Value::Float(f) => summary.push(*f),
+            _ => return Err(RustqlError::AggregateError(error.to_string())),
+        }
+    }
+    Ok(summary)
 }
 
 fn format_value_string(value: &Value) -> String {

@@ -1470,6 +1470,44 @@ fn execute_filtered_grouped_aggregate_returns_typed_rows() {
 }
 
 #[test]
+fn execute_statistical_aggregates_return_typed_rows() {
+    let _guard = test_guard();
+    let engine = Engine::open(EngineOptions {
+        storage: StorageMode::Memory,
+    })
+    .unwrap();
+    let mut session = engine.session();
+
+    session
+        .execute_script(
+            "
+            CREATE TABLE scores (id INTEGER, score INTEGER);
+            INSERT INTO scores VALUES (1, 2), (2, 4), (3, NULL);
+            ",
+        )
+        .unwrap();
+
+    let result = session
+        .execute_one(
+            "SELECT VARIANCE(score) AS variance_value, STDDEV(score) AS stddev_value
+             FROM scores",
+        )
+        .unwrap();
+
+    match result {
+        QueryResult::Rows(rows) => {
+            assert_eq!(rows.columns[0].name, "variance_value");
+            assert_eq!(rows.columns[1].name, "stddev_value");
+            assert_eq!(
+                rows.rows,
+                vec![vec![ast::Value::Float(1.0), ast::Value::Float(1.0)]]
+            );
+        }
+        other => panic!("expected rows result, got: {other:?}"),
+    }
+}
+
+#[test]
 fn execute_rollup_returns_typed_rows() {
     let _guard = test_guard();
     let engine = Engine::open(EngineOptions {
