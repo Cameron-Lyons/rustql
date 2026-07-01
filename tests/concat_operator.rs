@@ -57,6 +57,17 @@ fn test_concat_with_number() {
 }
 
 #[test]
+fn test_concat_operator_formats_null() {
+    let _g = setup();
+    let result = execute_sql("SELECT first_name || NULL FROM people WHERE id = 1").unwrap();
+    assert!(
+        result.contains("JohnNULL"),
+        "Expected JohnNULL, got: {:?}",
+        result
+    );
+}
+
+#[test]
 fn test_concat_in_where_clause() {
     let _g = setup();
     let result =
@@ -105,6 +116,18 @@ fn test_concat_function_variadic() {
     assert!(
         result.contains("John Doe age:30"),
         "Expected 'John Doe age:30', got: {:?}",
+        result
+    );
+}
+
+#[test]
+fn test_concat_function_skips_null() {
+    let _g = setup();
+    let result =
+        execute_sql("SELECT CONCAT(first_name, NULL, last_name) FROM people WHERE id = 1").unwrap();
+    assert!(
+        result.contains("JohnDoe"),
+        "Expected JohnDoe, got: {:?}",
         result
     );
 }

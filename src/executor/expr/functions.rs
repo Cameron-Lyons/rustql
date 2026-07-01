@@ -147,7 +147,7 @@ pub(super) fn evaluate_scalar_function(
             for arg in &evaluated_args {
                 match arg {
                     Value::Null => {}
-                    other => result.push_str(&format_value(other)),
+                    other => append_formatted_value(&mut result, other),
                 }
             }
             Ok(Value::Text(result))
