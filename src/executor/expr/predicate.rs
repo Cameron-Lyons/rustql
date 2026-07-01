@@ -155,44 +155,67 @@ pub fn evaluate_expression(
 }
 
 fn match_like(text: &str, pattern: &str) -> bool {
-    let text_chars: Vec<char> = text.chars().collect();
-    let pattern_chars: Vec<char> = pattern.chars().collect();
+    let mut text_idx = 0;
+    let mut pattern_idx = 0;
+    let mut last_percent_pattern_idx = None;
+    let mut last_percent_text_idx = 0;
 
-    fn match_pattern(text: &[char], pattern: &[char], text_idx: usize, pattern_idx: usize) -> bool {
-        let text_len = text.len();
-        let pattern_len = pattern.len();
-
-        if pattern_idx == pattern_len {
-            return text_idx == text_len;
-        }
-
-        if pattern[pattern_idx] == '%' {
-            if pattern_idx + 1 == pattern_len {
-                return true;
+    while text_idx < text.len() {
+        match next_char(pattern, pattern_idx) {
+            Some(('%', next_pattern_idx)) => {
+                pattern_idx = next_pattern_idx;
+                last_percent_pattern_idx = Some(pattern_idx);
+                last_percent_text_idx = text_idx;
             }
-            for i in text_idx..=text_len {
-                if match_pattern(text, pattern, i, pattern_idx + 1) {
-                    return true;
+            Some(('_', next_pattern_idx)) => {
+                let Some((_, next_text_idx)) = next_char(text, text_idx) else {
+                    return false;
+                };
+                text_idx = next_text_idx;
+                pattern_idx = next_pattern_idx;
+            }
+            Some((pattern_ch, next_pattern_idx)) => {
+                if let Some((text_ch, next_text_idx)) = next_char(text, text_idx)
+                    && text_ch == pattern_ch
+                {
+                    text_idx = next_text_idx;
+                    pattern_idx = next_pattern_idx;
+                } else if let Some(retry_pattern_idx) = last_percent_pattern_idx {
+                    let Some((_, next_text_idx)) = next_char(text, last_percent_text_idx) else {
+                        return false;
+                    };
+                    last_percent_text_idx = next_text_idx;
+                    text_idx = last_percent_text_idx;
+                    pattern_idx = retry_pattern_idx;
+                } else {
+                    return false;
                 }
             }
-            return false;
-        }
-
-        if pattern[pattern_idx] == '_' {
-            if text_idx < text_len {
-                return match_pattern(text, pattern, text_idx + 1, pattern_idx + 1);
+            None => {
+                if let Some(retry_pattern_idx) = last_percent_pattern_idx {
+                    let Some((_, next_text_idx)) = next_char(text, last_percent_text_idx) else {
+                        return false;
+                    };
+                    last_percent_text_idx = next_text_idx;
+                    text_idx = last_percent_text_idx;
+                    pattern_idx = retry_pattern_idx;
+                } else {
+                    return false;
+                }
             }
-            return false;
         }
-
-        if text_idx < text_len && text[text_idx] == pattern[pattern_idx] {
-            return match_pattern(text, pattern, text_idx + 1, pattern_idx + 1);
-        }
-
-        false
     }
 
-    match_pattern(&text_chars, &pattern_chars, 0, 0)
+    while let Some(('%', next_pattern_idx)) = next_char(pattern, pattern_idx) {
+        pattern_idx = next_pattern_idx;
+    }
+
+    pattern_idx == pattern.len()
+}
+
+fn next_char(text: &str, idx: usize) -> Option<(char, usize)> {
+    let ch = text.get(idx..)?.chars().next()?;
+    Some((ch, idx + ch.len_utf8()))
 }
 
 fn is_between(val: &Value, lower: &Value, upper: &Value) -> bool {
@@ -213,5 +236,36 @@ fn is_between(val: &Value, lower: &Value, upper: &Value) -> bool {
         (Value::Integer(v), Value::Float(l), Value::Float(u)) => *v as f64 >= *l && *v as f64 <= *u,
         (Value::Text(v), Value::Text(l), Value::Text(u)) => v >= l && v <= u,
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::match_like;
+
+    #[test]
+    fn like_matches_literal_and_wildcards() {
+        assert!(match_like("alphabet", "alpha%"));
+        assert!(match_like("alphabet", "%ha%et"));
+        assert!(match_like("alphabet", "a_pha_et"));
+        assert!(!match_like("alphabet", "alpha_"));
+    }
+
+    #[test]
+    fn like_backtracks_after_percent() {
+        assert!(match_like("abbc", "a%bc"));
+        assert!(match_like("abcabc", "%abc"));
+        assert!(!match_like("abcabx", "%abc"));
+    }
+
+    #[test]
+    fn like_underscore_matches_one_unicode_scalar() {
+        let text = "na\u{ef}ve";
+
+        assert!(match_like(text, "na_ve"));
+        assert!(match_like(text, "na%"));
+        assert!(match_like(text, "n%v_"));
+        assert!(match_like(text, "n____"));
+        assert!(!match_like(text, "n_____"));
     }
 }
