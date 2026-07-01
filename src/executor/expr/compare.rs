@@ -125,16 +125,29 @@ pub fn apply_arithmetic(
 
     match (left, right) {
         (Value::Integer(l), Value::Integer(r)) => match op {
-            BinaryOperator::Plus => Ok(Value::Integer(l + r)),
-            BinaryOperator::Minus => Ok(Value::Integer(l - r)),
-            BinaryOperator::Multiply => Ok(Value::Integer(l * r)),
+            BinaryOperator::Plus => l
+                .checked_add(*r)
+                .map(Value::Integer)
+                .ok_or_else(integer_arithmetic_overflow),
+            BinaryOperator::Minus => l
+                .checked_sub(*r)
+                .map(Value::Integer)
+                .ok_or_else(integer_arithmetic_overflow),
+            BinaryOperator::Multiply => l
+                .checked_mul(*r)
+                .map(Value::Integer)
+                .ok_or_else(integer_arithmetic_overflow),
             BinaryOperator::Divide => {
                 if *r == 0 {
                     Err(RustqlError::DivisionByZero)
-                } else if l % r == 0 {
-                    Ok(Value::Integer(l / r))
                 } else {
-                    Ok(Value::Float(*l as f64 / *r as f64))
+                    let quotient = l.checked_div(*r).ok_or_else(integer_arithmetic_overflow)?;
+                    let remainder = l.checked_rem(*r).ok_or_else(integer_arithmetic_overflow)?;
+                    if remainder == 0 {
+                        Ok(Value::Integer(quotient))
+                    } else {
+                        Ok(Value::Float(*l as f64 / *r as f64))
+                    }
                 }
             }
             _ => Err(RustqlError::Internal(
@@ -161,6 +174,10 @@ pub fn apply_arithmetic(
             }
         }
     }
+}
+
+fn integer_arithmetic_overflow() -> RustqlError {
+    RustqlError::ArithmeticError("Integer arithmetic overflow".to_string())
 }
 
 pub fn compare_values_same_type(left: &Value, right: &Value) -> Ordering {
@@ -207,5 +224,60 @@ fn compare_floats_for_sort(left: f64, right: f64) -> Ordering {
         (false, true) => Ordering::Less,
         _ if left < right => Ordering::Less,
         _ => Ordering::Greater,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assert_integer_overflow(left: i64, op: BinaryOperator, right: i64) {
+        let error = apply_arithmetic(&Value::Integer(left), &Value::Integer(right), &op)
+            .expect_err("overflowing integer arithmetic should fail");
+
+        assert!(matches!(error, RustqlError::ArithmeticError(_)));
+        assert!(error.to_string().contains("Integer arithmetic overflow"));
+    }
+
+    #[test]
+    fn integer_arithmetic_overflow_returns_error() {
+        assert_integer_overflow(i64::MAX, BinaryOperator::Plus, 1);
+        assert_integer_overflow(i64::MIN, BinaryOperator::Minus, 1);
+        assert_integer_overflow(i64::MAX, BinaryOperator::Multiply, 2);
+        assert_integer_overflow(i64::MIN, BinaryOperator::Divide, -1);
+    }
+
+    #[test]
+    fn integer_arithmetic_preserves_existing_results() {
+        assert_eq!(
+            apply_arithmetic(
+                &Value::Integer(7),
+                &Value::Integer(3),
+                &BinaryOperator::Plus
+            )
+            .unwrap(),
+            Value::Integer(10)
+        );
+        assert_eq!(
+            apply_arithmetic(
+                &Value::Integer(7),
+                &Value::Integer(2),
+                &BinaryOperator::Divide
+            )
+            .unwrap(),
+            Value::Float(3.5)
+        );
+    }
+
+    #[test]
+    fn integer_division_by_zero_still_uses_division_error() {
+        let error = apply_arithmetic(
+            &Value::Integer(1),
+            &Value::Integer(0),
+            &BinaryOperator::Divide,
+        )
+        .expect_err("division by zero should fail");
+
+        assert!(matches!(error, RustqlError::DivisionByZero));
     }
 }
