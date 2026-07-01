@@ -973,6 +973,46 @@ fn execute_select_returns_typed_rows() {
 }
 
 #[test]
+fn execute_repeated_named_projection_returns_typed_rows() {
+    let _guard = test_guard();
+    let engine = Engine::open(EngineOptions {
+        storage: StorageMode::Memory,
+    })
+    .unwrap();
+    let mut session = engine.session();
+
+    session
+        .execute_script(
+            "
+            CREATE TABLE users (id INTEGER, name TEXT);
+            INSERT INTO users VALUES (1, 'Alice');
+            ",
+        )
+        .unwrap();
+
+    let result = session
+        .execute_one("SELECT id AS first_id, name, id AS second_id FROM users")
+        .unwrap();
+
+    match result {
+        QueryResult::Rows(rows) => {
+            assert_eq!(rows.columns[0].name, "first_id");
+            assert_eq!(rows.columns[1].name, "name");
+            assert_eq!(rows.columns[2].name, "second_id");
+            assert_eq!(
+                rows.rows,
+                vec![vec![
+                    ast::Value::Integer(1),
+                    ast::Value::Text("Alice".to_string()),
+                    ast::Value::Integer(1),
+                ]]
+            );
+        }
+        other => panic!("expected rows result, got: {other:?}"),
+    }
+}
+
+#[test]
 fn explain_constant_select_returns_one_row_plan() {
     let _guard = test_guard();
     let engine = Engine::open(EngineOptions {
