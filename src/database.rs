@@ -144,13 +144,14 @@ impl Table {
         next_row_id: u64,
         constraints: Vec<TableConstraint>,
     ) -> Self {
+        let row_count = rows.len();
         let mut table = Self {
             columns,
             rows,
             row_ids,
             next_row_id,
             constraints,
-            row_id_positions: HashMap::new(),
+            row_id_positions: HashMap::with_capacity(row_count),
         };
         table.ensure_row_ids();
         table
@@ -172,6 +173,7 @@ impl Table {
 
     fn rebuild_row_id_positions(&mut self) {
         self.row_id_positions.clear();
+        self.row_id_positions.reserve(self.row_ids.len());
         for (position, row_id) in self.row_ids.iter().copied().enumerate() {
             self.row_id_positions.insert(row_id, position);
         }
@@ -499,5 +501,36 @@ impl DatabaseCatalog for ScopedDatabase<'_> {
 
     fn composite_indexes_iter(&self) -> Box<dyn Iterator<Item = &CompositeIndex> + '_> {
         self.base.composite_indexes_iter()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn table_row_id_positions_remain_reserved_after_rebuilds() {
+        let mut table = Table::with_rows_and_ids(
+            Vec::new(),
+            vec![vec![Value::Integer(10)], vec![Value::Integer(30)]],
+            vec![RowId(10), RowId(30)],
+            31,
+            Vec::new(),
+        );
+
+        table.insert_row_at(1, RowId(20), vec![Value::Integer(20)]);
+
+        assert_eq!(table.position_of_row_id(RowId(10)), Some(0));
+        assert_eq!(table.position_of_row_id(RowId(20)), Some(1));
+        assert_eq!(table.position_of_row_id(RowId(30)), Some(2));
+        assert!(table.row_id_positions.capacity() >= table.row_ids.len());
+
+        let (position, row) = table.remove_row_by_id(RowId(20)).unwrap();
+
+        assert_eq!(position, 1);
+        assert_eq!(row, vec![Value::Integer(20)]);
+        assert_eq!(table.position_of_row_id(RowId(10)), Some(0));
+        assert_eq!(table.position_of_row_id(RowId(30)), Some(1));
+        assert!(table.row_id_positions.capacity() >= table.row_ids.len());
     }
 }
