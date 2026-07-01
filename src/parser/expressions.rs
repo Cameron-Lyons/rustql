@@ -555,7 +555,7 @@ impl Parser {
             return Ok(Column::Expression {
                 expr: Expression::WindowFunction {
                     function: WindowFunctionType::Aggregate(agg_type),
-                    args: Vec::new(),
+                    args: vec![(*expr).clone()],
                     partition_by,
                     order_by,
                     frame,

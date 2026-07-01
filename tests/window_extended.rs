@@ -1,5 +1,6 @@
 mod common;
 use common::*;
+use rustql::Value;
 use std::sync::Mutex;
 
 static GLOBAL_TEST_LOCK: Mutex<()> = Mutex::new(());
@@ -152,4 +153,68 @@ fn test_percent_rank_single_row() {
     let result =
         execute_sql("SELECT val, PERCENT_RANK() OVER (ORDER BY val) AS pr FROM solo").unwrap();
     assert!(result.contains("0"));
+}
+
+#[test]
+fn test_window_sum_and_avg() {
+    let _lock = GLOBAL_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    setup_sales();
+
+    assert_rows(
+        "SELECT rep, SUM(amount) OVER (PARTITION BY region ORDER BY id) AS running_total, \
+         AVG(amount) OVER (PARTITION BY region ORDER BY id) AS running_avg \
+         FROM sales ORDER BY id",
+        &["rep", "running_total", "running_avg"],
+        vec![
+            vec![
+                Value::Text("Alice".to_string()),
+                Value::Float(100.0),
+                Value::Float(100.0),
+            ],
+            vec![
+                Value::Text("Bob".to_string()),
+                Value::Float(300.0),
+                Value::Float(150.0),
+            ],
+            vec![
+                Value::Text("Charlie".to_string()),
+                Value::Float(150.0),
+                Value::Float(150.0),
+            ],
+            vec![
+                Value::Text("Diana".to_string()),
+                Value::Float(400.0),
+                Value::Float(200.0),
+            ],
+            vec![
+                Value::Text("Eve".to_string()),
+                Value::Float(500.0),
+                Value::Float(500.0 / 3.0),
+            ],
+            vec![
+                Value::Text("Frank".to_string()),
+                Value::Float(700.0),
+                Value::Float(700.0 / 3.0),
+            ],
+        ],
+    );
+}
+
+#[test]
+fn test_window_variance_and_stddev() {
+    let _lock = GLOBAL_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    reset_database();
+    execute_sql("CREATE TABLE win_nums (id INTEGER, val INTEGER)").unwrap();
+    execute_sql("INSERT INTO win_nums VALUES (1, 2)").unwrap();
+    execute_sql("INSERT INTO win_nums VALUES (2, 4)").unwrap();
+
+    assert_rows(
+        "SELECT id, VARIANCE(val) OVER () AS variance_value, STDDEV(val) OVER () AS std_value \
+         FROM win_nums ORDER BY id",
+        &["id", "variance_value", "std_value"],
+        vec![
+            vec![Value::Integer(1), Value::Float(1.0), Value::Float(1.0)],
+            vec![Value::Integer(2), Value::Float(1.0), Value::Float(1.0)],
+        ],
+    );
 }

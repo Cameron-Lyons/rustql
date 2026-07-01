@@ -95,38 +95,44 @@ fn compute_windowed_aggregate(
     let default_expr = Expression::Column("*".to_string());
     let expr = args.first().unwrap_or(&default_expr);
 
-    let mut values: Vec<Value> = Vec::new();
-    for &row_idx in &sorted_indices[frame_start..=frame_end] {
-        let val = evaluate_value_expression(expr, columns, rows[row_idx]).unwrap_or(Value::Null);
-        values.push(val);
-    }
+    let frame_indices = &sorted_indices[frame_start..=frame_end];
 
     match agg_type {
         AggregateFunctionType::Count => {
             if matches!(expr, Expression::Column(name) if name == "*") {
-                Value::Integer(values.len() as i64)
+                Value::Integer(frame_indices.len() as i64)
             } else {
-                let count = values.iter().filter(|v| !matches!(v, Value::Null)).count();
+                let count = frame_indices
+                    .iter()
+                    .filter(|&&row_idx| {
+                        !matches!(
+                            evaluate_value_expression(expr, columns, rows[row_idx])
+                                .unwrap_or(Value::Null),
+                            Value::Null
+                        )
+                    })
+                    .count();
                 Value::Integer(count as i64)
             }
         }
         AggregateFunctionType::Sum => {
-            let nums = numeric_values(&values);
-            if nums.is_empty() {
+            let summary = numeric_summary_for_frame(expr, rows, frame_indices, columns);
+            if summary.is_empty() {
                 Value::Null
             } else {
-                Value::Float(nums.iter().sum())
+                Value::Float(summary.sum)
             }
         }
         AggregateFunctionType::Avg => {
-            let nums = numeric_values(&values);
-            if nums.is_empty() {
+            let summary = numeric_summary_for_frame(expr, rows, frame_indices, columns);
+            if summary.is_empty() {
                 Value::Null
             } else {
-                Value::Float(nums.iter().sum::<f64>() / nums.len() as f64)
+                Value::Float(summary.average())
             }
         }
         AggregateFunctionType::Min => {
+            let values = frame_values(expr, rows, frame_indices, columns);
             let mut min_val: Option<Value> = None;
             for val in values {
                 if matches!(&val, Value::Null) {
@@ -146,6 +152,7 @@ fn compute_windowed_aggregate(
             min_val.unwrap_or(Value::Null)
         }
         AggregateFunctionType::Max => {
+            let values = frame_values(expr, rows, frame_indices, columns);
             let mut max_val: Option<Value> = None;
             for val in values {
                 if matches!(&val, Value::Null) {
@@ -165,22 +172,23 @@ fn compute_windowed_aggregate(
             max_val.unwrap_or(Value::Null)
         }
         AggregateFunctionType::Variance => {
-            let nums = numeric_values(&values);
-            if nums.is_empty() {
+            let summary = numeric_summary_for_frame(expr, rows, frame_indices, columns);
+            if summary.is_empty() {
                 Value::Null
             } else {
-                Value::Float(variance(&nums))
+                Value::Float(summary.variance())
             }
         }
         AggregateFunctionType::Stddev => {
-            let nums = numeric_values(&values);
-            if nums.is_empty() {
+            let summary = numeric_summary_for_frame(expr, rows, frame_indices, columns);
+            if summary.is_empty() {
                 Value::Null
             } else {
-                Value::Float(variance(&nums).sqrt())
+                Value::Float(summary.variance().sqrt())
             }
         }
         AggregateFunctionType::GroupConcat => {
+            let values = frame_values(expr, rows, frame_indices, columns);
             let parts: Vec<String> = values
                 .iter()
                 .filter(|v| !matches!(v, Value::Null))
@@ -193,6 +201,7 @@ fn compute_windowed_aggregate(
             }
         }
         AggregateFunctionType::BoolAnd => {
+            let values = frame_values(expr, rows, frame_indices, columns);
             let mut result = true;
             let mut has_value = false;
             for val in &values {
@@ -220,6 +229,7 @@ fn compute_windowed_aggregate(
             }
         }
         AggregateFunctionType::BoolOr => {
+            let values = frame_values(expr, rows, frame_indices, columns);
             let mut result = false;
             let mut has_value = false;
             for val in &values {
@@ -247,6 +257,7 @@ fn compute_windowed_aggregate(
             }
         }
         AggregateFunctionType::Median => {
+            let values = frame_values(expr, rows, frame_indices, columns);
             let mut nums = numeric_values(&values);
             if nums.is_empty() {
                 return Value::Null;
@@ -260,6 +271,7 @@ fn compute_windowed_aggregate(
             }
         }
         AggregateFunctionType::Mode => {
+            let values = frame_values(expr, rows, frame_indices, columns);
             let mut counts: BTreeMap<Value, (usize, usize)> = BTreeMap::new();
             let mut seen_order = 0usize;
             for val in values {
@@ -287,6 +299,7 @@ fn compute_windowed_aggregate(
             best.map(|(val, _, _)| val).unwrap_or(Value::Null)
         }
         AggregateFunctionType::PercentileCont => {
+            let values = frame_values(expr, rows, frame_indices, columns);
             let mut nums = numeric_values(&values);
             if nums.is_empty() {
                 return Value::Null;
@@ -308,6 +321,7 @@ fn compute_windowed_aggregate(
             }
         }
         AggregateFunctionType::PercentileDisc => {
+            let values = frame_values(expr, rows, frame_indices, columns);
             let mut sorted_vals: Vec<Value> = values
                 .into_iter()
                 .filter(|v| !matches!(v, Value::Null))
@@ -324,6 +338,68 @@ fn compute_windowed_aggregate(
     }
 }
 
+fn frame_values(
+    expr: &Expression,
+    rows: &[&Vec<Value>],
+    frame_indices: &[usize],
+    columns: &[ColumnDefinition],
+) -> Vec<Value> {
+    frame_indices
+        .iter()
+        .map(|&row_idx| {
+            evaluate_value_expression(expr, columns, rows[row_idx]).unwrap_or(Value::Null)
+        })
+        .collect()
+}
+
+#[derive(Default)]
+struct NumericSummary {
+    count: usize,
+    sum: f64,
+    mean: f64,
+    m2: f64,
+}
+
+impl NumericSummary {
+    fn push(&mut self, value: f64) {
+        self.count += 1;
+        self.sum += value;
+        let delta = value - self.mean;
+        self.mean += delta / self.count as f64;
+        let delta2 = value - self.mean;
+        self.m2 += delta * delta2;
+    }
+
+    fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    fn average(&self) -> f64 {
+        self.sum / self.count as f64
+    }
+
+    fn variance(&self) -> f64 {
+        self.m2 / self.count as f64
+    }
+}
+
+fn numeric_summary_for_frame(
+    expr: &Expression,
+    rows: &[&Vec<Value>],
+    frame_indices: &[usize],
+    columns: &[ColumnDefinition],
+) -> NumericSummary {
+    let mut summary = NumericSummary::default();
+    for &row_idx in frame_indices {
+        match evaluate_value_expression(expr, columns, rows[row_idx]).unwrap_or(Value::Null) {
+            Value::Integer(n) => summary.push(n as f64),
+            Value::Float(f) => summary.push(f),
+            _ => {}
+        }
+    }
+    summary
+}
+
 fn numeric_values(values: &[Value]) -> Vec<f64> {
     values
         .iter()
@@ -333,11 +409,6 @@ fn numeric_values(values: &[Value]) -> Vec<f64> {
             _ => None,
         })
         .collect()
-}
-
-fn variance(nums: &[f64]) -> f64 {
-    let mean = nums.iter().sum::<f64>() / nums.len() as f64;
-    nums.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / nums.len() as f64
 }
 
 fn evaluate_window_function_outputs(
