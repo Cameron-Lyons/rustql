@@ -379,6 +379,52 @@ fn variance(nums: &[f64]) -> f64 {
     nums.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / nums.len() as f64
 }
 
+fn evaluate_non_negative_window_arg(
+    name: &str,
+    args: &[Expression],
+    arg_idx: usize,
+    default: usize,
+    columns: &[ColumnDefinition],
+    row: &[Value],
+) -> Result<usize, RustqlError> {
+    let Some(expr) = args.get(arg_idx) else {
+        return Ok(default);
+    };
+
+    match evaluate_value_expression(expr, columns, row)? {
+        Value::Integer(value) if value >= 0 => Ok(value as usize),
+        Value::Integer(_) => Err(RustqlError::TypeMismatch(format!(
+            "{name} offset cannot be negative"
+        ))),
+        _ => Err(RustqlError::TypeMismatch(format!(
+            "{name} offset must be an integer"
+        ))),
+    }
+}
+
+fn evaluate_positive_window_arg(
+    name: &str,
+    args: &[Expression],
+    arg_idx: usize,
+    default: usize,
+    columns: &[ColumnDefinition],
+    row: &[Value],
+) -> Result<usize, RustqlError> {
+    let Some(expr) = args.get(arg_idx) else {
+        return Ok(default);
+    };
+
+    match evaluate_value_expression(expr, columns, row)? {
+        Value::Integer(value) if value > 0 => Ok(value as usize),
+        Value::Integer(_) => Err(RustqlError::TypeMismatch(format!(
+            "{name} argument must be positive"
+        ))),
+        _ => Err(RustqlError::TypeMismatch(format!(
+            "{name} argument must be an integer"
+        ))),
+    }
+}
+
 fn evaluate_window_function_outputs(
     rows: &[&Vec<Value>],
     columns: &[ColumnDefinition],
@@ -473,21 +519,12 @@ fn evaluate_window_function_outputs(
                         }
                     }
                     WindowFunctionType::Lag => {
-                        let offset = if args.len() > 1 {
-                            match evaluate_value_expression(
-                                &args[1],
-                                columns,
-                                rows[sorted_indices[0]],
-                            ) {
-                                Ok(Value::Integer(n)) => n as usize,
-                                _ => 1,
-                            }
-                        } else {
-                            1
-                        };
+                        let first_row = rows[sorted_indices[0]];
+                        let offset = evaluate_non_negative_window_arg(
+                            "LAG", args, 1, 1, columns, first_row,
+                        )?;
                         let default_val = if args.len() > 2 {
-                            evaluate_value_expression(&args[2], columns, rows[sorted_indices[0]])
-                                .unwrap_or(Value::Null)
+                            evaluate_value_expression(&args[2], columns, first_row)?
                         } else {
                             Value::Null
                         };
@@ -507,21 +544,12 @@ fn evaluate_window_function_outputs(
                         }
                     }
                     WindowFunctionType::Lead => {
-                        let offset = if args.len() > 1 {
-                            match evaluate_value_expression(
-                                &args[1],
-                                columns,
-                                rows[sorted_indices[0]],
-                            ) {
-                                Ok(Value::Integer(n)) => n as usize,
-                                _ => 1,
-                            }
-                        } else {
-                            1
-                        };
+                        let first_row = rows[sorted_indices[0]];
+                        let offset = evaluate_non_negative_window_arg(
+                            "LEAD", args, 1, 1, columns, first_row,
+                        )?;
                         let default_val = if args.len() > 2 {
-                            evaluate_value_expression(&args[2], columns, rows[sorted_indices[0]])
-                                .unwrap_or(Value::Null)
+                            evaluate_value_expression(&args[2], columns, first_row)?
                         } else {
                             Value::Null
                         };
@@ -542,18 +570,14 @@ fn evaluate_window_function_outputs(
                         }
                     }
                     WindowFunctionType::Ntile => {
-                        let n = if !args.is_empty() {
-                            match evaluate_value_expression(
-                                &args[0],
-                                columns,
-                                rows[sorted_indices[0]],
-                            ) {
-                                Ok(Value::Integer(v)) => v.max(1) as usize,
-                                _ => 1,
-                            }
-                        } else {
-                            1
-                        };
+                        let n = evaluate_positive_window_arg(
+                            "NTILE",
+                            args,
+                            0,
+                            1,
+                            columns,
+                            rows[sorted_indices[0]],
+                        )?;
                         let total = sorted_indices.len();
                         for (i, &idx) in sorted_indices.iter().enumerate() {
                             let bucket = (i * n / total) + 1;
@@ -599,18 +623,14 @@ fn evaluate_window_function_outputs(
                         }
                     }
                     WindowFunctionType::NthValue => {
-                        let n = if args.len() > 1 {
-                            match evaluate_value_expression(
-                                &args[1],
-                                columns,
-                                rows[sorted_indices[0]],
-                            ) {
-                                Ok(Value::Integer(v)) => v.max(1) as usize,
-                                _ => 1,
-                            }
-                        } else {
-                            1
-                        };
+                        let n = evaluate_positive_window_arg(
+                            "NTH_VALUE",
+                            args,
+                            1,
+                            1,
+                            columns,
+                            rows[sorted_indices[0]],
+                        )?;
                         let has_order_by = !order_by.is_empty();
                         for (pos, &idx) in sorted_indices.iter().enumerate() {
                             let (frame_start, frame_end) = resolve_frame_bounds(
