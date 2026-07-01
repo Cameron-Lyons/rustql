@@ -90,27 +90,43 @@ pub(super) fn column_definitions_from_result(result: &ExecutionResult) -> Vec<Co
         .columns
         .iter()
         .enumerate()
-        .map(|(idx, name)| ColumnDefinition {
-            name: name.clone(),
-            data_type: result
-                .rows
-                .iter()
-                .filter_map(|row| row.get(idx))
-                .find_map(value_data_type)
-                .unwrap_or(DataType::Text),
-            nullable: result
-                .rows
-                .iter()
-                .any(|row| matches!(row.get(idx), None | Some(Value::Null))),
-            primary_key: false,
-            unique: false,
-            default_value: None,
-            foreign_key: None,
-            check: None,
-            auto_increment: false,
-            generated: None,
+        .map(|(idx, name)| {
+            let (data_type, nullable) = infer_result_column(&result.rows, idx);
+            ColumnDefinition {
+                name: name.clone(),
+                data_type,
+                nullable,
+                primary_key: false,
+                unique: false,
+                default_value: None,
+                foreign_key: None,
+                check: None,
+                auto_increment: false,
+                generated: None,
+            }
         })
         .collect()
+}
+
+fn infer_result_column(rows: &[Vec<Value>], idx: usize) -> (DataType, bool) {
+    let mut data_type = None;
+    let mut nullable = false;
+
+    for row in rows {
+        match row.get(idx) {
+            Some(Value::Null) | None => nullable = true,
+            Some(value) if data_type.is_none() => {
+                data_type = value_data_type(value);
+            }
+            Some(_) => {}
+        }
+
+        if nullable && data_type.is_some() {
+            break;
+        }
+    }
+
+    (data_type.unwrap_or(DataType::Text), nullable)
 }
 
 fn value_data_type(value: &Value) -> Option<DataType> {
@@ -188,4 +204,36 @@ pub(super) fn combine_row_with_left_nulls(left_len: usize, right: &[Value]) -> V
     combined.resize(left_len, Value::Null);
     combined.extend_from_slice(right);
     combined
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn result_column_inference_uses_first_non_null_type() {
+        let result = ExecutionResult {
+            columns: vec!["price".to_string()],
+            rows: vec![vec![Value::Null], vec![Value::Float(9.99)]],
+        };
+
+        let columns = column_definitions_from_result(&result);
+
+        assert_eq!(columns[0].name, "price");
+        assert_eq!(columns[0].data_type, DataType::Float);
+        assert!(columns[0].nullable);
+    }
+
+    #[test]
+    fn result_column_inference_marks_missing_cells_nullable() {
+        let result = ExecutionResult {
+            columns: vec!["id".to_string()],
+            rows: vec![Vec::new(), vec![Value::Integer(1)]],
+        };
+
+        let columns = column_definitions_from_result(&result);
+
+        assert_eq!(columns[0].data_type, DataType::Integer);
+        assert!(columns[0].nullable);
+    }
 }
