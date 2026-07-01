@@ -228,6 +228,45 @@ proptest! {
     }
 }
 
+#[test]
+fn btree_journal_recovery_preserves_float_precision() {
+    let target = build_database(vec![TableSpec {
+        column_types: vec![DataType::Integer, DataType::Integer],
+        rows: vec![vec![Value::Float(2.4699999999999998), Value::Integer(78)]],
+        next_row_padding: 0,
+    }]);
+    let temp = TempStoragePath::new("float-recovery");
+    let engine = BTreeStorageEngine::new(temp.path());
+
+    engine
+        .save(&Database::default())
+        .expect("base save should succeed");
+    engine
+        .begin_transaction()
+        .expect("begin transaction should succeed");
+    engine
+        .prepare_commit(&target)
+        .expect("prepare_commit should succeed");
+
+    let reloaded = BTreeStorageEngine::new(temp.path());
+    let recovered = reloaded.load().expect("load should replay the journal");
+
+    assert_eq!(canonical_database(&target), canonical_database(&recovered));
+}
+
+#[test]
+fn value_json_preserves_float_precision() {
+    let value = Value::Float(2.4699999999999998);
+    let json = serde_json::to_string(&value).expect("value should serialize");
+    let recovered: Value = serde_json::from_str(&json).expect("value should deserialize");
+    let legacy_numeric: Value =
+        serde_json::from_str(r#"{"Float":2.47}"#).expect("legacy float should deserialize");
+
+    assert_eq!(json, r#"{"Float":"2.4699999999999998"}"#);
+    assert_eq!(recovered, value);
+    assert_eq!(legacy_numeric, Value::Float(2.47));
+}
+
 fn arb_lexer_input() -> impl Strategy<Value = String> {
     ascii_string(LEXER_ALPHABET, 80)
 }
