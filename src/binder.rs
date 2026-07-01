@@ -14,8 +14,8 @@ use aggregates::{aggregate_from_bound, group_by_from_bound};
 use scope::{bound_column, ensure_single_column_subquery};
 use types::{
     bound_type_or_text, column_definition, column_ref_type, common_numeric_type, common_type,
-    ensure_boolean, ensure_comparable, ensure_numeric, ensure_text, scalar_function_type,
-    value_type, window_function_type,
+    ensure_boolean, ensure_comparable, ensure_integer, ensure_numeric, ensure_text,
+    scalar_function_type, value_type, window_function_type,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,7 +60,7 @@ pub enum BoundExprKind {
     },
     InList {
         left: Box<BoundExpr>,
-        values: Vec<Value>,
+        values: Vec<BoundExpr>,
     },
     IsNull {
         expr: Box<BoundExpr>,
@@ -122,6 +122,7 @@ pub struct BoundAggregateFunction {
 pub struct BoundOrderByExpr {
     pub expr: BoundExpr,
     pub asc: bool,
+    pub nulls_first: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -235,6 +236,84 @@ struct BoundSelectItems {
     output_columns: Vec<ColumnDefinition>,
     aliases: Vec<(String, BoundExpr)>,
     normalized_columns: Vec<Column>,
+}
+
+fn rewrite_order_by_aliases(expr: &Expression, aliases: &[(String, BoundExpr)]) -> Expression {
+    match expr {
+        Expression::Column(name) => aliases
+            .iter()
+            .find(|(alias, _)| alias == name)
+            .map(|(_, target)| target.expr.clone())
+            .unwrap_or_else(|| expr.clone()),
+        Expression::BinaryOp { left, op, right } => Expression::BinaryOp {
+            left: Box::new(rewrite_order_by_aliases(left, aliases)),
+            op: op.clone(),
+            right: Box::new(rewrite_order_by_aliases(right, aliases)),
+        },
+        Expression::UnaryOp { op, expr } => Expression::UnaryOp {
+            op: op.clone(),
+            expr: Box::new(rewrite_order_by_aliases(expr, aliases)),
+        },
+        Expression::In { left, values } => Expression::In {
+            left: Box::new(rewrite_order_by_aliases(left, aliases)),
+            values: values
+                .iter()
+                .map(|value| rewrite_order_by_aliases(value, aliases))
+                .collect(),
+        },
+        Expression::IsNull { expr, not } => Expression::IsNull {
+            expr: Box::new(rewrite_order_by_aliases(expr, aliases)),
+            not: *not,
+        },
+        Expression::Any { left, op, subquery } => Expression::Any {
+            left: Box::new(rewrite_order_by_aliases(left, aliases)),
+            op: op.clone(),
+            subquery: subquery.clone(),
+        },
+        Expression::All { left, op, subquery } => Expression::All {
+            left: Box::new(rewrite_order_by_aliases(left, aliases)),
+            op: op.clone(),
+            subquery: subquery.clone(),
+        },
+        Expression::Case {
+            operand,
+            when_clauses,
+            else_clause,
+        } => Expression::Case {
+            operand: operand
+                .as_ref()
+                .map(|expr| Box::new(rewrite_order_by_aliases(expr, aliases))),
+            when_clauses: when_clauses
+                .iter()
+                .map(|(condition, result)| {
+                    (
+                        rewrite_order_by_aliases(condition, aliases),
+                        rewrite_order_by_aliases(result, aliases),
+                    )
+                })
+                .collect(),
+            else_clause: else_clause
+                .as_ref()
+                .map(|expr| Box::new(rewrite_order_by_aliases(expr, aliases))),
+        },
+        Expression::ScalarFunction { name, args } => Expression::ScalarFunction {
+            name: name.clone(),
+            args: args
+                .iter()
+                .map(|arg| rewrite_order_by_aliases(arg, aliases))
+                .collect(),
+        },
+        Expression::Cast { expr, data_type } => Expression::Cast {
+            expr: Box::new(rewrite_order_by_aliases(expr, aliases)),
+            data_type: data_type.clone(),
+        },
+        Expression::IsDistinctFrom { left, right, not } => Expression::IsDistinctFrom {
+            left: Box::new(rewrite_order_by_aliases(left, aliases)),
+            right: Box::new(rewrite_order_by_aliases(right, aliases)),
+            not: *not,
+        },
+        _ => expr.clone(),
+    }
 }
 
 pub struct Binder<'a> {
@@ -432,6 +511,7 @@ impl<'a> Binder<'a> {
                     Ok(BoundOrderByExpr {
                         expr,
                         asc: item.asc,
+                        nulls_first: item.nulls_first,
                     })
                 })
                 .collect::<Result<Vec<_>, RustqlError>>()?;
@@ -441,6 +521,7 @@ impl<'a> Binder<'a> {
                     .map(|item| OrderByExpr {
                         expr: item.expr.expr.clone(),
                         asc: item.asc,
+                        nulls_first: item.nulls_first,
                     })
                     .collect(),
             );
@@ -587,6 +668,9 @@ impl<'a> Binder<'a> {
         scope: &NameScope,
     ) -> Result<BoundExpr, RustqlError> {
         match expr {
+            Expression::Default => Err(RustqlError::TypeMismatch(
+                "DEFAULT can only be used in INSERT values".to_string(),
+            )),
             Expression::Column(name) => {
                 if name == "*" {
                     return Ok(BoundExpr {
@@ -708,8 +792,12 @@ impl<'a> Binder<'a> {
             }
             Expression::In { left, values } => {
                 let left = self.bind_expr(left, scope)?;
-                for value in values {
-                    ensure_comparable(&left.data_type, &value_type(value), "IN")?;
+                let values = values
+                    .iter()
+                    .map(|value| self.bind_expr(value, scope))
+                    .collect::<Result<Vec<_>, _>>()?;
+                for value in &values {
+                    ensure_comparable(&left.data_type, &value.data_type, "IN")?;
                 }
                 Ok(BoundExpr {
                     kind: BoundExprKind::InList {
@@ -720,7 +808,7 @@ impl<'a> Binder<'a> {
                     nullable: false,
                     expr: Expression::In {
                         left: Box::new(left.expr),
-                        values: values.clone(),
+                        values: values.into_iter().map(|value| value.expr).collect(),
                     },
                 })
             }
@@ -909,6 +997,7 @@ impl<'a> Binder<'a> {
                         Ok(BoundOrderByExpr {
                             expr,
                             asc: item.asc,
+                            nulls_first: item.nulls_first,
                         })
                     })
                     .collect::<Result<Vec<_>, RustqlError>>()?;
@@ -932,6 +1021,7 @@ impl<'a> Binder<'a> {
                             .map(|item| OrderByExpr {
                                 expr: item.expr.expr,
                                 asc: item.asc,
+                                nulls_first: item.nulls_first,
                             })
                             .collect(),
                         frame: frame.clone(),
@@ -1085,7 +1175,10 @@ impl<'a> Binder<'a> {
                     },
                 })
             }
-            _ => self.bind_expr(expr, scope),
+            _ => {
+                let expr = rewrite_order_by_aliases(expr, aliases);
+                self.bind_expr(&expr, scope)
+            }
         }
     }
 
@@ -1114,6 +1207,11 @@ impl<'a> Binder<'a> {
                 ensure_text(left, "LIKE operator")?;
                 ensure_text(right, "LIKE operator")?;
                 Ok(BoundType::Known(DataType::Boolean))
+            }
+            BinaryOperator::Escape => {
+                ensure_text(left, "LIKE ESCAPE pattern")?;
+                ensure_text(right, "LIKE ESCAPE value")?;
+                Ok(BoundType::Known(DataType::Text))
             }
             BinaryOperator::Between => {
                 ensure_comparable(&left.data_type, &right.data_type, "BETWEEN")?;
@@ -1170,7 +1268,17 @@ impl<'a> Binder<'a> {
             table_columns.len()
         };
 
-        for values in &stmt.values {
+        let value_scope = NameScope {
+            columns: Vec::new(),
+        };
+        let default_values =
+            stmt.columns.is_none() && stmt.values.len() == 1 && stmt.values[0].is_empty();
+        let mut bound_values = Vec::with_capacity(stmt.values.len());
+        for values in std::mem::take(&mut stmt.values) {
+            if default_values {
+                bound_values.push(values);
+                continue;
+            }
             if values.len() != target_width {
                 return Err(RustqlError::TypeMismatch(format!(
                     "Column count mismatch: expected {}, got {}",
@@ -1178,7 +1286,16 @@ impl<'a> Binder<'a> {
                     values.len()
                 )));
             }
+            let values = values
+                .iter()
+                .map(|expr| match expr {
+                    Expression::Default => Ok(Expression::Default),
+                    _ => self.bind_expr(expr, &value_scope).map(|bound| bound.expr),
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            bound_values.push(values);
         }
+        stmt.values = bound_values;
 
         if let Some(query) = stmt.source_query.as_ref() {
             let bound = self.bind_select(query)?;
@@ -1228,17 +1345,22 @@ impl<'a> Binder<'a> {
             .get_table(&stmt.table)
             .ok_or_else(|| RustqlError::TableNotFound(stmt.table.clone()))?;
         let table_columns = table.columns.clone();
-        let mut scope = NameScope {
+        let target_scope = NameScope {
             columns: table_columns
                 .iter()
                 .map(|column| bound_column(&stmt.table, column, false))
                 .collect(),
         };
+        let mut scope = target_scope.clone();
 
-        if let Some(update_from) = stmt.from.as_ref() {
-            scope
-                .columns
-                .extend(self.source_columns_for_name(&update_from.table, &update_from.table)?);
+        if let Some(update_from) = stmt.from.as_mut() {
+            let source_columns = self.bind_joined_dml_source(
+                &update_from.table,
+                update_from.alias.as_deref(),
+                &mut update_from.joins,
+                "UPDATE FROM",
+            )?;
+            scope.columns.extend(source_columns);
         }
 
         self.bind_assignments(&mut stmt.assignments, &table_columns, &scope)?;
@@ -1247,7 +1369,7 @@ impl<'a> Binder<'a> {
             stmt.where_clause = Some(bound.expr);
         }
         if let Some(returning) = stmt.returning.as_mut() {
-            self.bind_returning(returning, &scope)?;
+            self.bind_returning(returning, &target_scope)?;
         }
         Ok(stmt)
     }
@@ -1257,19 +1379,23 @@ impl<'a> Binder<'a> {
             .db
             .get_table(&stmt.table)
             .ok_or_else(|| RustqlError::TableNotFound(stmt.table.clone()))?;
-        let mut scope = NameScope {
+        let target_scope = NameScope {
             columns: table
                 .columns
                 .iter()
                 .map(|column| bound_column(&stmt.table, column, false))
                 .collect(),
         };
+        let mut scope = target_scope.clone();
 
-        if let Some(using) = stmt.using.as_ref() {
-            let relation = using.alias.as_deref().unwrap_or(&using.table);
-            scope
-                .columns
-                .extend(self.source_columns_for_name(&using.table, relation)?);
+        if let Some(using) = stmt.using.as_mut() {
+            let source_columns = self.bind_joined_dml_source(
+                &using.table,
+                using.alias.as_deref(),
+                &mut using.joins,
+                "DELETE USING",
+            )?;
+            scope.columns.extend(source_columns);
         }
 
         if let Some(where_clause) = stmt.where_clause.as_ref() {
@@ -1277,9 +1403,52 @@ impl<'a> Binder<'a> {
             stmt.where_clause = Some(bound.expr);
         }
         if let Some(returning) = stmt.returning.as_mut() {
-            self.bind_returning(returning, &scope)?;
+            self.bind_returning(returning, &target_scope)?;
         }
         Ok(stmt)
+    }
+
+    fn bind_joined_dml_source(
+        &mut self,
+        table: &str,
+        alias: Option<&str>,
+        joins: &mut [Join],
+        context: &str,
+    ) -> Result<Vec<BoundColumnRef>, RustqlError> {
+        let relation = alias.unwrap_or(table);
+        let mut source_columns = self.source_columns_for_name(table, relation)?;
+
+        for join in joins {
+            if join.subquery.is_some() || join.using_columns.is_some() || join.lateral {
+                return Err(RustqlError::TypeMismatch(format!(
+                    "{} joins only support table sources with ON conditions",
+                    context
+                )));
+            }
+            let relation = join.table_alias.as_deref().unwrap_or(&join.table);
+            let right_columns = self.source_columns_for_name(&join.table, relation)?;
+            let mut join_columns = source_columns.clone();
+            join_columns.extend(right_columns.clone());
+            let join_scope = NameScope {
+                columns: join_columns,
+            };
+            if let Some(on_expr) = join.on.as_ref() {
+                let bound = self.bind_predicate_expr(
+                    on_expr,
+                    &join_scope,
+                    &format!("{} JOIN ON clause", context),
+                )?;
+                join.on = Some(bound.expr);
+            } else {
+                return Err(RustqlError::TypeMismatch(format!(
+                    "{} JOIN requires an ON condition",
+                    context
+                )));
+            }
+            source_columns.extend(right_columns);
+        }
+
+        Ok(source_columns)
     }
 
     fn bind_create_index(
@@ -1404,8 +1573,10 @@ impl<'a> Binder<'a> {
                             }
 
                             for value in values {
-                                let bound = self.bind_expr(value, &scope)?;
-                                *value = bound.expr;
+                                *value = match value {
+                                    Expression::Default => Expression::Default,
+                                    _ => self.bind_expr(value, &scope)?.expr,
+                                };
                             }
                         }
                     }
@@ -1429,8 +1600,10 @@ impl<'a> Binder<'a> {
             {
                 return Err(RustqlError::ColumnNotFound(assignment.column.clone()));
             }
-            let bound = self.bind_expr(&assignment.value, scope)?;
-            assignment.value = bound.expr;
+            assignment.value = match &assignment.value {
+                Expression::Default => Expression::Default,
+                _ => self.bind_expr(&assignment.value, scope)?.expr,
+            };
         }
         Ok(())
     }

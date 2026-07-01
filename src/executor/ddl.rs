@@ -5,6 +5,7 @@ use crate::error::RustqlError;
 use crate::wal::WalEntry;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+use super::expr::SqlRowSet;
 use super::{
     ExecutionContext, SelectResult, command_result, get_database_read, get_database_write,
     rows_result, save_if_not_in_transaction,
@@ -268,17 +269,19 @@ pub fn execute_alter_table(
                         })
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            let mut seen: std::collections::BTreeSet<Vec<Value>> =
-                std::collections::BTreeSet::new();
+            let is_primary_key =
+                matches!(&constraint, crate::ast::TableConstraint::PrimaryKey { .. });
+            let mut seen = SqlRowSet::new();
             for row in &table.rows {
                 let key: Vec<Value> = col_indices.iter().map(|&i| row[i].clone()).collect();
-                if matches!(&constraint, crate::ast::TableConstraint::PrimaryKey { .. })
-                    && key.iter().any(|v| matches!(v, Value::Null))
-                {
-                    return Err(RustqlError::Internal(
-                        "Cannot add PRIMARY KEY constraint: column contains NULL values"
-                            .to_string(),
-                    ));
+                if key.iter().any(|v| matches!(v, Value::Null)) {
+                    if is_primary_key {
+                        return Err(RustqlError::Internal(
+                            "Cannot add PRIMARY KEY constraint: column contains NULL values"
+                                .to_string(),
+                        ));
+                    }
+                    continue;
                 }
                 if !seen.insert(key) {
                     return Err(RustqlError::Internal(
@@ -876,6 +879,15 @@ fn find_single_index_usage(
                         value: val.clone(),
                         inclusive: false,
                     });
+                } else if let (Expression::Value(val), Expression::Column(col_name)) =
+                    (&**left, &**right)
+                    && let Some(index) = find_index_for_column(db, table_name, col_name, query_expr)
+                {
+                    return Some(IndexUsage::RangeLess {
+                        index_name: index.name.clone(),
+                        value: val.clone(),
+                        inclusive: false,
+                    });
                 }
             }
             BinaryOperator::GreaterThanOrEqual => {
@@ -883,6 +895,15 @@ fn find_single_index_usage(
                     && let Some(index) = find_index_for_column(db, table_name, col_name, query_expr)
                 {
                     return Some(IndexUsage::RangeGreater {
+                        index_name: index.name.clone(),
+                        value: val.clone(),
+                        inclusive: true,
+                    });
+                } else if let (Expression::Value(val), Expression::Column(col_name)) =
+                    (&**left, &**right)
+                    && let Some(index) = find_index_for_column(db, table_name, col_name, query_expr)
+                {
+                    return Some(IndexUsage::RangeLess {
                         index_name: index.name.clone(),
                         value: val.clone(),
                         inclusive: true,
@@ -898,6 +919,15 @@ fn find_single_index_usage(
                         value: val.clone(),
                         inclusive: false,
                     });
+                } else if let (Expression::Value(val), Expression::Column(col_name)) =
+                    (&**left, &**right)
+                    && let Some(index) = find_index_for_column(db, table_name, col_name, query_expr)
+                {
+                    return Some(IndexUsage::RangeGreater {
+                        index_name: index.name.clone(),
+                        value: val.clone(),
+                        inclusive: false,
+                    });
                 }
             }
             BinaryOperator::LessThanOrEqual => {
@@ -905,6 +935,15 @@ fn find_single_index_usage(
                     && let Some(index) = find_index_for_column(db, table_name, col_name, query_expr)
                 {
                     return Some(IndexUsage::RangeLess {
+                        index_name: index.name.clone(),
+                        value: val.clone(),
+                        inclusive: true,
+                    });
+                } else if let (Expression::Value(val), Expression::Column(col_name)) =
+                    (&**left, &**right)
+                    && let Some(index) = find_index_for_column(db, table_name, col_name, query_expr)
+                {
+                    return Some(IndexUsage::RangeGreater {
                         index_name: index.name.clone(),
                         value: val.clone(),
                         inclusive: true,
@@ -942,18 +981,13 @@ fn find_single_index_usage(
         Expression::In { left, values } => {
             if let Expression::Column(col_name) = &**left
                 && let Some(index) = find_index_for_column(db, table_name, col_name, query_expr)
+                && let Some(values) = literal_values(values)
             {
                 return Some(IndexUsage::In {
                     index_name: index.name.clone(),
-                    values: values.clone(),
+                    values,
                 });
             }
-        }
-        Expression::UnaryOp {
-            op: UnaryOperator::Not,
-            expr,
-        } => {
-            return find_single_index_usage(db, table_name, expr, query_expr);
         }
         _ => {}
     }
@@ -973,6 +1007,16 @@ fn find_index_for_column<'a>(
             && idx.column == normalized_col
             && query_implies_filter(query_expr, idx.filter_expr.as_ref())
     })
+}
+
+fn literal_values(expressions: &[Expression]) -> Option<Vec<Value>> {
+    expressions
+        .iter()
+        .map(|expr| match expr {
+            Expression::Value(value) => Some(value.clone()),
+            _ => None,
+        })
+        .collect()
 }
 
 fn normalize_column_name(column_name: &str) -> &str {
@@ -1034,7 +1078,11 @@ fn query_implies_filter(query_expr: &Expression, filter_expr: Option<&Expression
 
     filter_conjuncts.into_iter().all(|conjunct| {
         extract_column_equality(conjunct)
-            .and_then(|(column, value)| query_equalities.get(&column).map(|query| query == &value))
+            .and_then(|(column, value)| {
+                query_equalities
+                    .get(&column)
+                    .map(|query| values_equal_for_index_lookup(query, &value))
+            })
             .unwrap_or(false)
     })
 }
@@ -1060,9 +1108,7 @@ pub fn get_indexed_rows(
                     .ok_or_else(|| RustqlError::IndexNotFound {
                         name: usage.index_name().to_string(),
                     })?;
-            if let Some(rows) = index.entries.get(value) {
-                row_ids.extend(rows.iter().copied());
-            }
+            extend_matching_index_entries(index, value, &mut row_ids);
         }
         IndexUsage::In { values, .. } => {
             let index =
@@ -1071,9 +1117,7 @@ pub fn get_indexed_rows(
                         name: usage.index_name().to_string(),
                     })?;
             for value in values {
-                if let Some(rows) = index.entries.get(value) {
-                    row_ids.extend(rows.iter().copied());
-                }
+                extend_matching_index_entries(index, value, &mut row_ids);
             }
         }
         IndexUsage::RangeGreater {
@@ -1084,7 +1128,18 @@ pub fn get_indexed_rows(
                     .ok_or_else(|| RustqlError::IndexNotFound {
                         name: usage.index_name().to_string(),
                     })?;
-            if *inclusive {
+            if is_numeric_value(value) {
+                let op = if *inclusive {
+                    BinaryOperator::GreaterThanOrEqual
+                } else {
+                    BinaryOperator::GreaterThan
+                };
+                for (key, rows) in &index.entries {
+                    if compare_index_values(key, &op, value) {
+                        row_ids.extend(rows.iter().copied());
+                    }
+                }
+            } else if *inclusive {
                 for (_, rows) in index.entries.range(value..) {
                     row_ids.extend(rows.iter().copied());
                 }
@@ -1106,7 +1161,18 @@ pub fn get_indexed_rows(
                     .ok_or_else(|| RustqlError::IndexNotFound {
                         name: usage.index_name().to_string(),
                     })?;
-            if *inclusive {
+            if is_numeric_value(value) {
+                let op = if *inclusive {
+                    BinaryOperator::LessThanOrEqual
+                } else {
+                    BinaryOperator::LessThan
+                };
+                for (key, rows) in &index.entries {
+                    if compare_index_values(key, &op, value) {
+                        row_ids.extend(rows.iter().copied());
+                    }
+                }
+            } else if *inclusive {
                 for (_, rows) in index.entries.range(..=value) {
                     row_ids.extend(rows.iter().copied());
                 }
@@ -1122,8 +1188,18 @@ pub fn get_indexed_rows(
                     .ok_or_else(|| RustqlError::IndexNotFound {
                         name: usage.index_name().to_string(),
                     })?;
-            for (_, rows) in index.entries.range(lower..=upper) {
-                row_ids.extend(rows.iter().copied());
+            if is_numeric_value(lower) || is_numeric_value(upper) {
+                for (key, rows) in &index.entries {
+                    if compare_index_values(key, &BinaryOperator::GreaterThanOrEqual, lower)
+                        && compare_index_values(key, &BinaryOperator::LessThanOrEqual, upper)
+                    {
+                        row_ids.extend(rows.iter().copied());
+                    }
+                }
+            } else {
+                for (_, rows) in index.entries.range(lower..=upper) {
+                    row_ids.extend(rows.iter().copied());
+                }
             }
         }
         IndexUsage::CompositePrefix { values, .. } => {
@@ -1133,7 +1209,13 @@ pub fn get_indexed_rows(
                 }
             })?;
 
-            if values.len() == index.columns.len() {
+            if values.iter().any(is_numeric_value) {
+                for (key, rows) in &index.entries {
+                    if composite_key_matches_prefix(key, values) {
+                        row_ids.extend(rows.iter().copied());
+                    }
+                }
+            } else if values.len() == index.columns.len() {
                 if let Some(rows) = index.entries.get(values) {
                     row_ids.extend(rows.iter().copied());
                 }
@@ -1151,6 +1233,38 @@ pub fn get_indexed_rows(
         .into_iter()
         .filter(|row_id| table.position_of_row_id(*row_id).is_some())
         .collect())
+}
+
+fn extend_matching_index_entries(index: &Index, value: &Value, row_ids: &mut HashSet<RowId>) {
+    if is_numeric_value(value) {
+        for (key, rows) in &index.entries {
+            if values_equal_for_index_lookup(key, value) {
+                row_ids.extend(rows.iter().copied());
+            }
+        }
+    } else if let Some(rows) = index.entries.get(value) {
+        row_ids.extend(rows.iter().copied());
+    }
+}
+
+fn composite_key_matches_prefix(key: &[Value], prefix: &[Value]) -> bool {
+    prefix.len() <= key.len()
+        && key
+            .iter()
+            .zip(prefix)
+            .all(|(key_value, prefix_value)| values_equal_for_index_lookup(key_value, prefix_value))
+}
+
+fn values_equal_for_index_lookup(left: &Value, right: &Value) -> bool {
+    compare_index_values(left, &BinaryOperator::Equal, right)
+}
+
+fn compare_index_values(left: &Value, op: &BinaryOperator, right: &Value) -> bool {
+    super::expr::compare_values(left, op, right).unwrap_or(false)
+}
+
+fn is_numeric_value(value: &Value) -> bool {
+    matches!(value, Value::Integer(_) | Value::Float(_))
 }
 
 pub fn execute_truncate_table(

@@ -239,12 +239,20 @@ impl<'a> Binder<'a> {
         function: &mut TableFunction,
     ) -> Result<Vec<BoundColumnRef>, RustqlError> {
         let empty_scope = NameScope::default();
-        for arg in &function.args {
-            self.bind_expr(arg, &empty_scope)?;
-        }
 
         match function.name.as_str() {
             "generate_series" => {
+                if !(2..=3).contains(&function.args.len()) {
+                    return Err(RustqlError::TypeMismatch(
+                        "GENERATE_SERIES expects 2 or 3 arguments".to_string(),
+                    ));
+                }
+
+                for arg in &function.args {
+                    let bound = self.bind_expr(arg, &empty_scope)?;
+                    ensure_integer(&bound, "GENERATE_SERIES")?;
+                }
+
                 let relation_label = function.alias.as_deref().unwrap_or(&function.name);
                 let column = column_definition(
                     function

@@ -51,10 +51,10 @@ fn test_scalar_subquery_basic() {
     execute(Statement::Insert(InsertStatement {
         table: "users_scalar1".to_string(),
         columns: Some(vec!["id".into(), "name".into()]),
-        values: vec![
+        values: insert_values(vec![
             vec![Value::Integer(1), Value::Text("Alice".into())],
             vec![Value::Integer(2), Value::Text("Bob".into())],
-        ],
+        ]),
         source_query: None,
         on_conflict: None,
         returning: None,
@@ -98,10 +98,10 @@ fn test_scalar_subquery_basic() {
     execute(Statement::Insert(InsertStatement {
         table: "orders_scalar1".to_string(),
         columns: Some(vec!["user_id".into(), "amount".into()]),
-        values: vec![
+        values: insert_values(vec![
             vec![Value::Integer(1), Value::Float(150.0)],
             vec![Value::Integer(2), Value::Float(50.0)],
-        ],
+        ]),
         source_query: None,
         on_conflict: None,
         returning: None,
@@ -209,7 +209,7 @@ fn test_scalar_subquery_null() {
     execute(Statement::Insert(InsertStatement {
         table: "users_scalar2".to_string(),
         columns: Some(vec!["id".into(), "name".into()]),
-        values: vec![vec![Value::Integer(1), Value::Text("Alice".into())]],
+        values: insert_values(vec![vec![Value::Integer(1), Value::Text("Alice".into())]]),
         source_query: None,
         on_conflict: None,
         returning: None,
@@ -351,10 +351,10 @@ fn test_scalar_subquery_aggregate() {
     execute(Statement::Insert(InsertStatement {
         table: "users_agg".to_string(),
         columns: Some(vec!["id".into(), "name".into()]),
-        values: vec![
+        values: insert_values(vec![
             vec![Value::Integer(1), Value::Text("Alice".into())],
             vec![Value::Integer(2), Value::Text("Bob".into())],
-        ],
+        ]),
         source_query: None,
         on_conflict: None,
         returning: None,
@@ -398,11 +398,11 @@ fn test_scalar_subquery_aggregate() {
     execute(Statement::Insert(InsertStatement {
         table: "orders_agg".to_string(),
         columns: Some(vec!["user_id".into(), "amount".into()]),
-        values: vec![
+        values: insert_values(vec![
             vec![Value::Integer(1), Value::Float(100.0)],
             vec![Value::Integer(1), Value::Float(50.0)],
             vec![Value::Integer(2), Value::Float(200.0)],
-        ],
+        ]),
         source_query: None,
         on_conflict: None,
         returning: None,
@@ -516,7 +516,7 @@ fn test_scalar_subquery_aggregate_sum() {
     execute(Statement::Insert(InsertStatement {
         table: "users_sum".to_string(),
         columns: Some(vec!["id".into(), "name".into()]),
-        values: vec![vec![Value::Integer(1), Value::Text("Alice".into())]],
+        values: insert_values(vec![vec![Value::Integer(1), Value::Text("Alice".into())]]),
         source_query: None,
         on_conflict: None,
         returning: None,
@@ -560,11 +560,11 @@ fn test_scalar_subquery_aggregate_sum() {
     execute(Statement::Insert(InsertStatement {
         table: "orders_sum".to_string(),
         columns: Some(vec!["user_id".into(), "amount".into()]),
-        values: vec![
+        values: insert_values(vec![
             vec![Value::Integer(1), Value::Float(100.0)],
             vec![Value::Integer(1), Value::Float(50.0)],
             vec![Value::Integer(1), Value::Float(25.0)],
-        ],
+        ]),
         source_query: None,
         on_conflict: None,
         returning: None,
@@ -676,7 +676,7 @@ fn test_scalar_subquery_nested() {
     execute(Statement::Insert(InsertStatement {
         table: "users_nested".to_string(),
         columns: Some(vec!["id".into(), "name".into()]),
-        values: vec![vec![Value::Integer(1), Value::Text("Alice".into())]],
+        values: insert_values(vec![vec![Value::Integer(1), Value::Text("Alice".into())]]),
         source_query: None,
         on_conflict: None,
         returning: None,
@@ -720,7 +720,7 @@ fn test_scalar_subquery_nested() {
     execute(Statement::Insert(InsertStatement {
         table: "orders_nested".to_string(),
         columns: Some(vec!["user_id".into(), "amount".into()]),
-        values: vec![vec![Value::Integer(1), Value::Float(150.0)]],
+        values: insert_values(vec![vec![Value::Integer(1), Value::Float(150.0)]]),
         source_query: None,
         on_conflict: None,
         returning: None,
@@ -776,11 +776,11 @@ fn test_scalar_subquery_nested() {
     execute(Statement::Insert(InsertStatement {
         table: "items_nested".to_string(),
         columns: Some(vec!["id".into(), "order_id".into(), "price".into()]),
-        values: vec![vec![
+        values: insert_values(vec![vec![
             Value::Integer(1),
             Value::Integer(1),
             Value::Float(50.0),
-        ]],
+        ]]),
         source_query: None,
         on_conflict: None,
         returning: None,
@@ -913,10 +913,10 @@ fn test_scalar_subquery_with_join() {
     execute(Statement::Insert(InsertStatement {
         table: "users_join".to_string(),
         columns: Some(vec!["id".into(), "name".into()]),
-        values: vec![
+        values: insert_values(vec![
             vec![Value::Integer(1), Value::Text("Alice".into())],
             vec![Value::Integer(2), Value::Text("Bob".into())],
-        ],
+        ]),
         source_query: None,
         on_conflict: None,
         returning: None,
@@ -972,10 +972,10 @@ fn test_scalar_subquery_with_join() {
     execute(Statement::Insert(InsertStatement {
         table: "orders_join".to_string(),
         columns: Some(vec!["id".into(), "user_id".into(), "amount".into()]),
-        values: vec![
+        values: insert_values(vec![
             vec![Value::Integer(10), Value::Integer(1), Value::Float(150.0)],
             vec![Value::Integer(11), Value::Integer(2), Value::Float(50.0)],
-        ],
+        ]),
         source_query: None,
         on_conflict: None,
         returning: None,
@@ -1097,10 +1097,10 @@ fn test_scalar_subquery_with_join_and_aggregate() {
     execute(Statement::Insert(InsertStatement {
         table: "users_join_agg".to_string(),
         columns: Some(vec!["id".into(), "name".into()]),
-        values: vec![
+        values: insert_values(vec![
             vec![Value::Integer(1), Value::Text("Alice".into())],
             vec![Value::Integer(2), Value::Text("Bob".into())],
-        ],
+        ]),
         source_query: None,
         on_conflict: None,
         returning: None,
@@ -1156,11 +1156,11 @@ fn test_scalar_subquery_with_join_and_aggregate() {
     execute(Statement::Insert(InsertStatement {
         table: "orders_join_agg".to_string(),
         columns: Some(vec!["id".into(), "user_id".into(), "amount".into()]),
-        values: vec![
+        values: insert_values(vec![
             vec![Value::Integer(10), Value::Integer(1), Value::Float(100.0)],
             vec![Value::Integer(11), Value::Integer(1), Value::Float(50.0)],
             vec![Value::Integer(12), Value::Integer(2), Value::Float(200.0)],
-        ],
+        ]),
         source_query: None,
         on_conflict: None,
         returning: None,
@@ -1204,11 +1204,11 @@ fn test_scalar_subquery_with_join_and_aggregate() {
     execute(Statement::Insert(InsertStatement {
         table: "products_join_agg".to_string(),
         columns: Some(vec!["order_id".into(), "price".into()]),
-        values: vec![
+        values: insert_values(vec![
             vec![Value::Integer(10), Value::Float(10.0)],
             vec![Value::Integer(11), Value::Float(20.0)],
             vec![Value::Integer(12), Value::Float(30.0)],
-        ],
+        ]),
         source_query: None,
         on_conflict: None,
         returning: None,

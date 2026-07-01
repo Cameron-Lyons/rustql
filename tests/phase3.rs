@@ -1,5 +1,6 @@
 mod common;
 use common::*;
+use rustql::ast::Value;
 use std::sync::Mutex;
 
 static TEST_MUTEX: Mutex<()> = Mutex::new(());
@@ -62,6 +63,22 @@ fn test_create_view_and_select() {
     assert!(select.contains("Alice"));
     assert!(select.contains("Carol"));
     assert!(!select.contains("Bob"));
+}
+
+#[test]
+fn test_create_view_escapes_string_literals() {
+    let _guard = setup_test();
+    execute_sql("CREATE TABLE contacts (id INTEGER, name TEXT)").unwrap();
+    execute_sql("INSERT INTO contacts VALUES (1, 'O''Malley'), (2, 'Alice')").unwrap();
+
+    execute_sql(
+        "CREATE VIEW quoted_contacts AS SELECT name FROM contacts WHERE name = 'O''Malley'",
+    )
+    .unwrap();
+
+    let rows = query_rows("SELECT * FROM quoted_contacts").unwrap();
+    rows.assert_columns(&["name"]);
+    assert_eq!(rows.rows, vec![vec![Value::Text("O'Malley".to_string())]]);
 }
 
 #[test]
@@ -191,6 +208,33 @@ fn test_insert_on_conflict_unique() {
     );
     assert!(result.is_ok());
     assert_command(result.unwrap(), CommandTag::Insert, 0);
+}
+
+#[test]
+fn test_insert_on_conflict_update_set_default() {
+    let _guard = setup_test();
+    execute_sql(
+        "CREATE TABLE upsert_default (
+            id INTEGER PRIMARY KEY,
+            label TEXT DEFAULT 'fallback',
+            qty INTEGER DEFAULT 5
+        )",
+    )
+    .unwrap();
+    execute_sql("INSERT INTO upsert_default VALUES (1, 'custom', 99)").unwrap();
+
+    assert_command_sql(
+        "INSERT INTO upsert_default VALUES (1, 'ignored', 100) \
+         ON CONFLICT (id) DO UPDATE SET label = DEFAULT, qty = DEFAULT",
+        CommandTag::Insert,
+        1,
+    );
+
+    assert_rows(
+        "SELECT label, qty FROM upsert_default WHERE id = 1",
+        &["label", "qty"],
+        vec![vec![Value::Text("fallback".to_string()), Value::Integer(5)]],
+    );
 }
 
 #[test]

@@ -3,7 +3,10 @@ use crate::error::RustqlError;
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
-use super::expr::{compare_values_for_sort, evaluate_value_expression};
+use super::expr::{
+    compare_order_values, compare_values_for_sort, evaluate_value_expression,
+    row_has_finite_numeric_value, rows_equal_for_sql_identity,
+};
 
 pub(crate) const DEFAULT_PERCENTILE_FRACTION: f64 = 0.5;
 
@@ -38,6 +41,42 @@ pub(crate) fn format_aggregate_header(agg: &AggregateFunction) -> String {
     };
 
     format!("{}({}{})", func_name, distinct_str, expr_str)
+}
+
+struct WindowPartitionGroups {
+    non_numeric_groups: BTreeMap<Vec<Value>, Vec<usize>>,
+    numeric_groups: Vec<(Vec<Value>, Vec<usize>)>,
+}
+
+impl WindowPartitionGroups {
+    fn new() -> Self {
+        Self {
+            non_numeric_groups: BTreeMap::new(),
+            numeric_groups: Vec::new(),
+        }
+    }
+
+    fn insert(&mut self, key: Vec<Value>, idx: usize) {
+        if row_has_finite_numeric_value(&key) {
+            if let Some((_, indices)) = self
+                .numeric_groups
+                .iter_mut()
+                .find(|(candidate, _)| rows_equal_for_sql_identity(candidate, &key))
+            {
+                indices.push(idx);
+            } else {
+                self.numeric_groups.push((key, vec![idx]));
+            }
+        } else {
+            self.non_numeric_groups.entry(key).or_default().push(idx);
+        }
+    }
+
+    fn into_groups(self) -> Vec<Vec<usize>> {
+        let mut groups: Vec<Vec<usize>> = self.non_numeric_groups.into_values().collect();
+        groups.extend(self.numeric_groups.into_iter().map(|(_, indices)| indices));
+        groups
+    }
 }
 
 fn resolve_frame_bounds(
@@ -371,7 +410,7 @@ fn evaluate_window_function_outputs(
                         .collect()
                 })
                 .collect();
-            let mut partition_groups: BTreeMap<Vec<Value>, Vec<usize>> = BTreeMap::new();
+            let mut partition_groups = WindowPartitionGroups::new();
             for (idx, row) in rows.iter().enumerate() {
                 let key: Vec<Value> = partition_by
                     .iter()
@@ -379,11 +418,11 @@ fn evaluate_window_function_outputs(
                         evaluate_value_expression(expr, columns, row).unwrap_or(Value::Null)
                     })
                     .collect();
-                partition_groups.entry(key).or_default().push(idx);
+                partition_groups.insert(key, idx);
             }
 
-            for indices in partition_groups.values() {
-                let mut sorted_indices = indices.clone();
+            for indices in partition_groups.into_groups() {
+                let mut sorted_indices = indices;
                 sorted_indices
                     .sort_by(|&a, &b| compare_window_order_rows(&order_values, order_by, a, b));
 
@@ -651,10 +690,13 @@ fn compare_window_order_rows(
     right_row: usize,
 ) -> Ordering {
     for (idx, order_expr) in order_by.iter().enumerate() {
-        let cmp =
-            compare_values_for_sort(&order_values[left_row][idx], &order_values[right_row][idx]);
+        let cmp = compare_order_values(
+            &order_values[left_row][idx],
+            &order_values[right_row][idx],
+            order_expr,
+        );
         if cmp != Ordering::Equal {
-            return if order_expr.asc { cmp } else { cmp.reverse() };
+            return cmp;
         }
     }
     Ordering::Equal

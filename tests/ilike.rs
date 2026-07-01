@@ -66,6 +66,26 @@ fn test_ilike_mixed_case_pattern() {
 }
 
 #[test]
+fn test_ilike_escape_literal_wildcards() {
+    let _guard = setup_test();
+    execute_sql("CREATE TABLE labels (id INTEGER, label TEXT)").unwrap();
+    execute_sql("INSERT INTO labels VALUES (1, 'A_B')").unwrap();
+    execute_sql("INSERT INTO labels VALUES (2, 'aXb')").unwrap();
+    execute_sql("INSERT INTO labels VALUES (3, 'a%b')").unwrap();
+
+    let result =
+        execute_sql("SELECT label FROM labels WHERE label ILIKE 'a!_b' ESCAPE '!'").unwrap();
+    assert!(result.contains("A_B"));
+    assert!(!result.contains("aXb"));
+    assert!(!result.contains("a%b"));
+
+    let result =
+        execute_sql("SELECT label FROM labels WHERE label ILIKE 'A!%B' ESCAPE '!'").unwrap();
+    assert!(result.contains("a%b"));
+    assert!(!result.contains("A_B"));
+}
+
+#[test]
 fn test_ilike_no_match() {
     let _guard = setup_test();
     execute_sql("CREATE TABLE colors (id INTEGER, name TEXT)").unwrap();

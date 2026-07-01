@@ -47,9 +47,14 @@ pub enum Token {
     On,
     In,
     Like,
+    Escape,
     Between,
     Is,
     Null,
+    Nulls,
+    Unknown,
+    True,
+    False,
     Boolean,
     Date,
     Time,
@@ -198,6 +203,7 @@ pub enum Token {
     Fetch,
     First,
     Next,
+    Last,
     Only,
     Ties,
     Row,
@@ -394,10 +400,9 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, RustqlError> {
                 can_extend_last_identifier_with_dot = false;
             }
             '"' => {
-                chars.next();
-                let string_val = read_string(&mut chars, '"')?;
-                tokens.push(Token::StringLiteral(string_val));
-                can_extend_last_identifier_with_dot = false;
+                let ident = read_quoted_identifier(&mut chars, '"')?;
+                tokens.push(Token::Identifier(ident));
+                can_extend_last_identifier_with_dot = true;
             }
             _ if ch.is_ascii_digit() => {
                 let num = read_number(&mut chars);
@@ -415,24 +420,7 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, RustqlError> {
                     matches!(tokens.last(), Some(Token::Identifier(_)));
             }
             '`' => {
-                chars.next();
-                let mut ident = String::new();
-                loop {
-                    match chars.next() {
-                        Some('`') => break,
-                        Some(ch) => ident.push(ch),
-                        None => {
-                            return Err(RustqlError::ParseError(
-                                "Unterminated quoted identifier".to_string(),
-                            ));
-                        }
-                    }
-                }
-                if ident.is_empty() {
-                    return Err(RustqlError::ParseError(
-                        "Empty quoted identifier".to_string(),
-                    ));
-                }
+                let ident = read_quoted_identifier(&mut chars, '`')?;
                 tokens.push(Token::Identifier(ident));
                 can_extend_last_identifier_with_dot = true;
             }
@@ -551,11 +539,15 @@ impl<'a> SpanCursor<'a> {
     }
 
     fn consume_identifier_token(&mut self) {
-        if self.peek() == Some('`') {
+        if let Some(delimiter @ ('`' | '"')) = self.peek() {
             self.bump();
             while let Some(ch) = self.bump() {
-                if ch == '`' {
-                    break;
+                if ch == delimiter {
+                    if self.peek() == Some(delimiter) {
+                        self.bump();
+                    } else {
+                        break;
+                    }
                 }
             }
             return;
@@ -595,7 +587,11 @@ impl<'a> SpanCursor<'a> {
             } else if ch == '\\' {
                 escaped = true;
             } else if ch == delimiter {
-                break;
+                if self.peek() == Some(delimiter) {
+                    self.bump();
+                } else {
+                    break;
+                }
             }
         }
     }
@@ -666,6 +662,40 @@ fn read_identifier(chars: &mut std::iter::Peekable<std::str::Chars>) -> String {
     ident
 }
 
+fn read_quoted_identifier(
+    chars: &mut std::iter::Peekable<std::str::Chars>,
+    delimiter: char,
+) -> Result<String, RustqlError> {
+    chars.next();
+    let mut ident = String::new();
+    loop {
+        match chars.next() {
+            Some(ch) if ch == delimiter => {
+                if chars.peek() == Some(&delimiter) {
+                    chars.next();
+                    ident.push(delimiter);
+                } else {
+                    break;
+                }
+            }
+            Some(ch) => ident.push(ch),
+            None => {
+                return Err(RustqlError::ParseError(
+                    "Unterminated quoted identifier".to_string(),
+                ));
+            }
+        }
+    }
+
+    if ident.is_empty() {
+        return Err(RustqlError::ParseError(
+            "Empty quoted identifier".to_string(),
+        ));
+    }
+
+    Ok(ident)
+}
+
 fn read_number(chars: &mut std::iter::Peekable<std::str::Chars>) -> String {
     let mut num = String::new();
     let mut has_dot = false;
@@ -721,7 +751,12 @@ fn read_string(
         } else if ch == '\\' {
             escaped = true;
         } else if ch == delimiter {
-            return Ok(string_val);
+            if chars.peek() == Some(&delimiter) {
+                chars.next();
+                string_val.push(delimiter);
+            } else {
+                return Ok(string_val);
+            }
         } else {
             string_val.push(ch);
         }
@@ -778,9 +813,14 @@ fn match_keyword(ident: &str) -> Token {
         "ON" => Token::On,
         "IN" => Token::In,
         "LIKE" => Token::Like,
+        "ESCAPE" => Token::Escape,
         "BETWEEN" => Token::Between,
         "IS" => Token::Is,
         "NULL" => Token::Null,
+        "NULLS" => Token::Nulls,
+        "UNKNOWN" => Token::Unknown,
+        "TRUE" => Token::True,
+        "FALSE" => Token::False,
         "BOOLEAN" => Token::Boolean,
         "DATE" => Token::Date,
         "TIME" => Token::Time,
@@ -928,6 +968,7 @@ fn match_keyword(ident: &str) -> Token {
         "FETCH" => Token::Fetch,
         "FIRST" => Token::First,
         "NEXT" => Token::Next,
+        "LAST" => Token::Last,
         "ONLY" => Token::Only,
         "TIES" => Token::Ties,
         "ROW" => Token::Row,
