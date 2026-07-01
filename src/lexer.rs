@@ -552,16 +552,11 @@ impl<'a> SpanCursor<'a> {
 
     fn consume_identifier_token(&mut self) {
         if self.peek() == Some('`') {
-            self.bump();
-            while let Some(ch) = self.bump() {
-                if ch == '`' {
-                    break;
-                }
-            }
-            return;
+            self.consume_quoted_identifier_part();
+        } else {
+            self.consume_identifier_part();
         }
 
-        self.consume_identifier_part();
         while self.peek() == Some('.')
             && self
                 .peek_next()
@@ -569,6 +564,15 @@ impl<'a> SpanCursor<'a> {
         {
             self.bump();
             self.consume_identifier_part();
+        }
+    }
+
+    fn consume_quoted_identifier_part(&mut self) {
+        self.bump();
+        while let Some(ch) = self.bump() {
+            if ch == '`' {
+                break;
+            }
         }
     }
 
