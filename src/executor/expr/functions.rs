@@ -1,6 +1,38 @@
 use super::date::{days_to_ymd, parse_date_components, ymd_to_days};
 use super::*;
 
+fn string_function_length(name: &str, value: Option<&Value>) -> Result<usize, RustqlError> {
+    match value {
+        Some(Value::Integer(i)) if *i >= 0 => Ok(*i as usize),
+        Some(Value::Integer(_)) => Err(RustqlError::TypeMismatch(format!(
+            "{name} length cannot be negative"
+        ))),
+        _ => Err(RustqlError::TypeMismatch(format!(
+            "{name} requires an integer second argument"
+        ))),
+    }
+}
+
+fn string_function_pad<'a>(name: &str, value: Option<&'a Value>) -> Result<&'a str, RustqlError> {
+    let pad = match value {
+        Some(Value::Text(pad)) => pad.as_str(),
+        None => " ",
+        _ => {
+            return Err(RustqlError::TypeMismatch(format!(
+                "{name} pad argument must be text"
+            )));
+        }
+    };
+
+    if pad.is_empty() {
+        Err(RustqlError::TypeMismatch(format!(
+            "{name} pad argument cannot be empty"
+        )))
+    } else {
+        Ok(pad)
+    }
+}
+
 pub(super) fn evaluate_scalar_function(
     name: &ScalarFunctionType,
     args: &[Expression],
@@ -451,7 +483,7 @@ pub(super) fn evaluate_scalar_function(
         }
         ScalarFunctionType::Lpad => {
             let s = match evaluated_args.first() {
-                Some(Value::Text(s)) => s.clone(),
+                Some(Value::Text(s)) => s.as_str(),
                 Some(Value::Null) => return Ok(Value::Null),
                 _ => {
                     return Err(RustqlError::TypeMismatch(
@@ -459,30 +491,15 @@ pub(super) fn evaluate_scalar_function(
                     ));
                 }
             };
-            let len = match evaluated_args.get(1) {
-                Some(Value::Integer(i)) => *i as usize,
-                _ => {
-                    return Err(RustqlError::TypeMismatch(
-                        "LPAD requires an integer second argument".to_string(),
-                    ));
-                }
-            };
-            let pad = match evaluated_args.get(2) {
-                Some(Value::Text(p)) => p.clone(),
-                None => " ".to_string(),
-                _ => {
-                    return Err(RustqlError::TypeMismatch(
-                        "LPAD pad argument must be text".to_string(),
-                    ));
-                }
-            };
+            let len = string_function_length("LPAD", evaluated_args.get(1))?;
+            let pad = string_function_pad("LPAD", evaluated_args.get(2))?;
             let chars: Vec<char> = s.chars().collect();
             if chars.len() >= len {
                 Ok(Value::Text(chars[..len].iter().collect()))
             } else {
                 let needed = len - chars.len();
                 let pad_chars: Vec<char> = pad.chars().collect();
-                let mut result = String::new();
+                let mut result = String::with_capacity(s.len().max(len));
                 for i in 0..needed {
                     result.push(pad_chars[i % pad_chars.len()]);
                 }
@@ -492,7 +509,7 @@ pub(super) fn evaluate_scalar_function(
         }
         ScalarFunctionType::Rpad => {
             let s = match evaluated_args.first() {
-                Some(Value::Text(s)) => s.clone(),
+                Some(Value::Text(s)) => s.as_str(),
                 Some(Value::Null) => return Ok(Value::Null),
                 _ => {
                     return Err(RustqlError::TypeMismatch(
@@ -500,30 +517,16 @@ pub(super) fn evaluate_scalar_function(
                     ));
                 }
             };
-            let len = match evaluated_args.get(1) {
-                Some(Value::Integer(i)) => *i as usize,
-                _ => {
-                    return Err(RustqlError::TypeMismatch(
-                        "RPAD requires an integer second argument".to_string(),
-                    ));
-                }
-            };
-            let pad = match evaluated_args.get(2) {
-                Some(Value::Text(p)) => p.clone(),
-                None => " ".to_string(),
-                _ => {
-                    return Err(RustqlError::TypeMismatch(
-                        "RPAD pad argument must be text".to_string(),
-                    ));
-                }
-            };
+            let len = string_function_length("RPAD", evaluated_args.get(1))?;
+            let pad = string_function_pad("RPAD", evaluated_args.get(2))?;
             let chars: Vec<char> = s.chars().collect();
             if chars.len() >= len {
                 Ok(Value::Text(chars[..len].iter().collect()))
             } else {
                 let needed = len - chars.len();
                 let pad_chars: Vec<char> = pad.chars().collect();
-                let mut result: String = chars.into_iter().collect();
+                let mut result = String::with_capacity(s.len().max(len));
+                result.extend(chars);
                 for i in 0..needed {
                     result.push(pad_chars[i % pad_chars.len()]);
                 }
@@ -532,7 +535,7 @@ pub(super) fn evaluate_scalar_function(
         }
         ScalarFunctionType::LeftFn => {
             let s = match evaluated_args.first() {
-                Some(Value::Text(s)) => s.clone(),
+                Some(Value::Text(s)) => s.as_str(),
                 Some(Value::Null) => return Ok(Value::Null),
                 _ => {
                     return Err(RustqlError::TypeMismatch(
@@ -540,20 +543,13 @@ pub(super) fn evaluate_scalar_function(
                     ));
                 }
             };
-            let n = match evaluated_args.get(1) {
-                Some(Value::Integer(i)) => *i as usize,
-                _ => {
-                    return Err(RustqlError::TypeMismatch(
-                        "LEFT requires an integer second argument".to_string(),
-                    ));
-                }
-            };
+            let n = string_function_length("LEFT", evaluated_args.get(1))?;
             let result: String = s.chars().take(n).collect();
             Ok(Value::Text(result))
         }
         ScalarFunctionType::RightFn => {
             let s = match evaluated_args.first() {
-                Some(Value::Text(s)) => s.clone(),
+                Some(Value::Text(s)) => s.as_str(),
                 Some(Value::Null) => return Ok(Value::Null),
                 _ => {
                     return Err(RustqlError::TypeMismatch(
@@ -561,14 +557,7 @@ pub(super) fn evaluate_scalar_function(
                     ));
                 }
             };
-            let n = match evaluated_args.get(1) {
-                Some(Value::Integer(i)) => *i as usize,
-                _ => {
-                    return Err(RustqlError::TypeMismatch(
-                        "RIGHT requires an integer second argument".to_string(),
-                    ));
-                }
-            };
+            let n = string_function_length("RIGHT", evaluated_args.get(1))?;
             let chars: Vec<char> = s.chars().collect();
             let start = chars.len().saturating_sub(n);
             let result: String = chars[start..].iter().collect();
@@ -583,7 +572,7 @@ pub(super) fn evaluate_scalar_function(
         },
         ScalarFunctionType::Repeat => {
             let s = match evaluated_args.first() {
-                Some(Value::Text(s)) => s.clone(),
+                Some(Value::Text(s)) => s.as_str(),
                 Some(Value::Null) => return Ok(Value::Null),
                 _ => {
                     return Err(RustqlError::TypeMismatch(
@@ -591,14 +580,7 @@ pub(super) fn evaluate_scalar_function(
                     ));
                 }
             };
-            let n = match evaluated_args.get(1) {
-                Some(Value::Integer(i)) => *i as usize,
-                _ => {
-                    return Err(RustqlError::TypeMismatch(
-                        "REPEAT requires an integer second argument".to_string(),
-                    ));
-                }
-            };
+            let n = string_function_length("REPEAT", evaluated_args.get(1))?;
             Ok(Value::Text(s.repeat(n)))
         }
         ScalarFunctionType::Log => {
