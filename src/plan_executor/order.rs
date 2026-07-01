@@ -68,13 +68,13 @@ impl<'a> PlanExecutor<'a> {
                 )?;
                 let mut extended_limit = limit;
                 while extended_limit < rows.len() {
-                    let values = self.extract_order_values(
+                    if !self.row_matches_order_boundary(
                         order_by,
                         &input.columns,
                         &column_defs,
+                        &boundary_values,
                         &rows[extended_limit],
-                    )?;
-                    if values != boundary_values {
+                    )? {
                         break;
                     }
                     extended_limit += 1;
@@ -98,25 +98,10 @@ impl<'a> PlanExecutor<'a> {
         input: ExecutionResult,
         distinct_on: &[Expression],
     ) -> Result<ExecutionResult, RustqlError> {
-        let column_defs: Vec<ColumnDefinition> = input
-            .columns
-            .iter()
-            .map(|name| ColumnDefinition {
-                name: name.clone(),
-                data_type: DataType::Text,
-                nullable: true,
-                primary_key: false,
-                unique: false,
-                default_value: None,
-                foreign_key: None,
-                check: None,
-                auto_increment: false,
-                generated: None,
-            })
-            .collect();
+        let column_defs = column_definitions_from_names(&input.columns);
 
         let mut seen = BTreeSet::new();
-        let mut rows = Vec::new();
+        let mut rows = Vec::with_capacity(input.rows.len());
 
         for row in input.rows {
             let key: Vec<Value> = distinct_on
@@ -272,5 +257,23 @@ impl<'a> PlanExecutor<'a> {
             .iter()
             .map(|order_expr| self.get_sort_value(&order_expr.expr, columns, column_defs, row))
             .collect()
+    }
+
+    fn row_matches_order_boundary(
+        &self,
+        order_by: &[OrderByExpr],
+        columns: &[String],
+        column_defs: &[ColumnDefinition],
+        boundary_values: &[Value],
+        row: &[Value],
+    ) -> Result<bool, RustqlError> {
+        debug_assert_eq!(order_by.len(), boundary_values.len());
+        for (order_expr, boundary_value) in order_by.iter().zip(boundary_values) {
+            let value = self.get_sort_value(&order_expr.expr, columns, column_defs, row)?;
+            if value != *boundary_value {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 }
