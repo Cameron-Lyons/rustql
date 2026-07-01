@@ -10,6 +10,12 @@ impl<'a> QueryPlanner<'a> {
     ) -> Result<PlanNode, RustqlError> {
         let mut current_plan = left_plan;
         let base_label = stmt.from_alias.clone().unwrap_or_else(|| stmt.from.clone());
+        let can_push_join_predicates = stmt.joins.iter().all(|join| {
+            !matches!(
+                join.join_type,
+                JoinType::Left | JoinType::Right | JoinType::Full
+            )
+        });
         let mut left_columns = self.infer_base_source_columns(stmt).map(|columns| {
             if stmt.from.starts_with(LATERAL_OUTER_TABLE_PREFIX) {
                 columns
@@ -55,7 +61,10 @@ impl<'a> QueryPlanner<'a> {
             let mut kept = Vec::new();
             for pred in remaining_predicates {
                 let refs = self.referenced_tables(&pred);
-                if refs.len() == 1 && (refs.contains(&join.table) || refs.contains(&right_label)) {
+                if can_push_join_predicates
+                    && refs.len() == 1
+                    && (refs.contains(&join.table) || refs.contains(&right_label))
+                {
                     pushable.push(pred);
                 } else {
                     kept.push(pred);
@@ -70,12 +79,15 @@ impl<'a> QueryPlanner<'a> {
 
             let join_condition =
                 self.join_condition_for_plan(&join, &left_columns, &right_columns, &right_label);
-            let join_plan = if stmt.joins.len() == 1
-                && matches!(join.join_type, JoinType::Inner)
+            let join_plan = if matches!(join.join_type, JoinType::Inner)
                 && join.using_columns.is_none()
                 && !matches!(join.join_type, JoinType::Natural)
-                && self.is_equality_join(&join_condition)
-            {
+                && self.is_hash_joinable(
+                    &join_condition,
+                    &left_columns,
+                    &right_columns,
+                    &right_label,
+                ) {
                 self.plan_hash_join(current_plan, right_plan, join_condition.clone())
             } else {
                 self.plan_nested_loop_join(
@@ -282,6 +294,81 @@ impl<'a> QueryPlanner<'a> {
         }
     }
 
+    fn is_hash_joinable(
+        &self,
+        condition: &Expression,
+        left_columns: &[ColumnDefinition],
+        right_columns: &[ColumnDefinition],
+        right_label: &str,
+    ) -> bool {
+        let Expression::BinaryOp {
+            left,
+            op: BinaryOperator::Equal,
+            right,
+        } = condition
+        else {
+            return false;
+        };
+
+        let (Expression::Column(left_ref), Expression::Column(right_ref)) =
+            (left.as_ref(), right.as_ref())
+        else {
+            return false;
+        };
+
+        matches!(
+            (
+                self.join_column_side(left_ref, left_columns, right_columns, right_label),
+                self.join_column_side(right_ref, left_columns, right_columns, right_label),
+            ),
+            (JoinColumnSide::Left, JoinColumnSide::Right)
+                | (JoinColumnSide::Right, JoinColumnSide::Left)
+        )
+    }
+
+    fn join_column_side(
+        &self,
+        reference: &str,
+        left_columns: &[ColumnDefinition],
+        right_columns: &[ColumnDefinition],
+        right_label: &str,
+    ) -> JoinColumnSide {
+        let in_left = left_columns
+            .iter()
+            .any(|column| self.column_ref_matches_left(&column.name, reference));
+        let in_right = right_columns
+            .iter()
+            .any(|column| self.column_ref_matches_right(&column.name, reference, right_label));
+
+        match (in_left, in_right) {
+            (true, false) => JoinColumnSide::Left,
+            (false, true) => JoinColumnSide::Right,
+            (true, true) => JoinColumnSide::Both,
+            (false, false) => JoinColumnSide::Neither,
+        }
+    }
+
+    fn column_ref_matches_left(&self, candidate: &str, reference: &str) -> bool {
+        if reference.contains('.') {
+            candidate == reference
+        } else {
+            self.unqualified_column_name(candidate) == reference
+        }
+    }
+
+    fn column_ref_matches_right(
+        &self,
+        candidate: &str,
+        reference: &str,
+        right_label: &str,
+    ) -> bool {
+        if reference.contains('.') {
+            candidate == reference || format!("{}.{}", right_label, candidate) == reference
+        } else {
+            self.unqualified_column_name(candidate) == reference
+        }
+    }
+
     pub(super) fn estimate_lateral_rows(&self, stmt: &SelectStatement) -> usize {
         if stmt.group_by.is_some()
             || stmt
@@ -298,4 +385,12 @@ impl<'a> QueryPlanner<'a> {
             .or(stmt.limit.map(|limit| limit.max(1)))
             .unwrap_or(DEFAULT_LATERAL_ROWS)
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JoinColumnSide {
+    Left,
+    Right,
+    Both,
+    Neither,
 }

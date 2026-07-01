@@ -174,8 +174,11 @@ fn expression_needs_outer_scope(
         | Expression::Cast { expr, .. } => {
             expression_needs_outer_scope(expr, local_columns, outer_columns)
         }
-        Expression::In { left, .. } => {
+        Expression::In { left, values } => {
             expression_needs_outer_scope(left, local_columns, outer_columns)
+                || values
+                    .iter()
+                    .any(|value| expression_needs_outer_scope(value, local_columns, outer_columns))
         }
         Expression::Any { left, .. } | Expression::All { left, .. } => {
             expression_needs_outer_scope(left, local_columns, outer_columns)
@@ -216,7 +219,10 @@ fn expression_needs_outer_scope(
                     expression_needs_outer_scope(&item.expr, local_columns, outer_columns)
                 })
         }
-        Expression::Subquery(_) | Expression::Exists(_) | Expression::Value(_) => false,
+        Expression::Subquery(_)
+        | Expression::Exists(_)
+        | Expression::Value(_)
+        | Expression::Default => false,
     }
 }
 
@@ -461,8 +467,11 @@ fn rewrite_expression_outer_references(
         Expression::UnaryOp { expr, .. } | Expression::IsNull { expr, .. } => {
             rewrite_expression_outer_references(expr, outer_column_mappings, local_columns);
         }
-        Expression::In { left, .. } => {
+        Expression::In { left, values } => {
             rewrite_expression_outer_references(left, outer_column_mappings, local_columns);
+            for value in values {
+                rewrite_expression_outer_references(value, outer_column_mappings, local_columns);
+            }
         }
         Expression::Any { left, .. } | Expression::All { left, .. } => {
             rewrite_expression_outer_references(left, outer_column_mappings, local_columns);
@@ -533,7 +542,10 @@ fn rewrite_expression_outer_references(
             rewrite_expression_outer_references(left, outer_column_mappings, local_columns);
             rewrite_expression_outer_references(right, outer_column_mappings, local_columns);
         }
-        Expression::Subquery(_) | Expression::Exists(_) | Expression::Value(_) => {}
+        Expression::Subquery(_)
+        | Expression::Exists(_)
+        | Expression::Value(_)
+        | Expression::Default => {}
     }
 }
 

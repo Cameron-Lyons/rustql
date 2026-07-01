@@ -104,6 +104,7 @@ fn syntactic_expr_type(expr: &Expression) -> Option<DataType> {
                 }
             }
             BinaryOperator::Concat => Some(DataType::Text),
+            BinaryOperator::Escape => Some(DataType::Text),
             BinaryOperator::And
             | BinaryOperator::Or
             | BinaryOperator::Equal
@@ -286,6 +287,16 @@ pub(super) fn ensure_numeric(expr: &BoundExpr, context: &str) -> Result<(), Rust
         BoundType::Known(DataType::Integer | DataType::Float) | BoundType::Unknown => Ok(()),
         _ => Err(RustqlError::TypeMismatch(format!(
             "{} requires numeric values",
+            context
+        ))),
+    }
+}
+
+pub(super) fn ensure_integer(expr: &BoundExpr, context: &str) -> Result<(), RustqlError> {
+    match expr.data_type {
+        BoundType::Known(DataType::Integer) | BoundType::Unknown => Ok(()),
+        _ => Err(RustqlError::TypeMismatch(format!(
+            "{} requires integer values",
             context
         ))),
     }

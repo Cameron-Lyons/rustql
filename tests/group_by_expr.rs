@@ -1,6 +1,7 @@
 mod common;
 use common::reset_database;
 use common::*;
+use rustql::ast::Value;
 use std::sync::Once;
 
 static INIT: Once = Once::new();
@@ -42,6 +43,33 @@ fn test_group_by_with_count() {
     assert!(result.contains("B"));
     assert!(result.contains("3")); // A has 3 items
     assert!(result.contains("1")); // B has 1 item
+}
+
+#[test]
+fn test_group_by_uses_numeric_equality_semantics() {
+    setup();
+
+    let rows = query_rows(
+        "SELECT k, COUNT(*), SUM(amount) \
+         FROM (VALUES (1, 10), (1.0, 20), (2, 30), ('1', 40)) AS t(k, amount) \
+         GROUP BY k \
+         ORDER BY k",
+    )
+    .unwrap();
+
+    rows.assert_columns(&["k", "Count(*)", "Sum(amount)"]);
+    assert_eq!(
+        rows.rows,
+        vec![
+            vec![Value::Integer(1), Value::Integer(2), Value::Float(30.0)],
+            vec![Value::Integer(2), Value::Integer(1), Value::Float(30.0)],
+            vec![
+                Value::Text("1".to_string()),
+                Value::Integer(1),
+                Value::Float(40.0)
+            ],
+        ]
+    );
 }
 
 #[test]

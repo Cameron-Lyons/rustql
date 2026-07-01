@@ -1,5 +1,6 @@
 mod common;
 use common::*;
+use rustql::ast::Value;
 use std::sync::Mutex;
 
 static TEST_MUTEX: Mutex<()> = Mutex::new(());
@@ -31,6 +32,51 @@ fn test_foreign_key_basic() {
         result
             .unwrap_err()
             .contains("Foreign key constraint violation")
+    );
+}
+
+#[test]
+fn test_foreign_key_uses_numeric_equality_semantics() {
+    let _guard = setup_test();
+
+    execute_sql("CREATE TABLE users (id FLOAT, name TEXT)").unwrap();
+    execute_sql("INSERT INTO users VALUES (1.0, 'Alice')").unwrap();
+
+    execute_sql(
+        "CREATE TABLE orders (id INTEGER, user_id INTEGER FOREIGN KEY REFERENCES users(id))",
+    )
+    .unwrap();
+
+    let valid = execute_sql("INSERT INTO orders VALUES (1, 1)");
+    assert!(valid.is_ok(), "Should allow numeric-compatible foreign key");
+
+    let invalid = execute_sql("INSERT INTO orders VALUES (2, 2)");
+    assert!(invalid.is_err(), "Should reject missing foreign key");
+}
+
+#[test]
+fn test_foreign_key_delete_action_uses_numeric_equality_semantics() {
+    let _guard = setup_test();
+
+    execute_sql("CREATE TABLE users (id INTEGER, name TEXT)").unwrap();
+    execute_sql("INSERT INTO users VALUES (1, 'Alice'), (2, 'Bob')").unwrap();
+
+    execute_sql(
+        "CREATE TABLE orders (id INTEGER, user_id FLOAT FOREIGN KEY REFERENCES users(id) ON DELETE SET NULL)"
+    ).unwrap();
+    execute_sql("INSERT INTO orders VALUES (10, 1.0)").unwrap();
+    execute_sql("INSERT INTO orders VALUES (20, 2.0)").unwrap();
+
+    execute_sql("DELETE FROM users WHERE id = 1").unwrap();
+
+    let rows = query_rows("SELECT id, user_id FROM orders ORDER BY id").unwrap();
+    rows.assert_columns(&["id", "user_id"]);
+    assert_eq!(
+        rows.rows,
+        vec![
+            vec![Value::Integer(10), Value::Null],
+            vec![Value::Integer(20), Value::Float(2.0)],
+        ]
     );
 }
 

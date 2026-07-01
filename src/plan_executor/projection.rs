@@ -164,8 +164,7 @@ impl<'a> PlanExecutor<'a> {
         &self,
         input: ExecutionResult,
     ) -> Result<ExecutionResult, RustqlError> {
-        use std::collections::BTreeSet;
-        let mut seen = BTreeSet::new();
+        let mut seen = SqlRowSet::new();
         let mut unique_rows = Vec::new();
 
         for row in input.rows {

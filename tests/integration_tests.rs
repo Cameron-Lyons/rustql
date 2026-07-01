@@ -198,6 +198,65 @@ fn test_order_by() {
 }
 
 #[test]
+fn test_order_by_nulls_first_last() {
+    let _guard = setup_test();
+    execute_sql("CREATE TABLE nullable_scores (id INTEGER, score INTEGER)").unwrap();
+    execute_sql("INSERT INTO nullable_scores VALUES (1, NULL), (2, 10), (3, 5), (4, NULL)")
+        .unwrap();
+
+    let rows =
+        query_rows("SELECT id FROM nullable_scores ORDER BY score ASC NULLS FIRST, id").unwrap();
+    assert_eq!(
+        rows.rows,
+        vec![
+            vec![Value::Integer(1)],
+            vec![Value::Integer(4)],
+            vec![Value::Integer(3)],
+            vec![Value::Integer(2)],
+        ]
+    );
+
+    let rows =
+        query_rows("SELECT id FROM nullable_scores ORDER BY score DESC NULLS LAST, id").unwrap();
+    assert_eq!(
+        rows.rows,
+        vec![
+            vec![Value::Integer(2)],
+            vec![Value::Integer(3)],
+            vec![Value::Integer(1)],
+            vec![Value::Integer(4)],
+        ]
+    );
+}
+
+#[test]
+fn test_order_by_default_nulls_preserved() {
+    let _guard = setup_test();
+    execute_sql("CREATE TABLE default_null_order (id INTEGER, score INTEGER)").unwrap();
+    execute_sql("INSERT INTO default_null_order VALUES (1, NULL), (2, 10), (3, 5)").unwrap();
+
+    let rows = query_rows("SELECT id FROM default_null_order ORDER BY score ASC").unwrap();
+    assert_eq!(
+        rows.rows,
+        vec![
+            vec![Value::Integer(3)],
+            vec![Value::Integer(2)],
+            vec![Value::Integer(1)],
+        ]
+    );
+
+    let rows = query_rows("SELECT id FROM default_null_order ORDER BY score DESC").unwrap();
+    assert_eq!(
+        rows.rows,
+        vec![
+            vec![Value::Integer(1)],
+            vec![Value::Integer(2)],
+            vec![Value::Integer(3)],
+        ]
+    );
+}
+
+#[test]
 fn test_order_by_ordinal() {
     let _guard = setup_test();
     execute_sql("CREATE TABLE users (id INTEGER, name TEXT, age INTEGER)").unwrap();
@@ -229,6 +288,41 @@ fn test_order_by_expression() {
             vec![Value::Integer(2), Value::Integer(5), Value::Integer(5)],
             vec![Value::Integer(1), Value::Integer(10), Value::Integer(2)],
             vec![Value::Integer(3), Value::Integer(7), Value::Integer(1)],
+        ]
+    );
+}
+
+#[test]
+fn test_order_by_predicate_expression() {
+    let _guard = setup_test();
+    execute_sql("CREATE TABLE tasks (id INTEGER, priority INTEGER, status TEXT)").unwrap();
+    execute_sql("INSERT INTO tasks VALUES (1, NULL, 'todo'), (2, 10, 'done'), (3, 5, 'todo')")
+        .unwrap();
+
+    let rows = query_rows("SELECT id FROM tasks ORDER BY status = 'todo' DESC, id").unwrap();
+    assert_eq!(
+        rows.rows,
+        vec![
+            vec![Value::Integer(1)],
+            vec![Value::Integer(3)],
+            vec![Value::Integer(2)],
+        ]
+    );
+}
+
+#[test]
+fn test_order_by_alias_inside_predicate_expression() {
+    let _guard = setup_test();
+    execute_sql("CREATE TABLE tasks (id INTEGER, priority INTEGER)").unwrap();
+    execute_sql("INSERT INTO tasks VALUES (1, NULL), (2, 10), (3, 5)").unwrap();
+
+    let rows = query_rows("SELECT id, priority AS p FROM tasks ORDER BY p IS NULL, id").unwrap();
+    assert_eq!(
+        rows.rows,
+        vec![
+            vec![Value::Integer(2), Value::Integer(10)],
+            vec![Value::Integer(3), Value::Integer(5)],
+            vec![Value::Integer(1), Value::Null],
         ]
     );
 }

@@ -1,6 +1,7 @@
 mod common;
 use common::reset_database;
 use common::*;
+use rustql::ast::Value;
 use std::sync::Once;
 
 static INIT: Once = Once::new();
@@ -83,4 +84,69 @@ fn test_delete_using_with_returning() {
     assert!(result.contains("Delete1"));
     assert!(result.contains("Delete3"));
     assert!(!result.contains("Keep"));
+}
+
+#[test]
+fn test_delete_using_join_uses_joined_source_rows() {
+    setup();
+    execute_sql("CREATE TABLE IF NOT EXISTS du_join_items (id INTEGER, name TEXT)").unwrap();
+    execute_sql("CREATE TABLE IF NOT EXISTS du_join_source (item_id INTEGER, flag_id INTEGER)")
+        .unwrap();
+    execute_sql("CREATE TABLE IF NOT EXISTS du_join_flags (flag_id INTEGER, active BOOLEAN)")
+        .unwrap();
+    let _ = execute_sql("DELETE FROM du_join_items");
+    let _ = execute_sql("DELETE FROM du_join_source");
+    let _ = execute_sql("DELETE FROM du_join_flags");
+    execute_sql("INSERT INTO du_join_items VALUES (1, 'delete'), (2, 'keep'), (3, 'delete')")
+        .unwrap();
+    execute_sql("INSERT INTO du_join_source VALUES (1, 10), (2, 20), (3, 30)").unwrap();
+    execute_sql("INSERT INTO du_join_flags VALUES (10, TRUE), (20, FALSE), (30, TRUE)").unwrap();
+
+    assert_command_sql(
+        "DELETE FROM du_join_items
+         USING du_join_source AS src
+         JOIN du_join_flags AS flag ON src.flag_id = flag.flag_id
+         WHERE du_join_items.id = src.item_id AND flag.active IS TRUE",
+        CommandTag::Delete,
+        2,
+    );
+
+    assert_rows(
+        "SELECT id, name FROM du_join_items ORDER BY id",
+        &["id", "name"],
+        vec![vec![Value::Integer(2), Value::Text("keep".to_string())]],
+    );
+}
+
+#[test]
+fn test_delete_using_left_join_null_extends_source_rows() {
+    setup();
+    execute_sql("CREATE TABLE IF NOT EXISTS du_left_items (id INTEGER, name TEXT)").unwrap();
+    execute_sql("CREATE TABLE IF NOT EXISTS du_left_source (item_id INTEGER)").unwrap();
+    execute_sql("CREATE TABLE IF NOT EXISTS du_left_flags (item_id INTEGER, marker TEXT)").unwrap();
+    let _ = execute_sql("DELETE FROM du_left_items");
+    let _ = execute_sql("DELETE FROM du_left_source");
+    let _ = execute_sql("DELETE FROM du_left_flags");
+    execute_sql("INSERT INTO du_left_items VALUES (1, 'keep'), (2, 'delete'), (3, 'ignore')")
+        .unwrap();
+    execute_sql("INSERT INTO du_left_source VALUES (1), (2)").unwrap();
+    execute_sql("INSERT INTO du_left_flags VALUES (1, 'present')").unwrap();
+
+    assert_command_sql(
+        "DELETE FROM du_left_items
+         USING du_left_source AS src
+         LEFT JOIN du_left_flags AS flag ON src.item_id = flag.item_id
+         WHERE du_left_items.id = src.item_id AND flag.marker IS NULL",
+        CommandTag::Delete,
+        1,
+    );
+
+    assert_rows(
+        "SELECT id, name FROM du_left_items ORDER BY id",
+        &["id", "name"],
+        vec![
+            vec![Value::Integer(1), Value::Text("keep".to_string())],
+            vec![Value::Integer(3), Value::Text("ignore".to_string())],
+        ],
+    );
 }

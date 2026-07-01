@@ -66,8 +66,11 @@ impl<'a> QueryPlanner<'a> {
             Expression::UnaryOp { expr, .. } => {
                 self.collect_table_refs(expr, tables);
             }
-            Expression::In { left, .. } => {
+            Expression::In { left, values } => {
                 self.collect_table_refs(left, tables);
+                for value in values {
+                    self.collect_table_refs(value, tables);
+                }
             }
             Expression::IsNull { expr, .. } => {
                 self.collect_table_refs(expr, tables);
@@ -122,7 +125,10 @@ impl<'a> QueryPlanner<'a> {
                 self.collect_table_refs(left, tables);
                 self.collect_table_refs(right, tables);
             }
-            Expression::Subquery(_) | Expression::Exists(_) | Expression::Value(_) => {}
+            Expression::Subquery(_)
+            | Expression::Exists(_)
+            | Expression::Value(_)
+            | Expression::Default => {}
         }
     }
 
@@ -167,8 +173,11 @@ impl<'a> QueryPlanner<'a> {
             Expression::UnaryOp { expr, .. } | Expression::IsNull { expr, .. } => {
                 self.collect_unqualified_column_refs(expr, columns);
             }
-            Expression::In { left, .. } => {
+            Expression::In { left, values } => {
                 self.collect_unqualified_column_refs(left, columns);
+                for value in values {
+                    self.collect_unqualified_column_refs(value, columns);
+                }
             }
             Expression::Function(agg) => {
                 self.collect_unqualified_column_refs(&agg.expr, columns);
@@ -223,7 +232,10 @@ impl<'a> QueryPlanner<'a> {
                 self.collect_unqualified_column_refs(left, columns);
                 self.collect_unqualified_column_refs(right, columns);
             }
-            Expression::Subquery(_) | Expression::Exists(_) | Expression::Value(_) => {}
+            Expression::Subquery(_)
+            | Expression::Exists(_)
+            | Expression::Value(_)
+            | Expression::Default => {}
         }
     }
 

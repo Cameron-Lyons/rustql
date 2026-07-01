@@ -3,12 +3,13 @@ use crate::database::{DatabaseCatalog, RowId, ScopedDatabase};
 use crate::error::RustqlError;
 use crate::executor::aggregate::{DEFAULT_PERCENTILE_FRACTION, format_aggregate_header};
 use crate::executor::expr::{
-    apply_arithmetic, compare_values, compare_values_for_sort, compare_values_same_type,
-    evaluate_expression, evaluate_value_expression_with_db, format_value,
+    SqlRowMultiset, SqlRowSet, compare_order_values, compare_values_for_sort,
+    compare_values_same_type, evaluate_expression, evaluate_value_expression_with_db,
+    row_has_finite_numeric_value, rows_equal_for_sql_identity,
 };
 use crate::planner::{self, PlanNode};
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, HashSet};
 
 const MAX_RECURSIVE_CTE_ITERATIONS: usize = 1000;
 

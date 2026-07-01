@@ -41,6 +41,24 @@ fn test_add_constraint() {
 }
 
 #[test]
+fn test_add_unique_constraint_allows_null_keys() {
+    let _guard = setup_test();
+    execute_sql("CREATE TABLE items (a INTEGER, b INTEGER, val TEXT)").unwrap();
+    execute_sql("INSERT INTO items VALUES (1, NULL, 'first')").unwrap();
+    execute_sql("INSERT INTO items VALUES (1, NULL, 'second')").unwrap();
+    execute_sql("INSERT INTO items VALUES (2, 2, 'third')").unwrap();
+
+    let result = execute_sql("ALTER TABLE items ADD CONSTRAINT uq_ab UNIQUE (a, b)");
+    assert!(result.is_ok());
+
+    let null_dup = execute_sql("INSERT INTO items VALUES (1, NULL, 'fourth')");
+    assert!(null_dup.is_ok());
+
+    let non_null_dup = execute_sql("INSERT INTO items VALUES (2, 2, 'fifth')");
+    assert!(non_null_dup.is_err());
+}
+
+#[test]
 fn test_add_constraint_validation_fails() {
     let _guard = setup_test();
     execute_sql("CREATE TABLE items (a INTEGER, b INTEGER)").unwrap();

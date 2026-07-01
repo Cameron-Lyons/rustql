@@ -1,5 +1,6 @@
 mod common;
 use common::*;
+use rustql::ast::Value;
 use std::sync::Mutex;
 
 static TEST_MUTEX: Mutex<()> = Mutex::new(());
@@ -119,4 +120,62 @@ fn test_having_with_max() {
     .unwrap();
     assert!(result.contains("A"));
     assert!(!result.contains("\tB\t") && !result.contains("\nB\t"));
+}
+
+#[test]
+fn test_having_with_between_and_in() {
+    let _guard = setup_test();
+    setup_sales_table();
+
+    let rows = query_rows(
+        "SELECT category, SUM(amount) FROM sales GROUP BY category \
+         HAVING SUM(amount) BETWEEN 175 AND 650 AND category IN ('A', 'B') \
+         ORDER BY category",
+    )
+    .unwrap();
+
+    rows.assert_columns(&["category", "Sum(amount)"]);
+    assert_eq!(
+        rows.rows,
+        vec![
+            vec![Value::Text("A".to_string()), Value::Float(200.0)],
+            vec![Value::Text("B".to_string()), Value::Float(600.0)],
+        ]
+    );
+}
+
+#[test]
+fn test_having_with_scalar_cast_and_case_expressions() {
+    let _guard = setup_test();
+    setup_sales_table();
+
+    let rows = query_rows(
+        "SELECT category, COUNT(*) FROM sales GROUP BY category \
+         HAVING CASE WHEN LOWER(CAST(category AS TEXT)) = 'b' THEN COUNT(*) ELSE 0 END = 3",
+    )
+    .unwrap();
+
+    rows.assert_columns(&["category", "Count(*)"]);
+    assert_eq!(
+        rows.rows,
+        vec![vec![Value::Text("B".to_string()), Value::Integer(3)]]
+    );
+}
+
+#[test]
+fn test_having_with_is_distinct_from_numeric_semantics() {
+    let _guard = setup_test();
+    setup_sales_table();
+
+    let rows = query_rows(
+        "SELECT category, SUM(amount) FROM sales GROUP BY category \
+         HAVING SUM(amount) IS NOT DISTINCT FROM 200",
+    )
+    .unwrap();
+
+    rows.assert_columns(&["category", "Sum(amount)"]);
+    assert_eq!(
+        rows.rows,
+        vec![vec![Value::Text("A".to_string()), Value::Float(200.0)]]
+    );
 }

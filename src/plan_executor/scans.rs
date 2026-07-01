@@ -153,6 +153,12 @@ impl<'a> PlanExecutor<'a> {
     ) -> Result<ExecutionResult, RustqlError> {
         match function.name.as_str() {
             "generate_series" => {
+                if !(2..=3).contains(&function.args.len()) {
+                    return Err(RustqlError::TypeMismatch(
+                        "GENERATE_SERIES expects 2 or 3 arguments".to_string(),
+                    ));
+                }
+
                 let empty_columns: Vec<ColumnDefinition> = Vec::new();
                 let empty_row: Vec<Value> = Vec::new();
 
@@ -235,7 +241,10 @@ impl<'a> PlanExecutor<'a> {
                         if include {
                             rows.push(row);
                         }
-                        current += step;
+                        let Some(next) = current.checked_add(step) else {
+                            break;
+                        };
+                        current = next;
                     }
                 } else {
                     while current >= stop {
@@ -248,7 +257,10 @@ impl<'a> PlanExecutor<'a> {
                         if include {
                             rows.push(row);
                         }
-                        current += step;
+                        let Some(next) = current.checked_add(step) else {
+                            break;
+                        };
+                        current = next;
                     }
                 }
 
@@ -295,10 +307,10 @@ impl<'a> PlanExecutor<'a> {
 
         let mut all_rows = base_result.rows.clone();
         let mut working_rows = base_result.rows;
-        let mut seen: Option<BTreeSet<Vec<Value>>> = if union_all {
+        let mut seen: Option<SqlRowSet> = if union_all {
             None
         } else {
-            let mut set = BTreeSet::new();
+            let mut set = SqlRowSet::new();
             for row in &all_rows {
                 set.insert(row.clone());
             }

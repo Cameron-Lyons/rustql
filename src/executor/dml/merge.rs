@@ -135,14 +135,41 @@ pub(crate) fn execute_merge(
                                         .iter()
                                         .position(|c| c.name == assignment.column)
                                     {
-                                        updated_row[idx] = evaluate_value_expression(
+                                        updated_row[idx] = evaluate_assignment_value(
                                             &assignment.value,
+                                            &target_columns[idx],
                                             &combined_columns,
                                             &combined_row,
+                                            &*db,
                                         )?;
                                     }
                                 }
+                                evaluate_generated_columns_update(
+                                    &target_columns,
+                                    &mut updated_row,
+                                )?;
                                 coerce_row_to_column_types(&target_columns, &mut updated_row)?;
+                                validate_not_null_constraints(&target_columns, &updated_row)?;
+                                validate_unique_constraints_for_insert(
+                                    &db,
+                                    &target_columns,
+                                    &updated_row,
+                                    &stmt.target_table,
+                                    Some(row_idx),
+                                )?;
+                                validate_foreign_keys_for_update(
+                                    &db,
+                                    &target_columns,
+                                    &updated_row,
+                                )?;
+                                validate_check_constraints(&target_columns, &updated_row)?;
+                                validate_table_constraints_for_insert(
+                                    &db,
+                                    &target_columns,
+                                    &updated_row,
+                                    &stmt.target_table,
+                                    Some(row_idx),
+                                )?;
                                 let table =
                                     db.tables.get_mut(&stmt.target_table).ok_or_else(|| {
                                         RustqlError::TableNotFound(stmt.target_table.clone())
@@ -159,12 +186,34 @@ pub(crate) fn execute_merge(
                                     WalEntry::UpdateRow {
                                         table: stmt.target_table.clone(),
                                         row_id,
-                                        old_row,
+                                        old_row: old_row.clone(),
                                     },
                                 );
+                                handle_foreign_keys_for_update(
+                                    context,
+                                    &mut db,
+                                    &stmt.target_table,
+                                    &target_columns,
+                                    &old_row,
+                                    &updated_row,
+                                )?;
+                                ddl::update_indexes_on_update(
+                                    &mut db,
+                                    &stmt.target_table,
+                                    row_id,
+                                    &old_row,
+                                    &updated_row,
+                                )?;
                                 affected += 1;
                             }
                             MergeMatchedAction::Delete => {
+                                handle_foreign_keys_for_delete(
+                                    context,
+                                    &mut db,
+                                    &stmt.target_table,
+                                    &target_columns,
+                                    &target_row,
+                                )?;
                                 let table =
                                     db.tables.get_mut(&stmt.target_table).ok_or_else(|| {
                                         RustqlError::TableNotFound(stmt.target_table.clone())
@@ -185,6 +234,11 @@ pub(crate) fn execute_merge(
                                     },
                                 );
                                 let _ = table.remove_row_by_id(row_id);
+                                ddl::update_indexes_on_delete(
+                                    &mut db,
+                                    &stmt.target_table,
+                                    &[row_id],
+                                )?;
                                 affected += 1;
                             }
                         }
@@ -219,8 +273,9 @@ pub(crate) fn execute_merge(
                                         target_columns.iter().position(|c| c.name == *col_name)
                                         && i < values.len()
                                     {
-                                        new_row[col_idx] = evaluate_value_expression(
+                                        new_row[col_idx] = evaluate_merge_insert_value(
                                             &values[i],
+                                            &target_columns[col_idx],
                                             &combined_columns,
                                             &combined_row,
                                         )?;
@@ -229,20 +284,51 @@ pub(crate) fn execute_merge(
                             } else {
                                 for (i, val_expr) in values.iter().enumerate() {
                                     if i < new_row.len() {
-                                        new_row[i] = evaluate_value_expression(
+                                        new_row[i] = evaluate_merge_insert_value(
                                             val_expr,
+                                            &target_columns[i],
                                             &combined_columns,
                                             &combined_row,
                                         )?;
                                     }
                                 }
                             }
+                            apply_merge_auto_increment_values(
+                                &db,
+                                &stmt.target_table,
+                                &target_columns,
+                                &mut new_row,
+                            )?;
+                            evaluate_generated_columns(&target_columns, &mut new_row, columns)?;
                             coerce_row_to_column_types(&target_columns, &mut new_row)?;
+                            validate_not_null_constraints(&target_columns, &new_row)?;
+                            validate_foreign_keys_for_insert(&db, &target_columns, &new_row)?;
+                            validate_check_constraints(&target_columns, &new_row)?;
+                            validate_table_constraints_for_insert(
+                                &db,
+                                &target_columns,
+                                &new_row,
+                                &stmt.target_table,
+                                None,
+                            )?;
+                            validate_primary_keys_for_insert(
+                                &db,
+                                &target_columns,
+                                &new_row,
+                                &stmt.target_table,
+                            )?;
+                            validate_unique_constraints_for_insert(
+                                &db,
+                                &target_columns,
+                                &new_row,
+                                &stmt.target_table,
+                                None,
+                            )?;
 
                             let table = db.tables.get_mut(&stmt.target_table).ok_or_else(|| {
                                 RustqlError::TableNotFound(stmt.target_table.clone())
                             })?;
-                            let row_id = table.insert_row(new_row);
+                            let row_id = table.insert_row(new_row.clone());
                             record_wal_entry(
                                 context,
                                 WalEntry::InsertRow {
@@ -250,6 +336,12 @@ pub(crate) fn execute_merge(
                                     row_id,
                                 },
                             );
+                            ddl::update_indexes_on_insert(
+                                &mut db,
+                                &stmt.target_table,
+                                row_id,
+                                &new_row,
+                            )?;
                             affected += 1;
                         }
                     }
@@ -261,4 +353,33 @@ pub(crate) fn execute_merge(
 
     save_if_not_in_transaction(context, &db)?;
     Ok(command_result(CommandTag::Merge, affected as u64))
+}
+
+fn apply_merge_auto_increment_values(
+    db: &Database,
+    table_name: &str,
+    columns: &[ColumnDefinition],
+    row: &mut [Value],
+) -> Result<(), RustqlError> {
+    let table = db
+        .tables
+        .get(table_name)
+        .ok_or_else(|| RustqlError::TableNotFound(table_name.to_string()))?;
+
+    for (col_idx, col_def) in columns.iter().enumerate() {
+        if col_def.auto_increment && col_idx < row.len() && matches!(row[col_idx], Value::Null) {
+            let max_val = table
+                .rows
+                .iter()
+                .filter_map(|existing_row| match existing_row.get(col_idx) {
+                    Some(Value::Integer(value)) => Some(*value),
+                    _ => None,
+                })
+                .max()
+                .unwrap_or(0);
+            row[col_idx] = Value::Integer(max_val + 1);
+        }
+    }
+
+    Ok(())
 }

@@ -177,7 +177,7 @@ pub enum AggregateFunctionType {
 pub struct InsertStatement {
     pub table: String,
     pub columns: Option<Vec<String>>,
-    pub values: Vec<Vec<Value>>,
+    pub values: Vec<Vec<Expression>>,
     pub source_query: Option<Box<SelectStatement>>,
     pub on_conflict: Option<OnConflictClause>,
     pub returning: Option<Vec<Column>>,
@@ -207,6 +207,7 @@ pub struct UpdateStatement {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UpdateFrom {
     pub table: String,
+    pub alias: Option<String>,
     pub joins: Vec<Join>,
 }
 
@@ -395,6 +396,7 @@ pub enum MergeNotMatchedAction {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Expression {
+    Default,
     BinaryOp {
         left: Box<Expression>,
         op: BinaryOperator,
@@ -406,7 +408,7 @@ pub enum Expression {
     },
     In {
         left: Box<Expression>,
-        values: Vec<Value>,
+        values: Vec<Expression>,
     },
     IsNull {
         expr: Box<Expression>,
@@ -578,6 +580,7 @@ pub enum BinaryOperator {
     Divide,
     Like,
     ILike,
+    Escape,
     Between,
     In,
     Concat,
@@ -635,6 +638,7 @@ impl fmt::Display for Value {
 pub struct OrderByExpr {
     pub expr: Expression,
     pub asc: bool,
+    pub nulls_first: Option<bool>,
 }
 
 impl PartialEq for Value {

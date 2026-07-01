@@ -52,10 +52,10 @@ fn test_select_all() {
     execute(Statement::Insert(InsertStatement {
         table: "users".to_string(),
         columns: Some(vec!["id".into(), "name".into()]),
-        values: vec![
+        values: insert_values(vec![
             vec![Value::Integer(1), Value::Text("Alice".into())],
             vec![Value::Integer(2), Value::Text("Bob".into())],
-        ],
+        ]),
         source_query: None,
         on_conflict: None,
         returning: None,
@@ -130,11 +130,11 @@ fn test_count_distinct_values() {
     execute(Statement::Insert(InsertStatement {
         table: "cities".into(),
         columns: Some(vec!["id".into(), "city".into()]),
-        values: vec![
+        values: insert_values(vec![
             vec![Value::Integer(1), Value::Text("Paris".into())],
             vec![Value::Integer(2), Value::Text("Paris".into())],
             vec![Value::Integer(3), Value::Text("London".into())],
-        ],
+        ]),
         source_query: None,
         on_conflict: None,
         returning: None,
@@ -216,12 +216,12 @@ fn test_sum_distinct_values() {
     execute(Statement::Insert(InsertStatement {
         table: "purchases".into(),
         columns: Some(vec!["id".into(), "amount".into()]),
-        values: vec![
+        values: insert_values(vec![
             vec![Value::Integer(1), Value::Float(10.0)],
             vec![Value::Integer(2), Value::Float(10.0)],
             vec![Value::Integer(3), Value::Float(20.0)],
             vec![Value::Integer(4), Value::Null],
-        ],
+        ]),
         source_query: None,
         on_conflict: None,
         returning: None,
@@ -260,6 +260,51 @@ fn test_sum_distinct_values() {
 
     let output = execute(stmt).unwrap();
     assert!(output.contains("30"));
+}
+
+#[test]
+fn test_numeric_distinct_aggregates_use_numeric_equality_semantics() {
+    let _guard = setup_test();
+
+    let rows = query_rows(
+        "SELECT COUNT(DISTINCT value), SUM(DISTINCT value), AVG(DISTINCT value) \
+         FROM (VALUES (1), (1.0), (2), (2.0), (NULL)) AS t(value)",
+    )
+    .unwrap();
+
+    assert_eq!(
+        rows.rows,
+        vec![vec![
+            Value::Integer(2),
+            Value::Float(3.0),
+            Value::Float(1.5),
+        ]]
+    );
+}
+
+#[test]
+fn test_select_distinct_uses_numeric_equality_semantics() {
+    let _guard = setup_test();
+
+    let rows = query_rows(
+        "SELECT DISTINCT a, label \
+         FROM (VALUES (1, 'same'), (1.0, 'same'), (1, 'other'), ('1', 'same')) AS t(a, label) \
+         ORDER BY label, a",
+    )
+    .unwrap();
+
+    rows.assert_columns(&["a", "label"]);
+    assert_eq!(
+        rows.rows,
+        vec![
+            vec![Value::Integer(1), Value::Text("other".to_string())],
+            vec![Value::Integer(1), Value::Text("same".to_string())],
+            vec![
+                Value::Text("1".to_string()),
+                Value::Text("same".to_string())
+            ],
+        ]
+    );
 }
 
 #[test]
@@ -303,13 +348,13 @@ fn test_min_distinct_values() {
     execute(Statement::Insert(InsertStatement {
         table: "scores".into(),
         columns: Some(vec!["id".into(), "score".into()]),
-        values: vec![
+        values: insert_values(vec![
             vec![Value::Integer(1), Value::Integer(100)],
             vec![Value::Integer(2), Value::Integer(100)],
             vec![Value::Integer(3), Value::Integer(50)],
             vec![Value::Integer(4), Value::Integer(75)],
             vec![Value::Integer(5), Value::Null],
-        ],
+        ]),
         source_query: None,
         on_conflict: None,
         returning: None,
@@ -392,13 +437,13 @@ fn test_max_distinct_values() {
     execute(Statement::Insert(InsertStatement {
         table: "prices".into(),
         columns: Some(vec!["id".into(), "price".into()]),
-        values: vec![
+        values: insert_values(vec![
             vec![Value::Integer(1), Value::Float(25.5)],
             vec![Value::Integer(2), Value::Float(25.5)],
             vec![Value::Integer(3), Value::Float(50.0)],
             vec![Value::Integer(4), Value::Float(30.0)],
             vec![Value::Integer(5), Value::Null],
-        ],
+        ]),
         source_query: None,
         on_conflict: None,
         returning: None,
@@ -481,13 +526,13 @@ fn test_avg_distinct_values() {
     execute(Statement::Insert(InsertStatement {
         table: "grades".to_string(),
         columns: Some(vec!["id".into(), "grade".into()]),
-        values: vec![
+        values: insert_values(vec![
             vec![Value::Integer(1), Value::Float(85.0)],
             vec![Value::Integer(2), Value::Float(85.0)],
             vec![Value::Integer(3), Value::Float(90.0)],
             vec![Value::Integer(4), Value::Float(95.0)],
             vec![Value::Integer(5), Value::Null],
-        ],
+        ]),
         source_query: None,
         on_conflict: None,
         returning: None,

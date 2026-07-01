@@ -1,5 +1,6 @@
 mod common;
 use common::*;
+use rustql::ast::Value;
 use std::sync::Mutex;
 
 static TEST_MUTEX: Mutex<()> = Mutex::new(());
@@ -111,6 +112,69 @@ fn test_is_not_distinct_from() {
 }
 
 #[test]
+fn test_is_distinct_from_uses_numeric_equality_semantics() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    reset_database();
+
+    execute_sql("CREATE TABLE numeric_distinct (id INTEGER, i INTEGER, f FLOAT)").unwrap();
+    execute_sql(
+        "INSERT INTO numeric_distinct VALUES \
+         (1, 1, 1.0), \
+         (2, 2, 2.5), \
+         (3, NULL, 3.0), \
+         (4, 4, NULL)",
+    )
+    .unwrap();
+
+    let rows = query_rows(
+        "SELECT id \
+         FROM numeric_distinct \
+         WHERE i IS DISTINCT FROM f \
+         ORDER BY id",
+    )
+    .unwrap();
+
+    rows.assert_columns(&["id"]);
+    assert_eq!(
+        rows.rows,
+        vec![
+            vec![Value::Integer(2)],
+            vec![Value::Integer(3)],
+            vec![Value::Integer(4)],
+        ]
+    );
+}
+
+#[test]
+fn test_is_not_distinct_from_uses_numeric_equality_semantics() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    reset_database();
+
+    execute_sql("CREATE TABLE numeric_not_distinct (id INTEGER, i INTEGER, f FLOAT)").unwrap();
+    execute_sql(
+        "INSERT INTO numeric_not_distinct VALUES \
+         (1, 1, 1.0), \
+         (2, 2, 2.5), \
+         (3, NULL, NULL)",
+    )
+    .unwrap();
+
+    let rows = query_rows(
+        "SELECT id \
+         FROM numeric_not_distinct \
+         WHERE i IS NOT DISTINCT FROM f \
+         ORDER BY id",
+    )
+    .unwrap();
+
+    rows.assert_columns(&["id"]);
+    assert_eq!(
+        rows.rows,
+        vec![vec![Value::Integer(1)], vec![Value::Integer(3)]]
+    );
+}
+
+#[test]
 fn test_double_colon_cast() {
     let _lock = TEST_MUTEX.lock().unwrap();
     reset_database();
@@ -190,6 +254,46 @@ fn test_fetch_with_ties() {
 }
 
 #[test]
+fn test_fetch_with_ties_uses_order_comparison_semantics() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    reset_database();
+
+    let rows = query_rows(
+        "SELECT label \
+         FROM (VALUES (1, 'int'), (1.0, 'float'), (2, 'two')) AS t(k, label) \
+         ORDER BY k \
+         FETCH FIRST 1 ROW WITH TIES",
+    )
+    .unwrap();
+
+    rows.assert_columns(&["label"]);
+    assert_eq!(rows.rows.len(), 2);
+    assert!(rows.rows.contains(&vec![Value::Text("int".to_string())]));
+    assert!(rows.rows.contains(&vec![Value::Text("float".to_string())]));
+}
+
+#[test]
+fn test_fetch_with_ties_respects_nulls_last() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    reset_database();
+
+    execute_sql("CREATE TABLE fetch_null_ties (id INTEGER, score INTEGER)").unwrap();
+    execute_sql("INSERT INTO fetch_null_ties VALUES (1, NULL), (2, NULL), (3, 10), (4, 5)")
+        .unwrap();
+
+    let rows = query_rows(
+        "SELECT id \
+         FROM fetch_null_ties \
+         ORDER BY score DESC NULLS LAST \
+         FETCH FIRST 1 ROW WITH TIES",
+    )
+    .unwrap();
+
+    rows.assert_columns(&["id"]);
+    assert_eq!(rows.rows, vec![vec![Value::Integer(3)]]);
+}
+
+#[test]
 fn test_generate_series_basic() {
     let _lock = TEST_MUTEX.lock().unwrap();
     reset_database();
@@ -246,6 +350,78 @@ fn test_generate_series_negative_step() {
         5,
         "Expected 5 rows (5,4,3,2,1), got: {:?}",
         result
+    );
+}
+
+#[test]
+fn test_generate_series_rejects_invalid_arguments() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    reset_database();
+
+    let one_arg = execute_sql("SELECT * FROM GENERATE_SERIES(1)").unwrap_err();
+    assert!(one_arg.contains("expects 2 or 3 arguments"));
+
+    let too_many = execute_sql("SELECT * FROM GENERATE_SERIES(1, 2, 1, 4)").unwrap_err();
+    assert!(too_many.contains("expects 2 or 3 arguments"));
+
+    let text_arg = execute_sql("SELECT * FROM GENERATE_SERIES(1, '5')").unwrap_err();
+    assert!(text_arg.contains("requires integer values"));
+}
+
+#[test]
+fn test_generate_series_handles_boundary_overflow() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    reset_database();
+
+    let rows =
+        query_rows("SELECT * FROM GENERATE_SERIES(9223372036854775806, 9223372036854775807)")
+            .unwrap();
+
+    rows.assert_columns(&["generate_series"]);
+    assert_eq!(
+        rows.rows,
+        vec![
+            vec![Value::Integer(9_223_372_036_854_775_806)],
+            vec![Value::Integer(9_223_372_036_854_775_807)],
+        ]
+    );
+}
+
+#[test]
+fn test_generate_series_join_uses_function_relation_label() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    reset_database();
+
+    execute_sql("CREATE TABLE series_flags (id INTEGER, label TEXT)").unwrap();
+    execute_sql("INSERT INTO series_flags VALUES (1, 'one'), (3, 'three')").unwrap();
+
+    let rows = query_rows(
+        "SELECT * \
+         FROM GENERATE_SERIES(1, 3) \
+         JOIN series_flags ON generate_series = series_flags.id \
+         ORDER BY generate_series",
+    )
+    .unwrap();
+
+    rows.assert_columns(&[
+        "generate_series.generate_series",
+        "series_flags.id",
+        "series_flags.label",
+    ]);
+    assert_eq!(
+        rows.rows,
+        vec![
+            vec![
+                Value::Integer(1),
+                Value::Integer(1),
+                Value::Text("one".to_string()),
+            ],
+            vec![
+                Value::Integer(3),
+                Value::Integer(3),
+                Value::Text("three".to_string()),
+            ],
+        ]
     );
 }
 
@@ -380,6 +556,31 @@ fn test_distinct_on() {
         result.contains("carrot"),
         "Expected cheapest veggie 'carrot', got: {:?}",
         result
+    );
+}
+
+#[test]
+fn test_distinct_on_uses_numeric_equality_semantics() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    reset_database();
+
+    let rows = query_rows(
+        "SELECT DISTINCT ON (k) k, label \
+         FROM (VALUES (1, 'int'), (1.0, 'float'), ('1', 'text')) AS t(k, label) \
+         ORDER BY k, label",
+    )
+    .unwrap();
+
+    rows.assert_columns(&["k", "label"]);
+    assert_eq!(
+        rows.rows,
+        vec![
+            vec![Value::Float(1.0), Value::Text("float".to_string())],
+            vec![
+                Value::Text("1".to_string()),
+                Value::Text("text".to_string())
+            ],
+        ]
     );
 }
 
