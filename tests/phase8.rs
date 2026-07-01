@@ -1,5 +1,6 @@
 mod common;
 use common::*;
+use rustql::ast::Value;
 use std::sync::Mutex;
 
 static TEST_MUTEX: Mutex<()> = Mutex::new(());
@@ -46,6 +47,27 @@ fn test_merge_when_matched_update() {
 }
 
 #[test]
+fn test_merge_when_matched_update_set_default() {
+    let _g = setup();
+    execute_sql("CREATE TABLE merge_default (id INTEGER, label TEXT DEFAULT 'fallback', qty INTEGER DEFAULT 5)").unwrap();
+    execute_sql("INSERT INTO merge_default VALUES (1, 'custom', 99)").unwrap();
+    execute_sql("CREATE TABLE merge_default_source (id INTEGER)").unwrap();
+    execute_sql("INSERT INTO merge_default_source VALUES (1)").unwrap();
+
+    execute_sql(
+        "MERGE INTO merge_default USING merge_default_source ON merge_default.id = merge_default_source.id \
+         WHEN MATCHED THEN UPDATE SET label = DEFAULT, qty = DEFAULT",
+    )
+    .unwrap();
+
+    let result = execute_sql("SELECT label, qty FROM merge_default WHERE id = 1").unwrap();
+    assert!(result.contains("fallback"), "got: {:?}", result);
+    assert!(result.contains("5"), "got: {:?}", result);
+    assert!(!result.contains("custom"), "got: {:?}", result);
+    assert!(!result.contains("99"), "got: {:?}", result);
+}
+
+#[test]
 fn test_merge_when_not_matched_insert() {
     let _g = setup();
     execute_sql("CREATE TABLE mt2 (tid INTEGER, name TEXT)").unwrap();
@@ -77,6 +99,249 @@ fn test_merge_when_not_matched_insert() {
         .cloned()
         .collect();
     assert_eq!(data_lines.len(), 2, "Expected 2 rows, got: {:?}", result);
+}
+
+#[test]
+fn test_merge_when_not_matched_insert_uses_default_markers() {
+    let _g = setup();
+    execute_sql(
+        "CREATE TABLE merge_insert_defaults (
+            id INTEGER,
+            label TEXT DEFAULT 'fallback',
+            qty INTEGER DEFAULT 5,
+            note TEXT
+        )",
+    )
+    .unwrap();
+    execute_sql("CREATE TABLE merge_insert_default_source (id INTEGER, note TEXT)").unwrap();
+    execute_sql("INSERT INTO merge_insert_default_source VALUES (1, 'source-note')").unwrap();
+
+    execute_sql(
+        "MERGE INTO merge_insert_defaults USING merge_insert_default_source \
+         ON merge_insert_defaults.id = merge_insert_default_source.id \
+         WHEN NOT MATCHED THEN INSERT (id, label, qty, note) \
+         VALUES (merge_insert_default_source.id, DEFAULT, DEFAULT, merge_insert_default_source.note)",
+    )
+    .unwrap();
+
+    assert_rows(
+        "SELECT id, label, qty, note FROM merge_insert_defaults",
+        &["id", "label", "qty", "note"],
+        vec![vec![
+            Value::Integer(1),
+            Value::Text("fallback".to_string()),
+            Value::Integer(5),
+            Value::Text("source-note".to_string()),
+        ]],
+    );
+}
+
+#[test]
+fn test_merge_when_not_matched_insert_full_row_defaults() {
+    let _g = setup();
+    execute_sql(
+        "CREATE TABLE merge_insert_full_defaults (
+            id INTEGER,
+            label TEXT DEFAULT 'fallback',
+            qty INTEGER DEFAULT 5
+        )",
+    )
+    .unwrap();
+    execute_sql("CREATE TABLE merge_insert_full_source (id INTEGER)").unwrap();
+    execute_sql("INSERT INTO merge_insert_full_source VALUES (2)").unwrap();
+
+    execute_sql(
+        "MERGE INTO merge_insert_full_defaults USING merge_insert_full_source \
+         ON merge_insert_full_defaults.id = merge_insert_full_source.id \
+         WHEN NOT MATCHED THEN INSERT VALUES (merge_insert_full_source.id, DEFAULT, DEFAULT)",
+    )
+    .unwrap();
+
+    assert_rows(
+        "SELECT id, label, qty FROM merge_insert_full_defaults",
+        &["id", "label", "qty"],
+        vec![vec![
+            Value::Integer(2),
+            Value::Text("fallback".to_string()),
+            Value::Integer(5),
+        ]],
+    );
+}
+
+#[test]
+fn test_merge_update_recomputes_generated_columns_and_indexes() {
+    let _g = setup();
+    execute_sql(
+        "CREATE TABLE merge_generated_idx (
+            id INTEGER,
+            price INTEGER,
+            qty INTEGER,
+            total INTEGER GENERATED ALWAYS AS (price * qty)
+        )",
+    )
+    .unwrap();
+    execute_sql("INSERT INTO merge_generated_idx (id, price, qty) VALUES (1, 2, 3)").unwrap();
+    execute_sql("CREATE INDEX idx_merge_generated_total ON merge_generated_idx (total)").unwrap();
+    execute_sql("CREATE TABLE merge_generated_source (id INTEGER, price INTEGER, qty INTEGER)")
+        .unwrap();
+    execute_sql("INSERT INTO merge_generated_source VALUES (1, 5, 4)").unwrap();
+
+    assert_command_sql(
+        "MERGE INTO merge_generated_idx USING merge_generated_source
+         ON merge_generated_idx.id = merge_generated_source.id
+         WHEN MATCHED THEN UPDATE SET price = merge_generated_source.price, qty = merge_generated_source.qty",
+        CommandTag::Merge,
+        1,
+    );
+
+    assert_rows(
+        "SELECT id, total FROM merge_generated_idx WHERE total = 20",
+        &["id", "total"],
+        vec![vec![Value::Integer(1), Value::Integer(20)]],
+    );
+    assert_rows(
+        "SELECT id, total FROM merge_generated_idx WHERE total = 6",
+        &["id", "total"],
+        Vec::new(),
+    );
+}
+
+#[test]
+fn test_merge_insert_applies_auto_increment_generated_columns_and_indexes() {
+    let _g = setup();
+    execute_sql(
+        "CREATE TABLE merge_insert_runtime (
+            id INTEGER AUTO_INCREMENT,
+            price INTEGER,
+            qty INTEGER,
+            total INTEGER GENERATED ALWAYS AS (price * qty)
+        )",
+    )
+    .unwrap();
+    execute_sql("CREATE INDEX idx_merge_insert_runtime_total ON merge_insert_runtime (total)")
+        .unwrap();
+    execute_sql("CREATE TABLE merge_insert_runtime_source (price INTEGER, qty INTEGER)").unwrap();
+    execute_sql("INSERT INTO merge_insert_runtime_source VALUES (3, 4)").unwrap();
+
+    assert_command_sql(
+        "MERGE INTO merge_insert_runtime USING merge_insert_runtime_source
+         ON merge_insert_runtime.price = merge_insert_runtime_source.price
+         WHEN NOT MATCHED THEN INSERT (price, qty)
+         VALUES (merge_insert_runtime_source.price, merge_insert_runtime_source.qty)",
+        CommandTag::Merge,
+        1,
+    );
+
+    assert_rows(
+        "SELECT id, total FROM merge_insert_runtime WHERE total = 12",
+        &["id", "total"],
+        vec![vec![Value::Integer(1), Value::Integer(12)]],
+    );
+}
+
+#[test]
+fn test_merge_insert_validates_unique_constraints() {
+    let _g = setup();
+    execute_sql(
+        "CREATE TABLE merge_unique_target (
+            id INTEGER PRIMARY KEY,
+            code TEXT UNIQUE,
+            amount INTEGER CHECK (amount > 0)
+        )",
+    )
+    .unwrap();
+    execute_sql("INSERT INTO merge_unique_target VALUES (1, 'dup', 1)").unwrap();
+    execute_sql("CREATE TABLE merge_unique_source (id INTEGER, code TEXT, amount INTEGER)")
+        .unwrap();
+    execute_sql("INSERT INTO merge_unique_source VALUES (2, 'dup', 5)").unwrap();
+
+    let err = execute_sql(
+        "MERGE INTO merge_unique_target USING merge_unique_source
+         ON merge_unique_target.id = merge_unique_source.id
+         WHEN NOT MATCHED THEN INSERT (id, code, amount)
+         VALUES (merge_unique_source.id, merge_unique_source.code, merge_unique_source.amount)",
+    )
+    .unwrap_err();
+
+    assert!(err.contains("Unique"), "unexpected error: {err}");
+    assert_rows(
+        "SELECT id, code, amount FROM merge_unique_target",
+        &["id", "code", "amount"],
+        vec![vec![
+            Value::Integer(1),
+            Value::Text("dup".to_string()),
+            Value::Integer(1),
+        ]],
+    );
+}
+
+#[test]
+fn test_merge_update_validates_check_constraints() {
+    let _g = setup();
+    execute_sql("CREATE TABLE merge_check_target (id INTEGER, amount INTEGER CHECK (amount > 0))")
+        .unwrap();
+    execute_sql("INSERT INTO merge_check_target VALUES (1, 5)").unwrap();
+    execute_sql("CREATE TABLE merge_check_source (id INTEGER, amount INTEGER)").unwrap();
+    execute_sql("INSERT INTO merge_check_source VALUES (1, -10)").unwrap();
+
+    let err = execute_sql(
+        "MERGE INTO merge_check_target USING merge_check_source
+         ON merge_check_target.id = merge_check_source.id
+         WHEN MATCHED THEN UPDATE SET amount = merge_check_source.amount",
+    )
+    .unwrap_err();
+
+    assert!(err.contains("CHECK"), "unexpected error: {err}");
+    assert_rows(
+        "SELECT id, amount FROM merge_check_target",
+        &["id", "amount"],
+        vec![vec![Value::Integer(1), Value::Integer(5)]],
+    );
+}
+
+#[test]
+fn test_merge_applies_foreign_key_update_and_delete_actions() {
+    let _g = setup();
+    execute_sql("CREATE TABLE merge_fk_parent (id INTEGER PRIMARY KEY)").unwrap();
+    execute_sql(
+        "CREATE TABLE merge_fk_update_child (
+            id INTEGER PRIMARY KEY,
+            parent_id INTEGER REFERENCES merge_fk_parent(id) ON UPDATE CASCADE
+        )",
+    )
+    .unwrap();
+    execute_sql(
+        "CREATE TABLE merge_fk_delete_child (
+            id INTEGER PRIMARY KEY,
+            parent_id INTEGER REFERENCES merge_fk_parent(id) ON DELETE CASCADE
+        )",
+    )
+    .unwrap();
+    execute_sql("INSERT INTO merge_fk_parent VALUES (1), (3)").unwrap();
+    execute_sql("INSERT INTO merge_fk_update_child VALUES (10, 1)").unwrap();
+    execute_sql("INSERT INTO merge_fk_delete_child VALUES (20, 3)").unwrap();
+    execute_sql("CREATE TABLE merge_fk_source (old_id INTEGER, new_id INTEGER)").unwrap();
+    execute_sql("INSERT INTO merge_fk_source VALUES (1, 2), (3, 3)").unwrap();
+
+    assert_command_sql(
+        "MERGE INTO merge_fk_parent USING merge_fk_source
+         ON merge_fk_parent.id = merge_fk_source.old_id
+         WHEN MATCHED AND merge_fk_source.old_id = 1 THEN UPDATE SET id = merge_fk_source.new_id
+         WHEN MATCHED AND merge_fk_source.old_id = 3 THEN DELETE",
+        CommandTag::Merge,
+        2,
+    );
+
+    assert_rows(
+        "SELECT parent_id FROM merge_fk_update_child",
+        &["parent_id"],
+        vec![vec![Value::Integer(2)]],
+    );
+    assert_rows(
+        "SELECT id, parent_id FROM merge_fk_delete_child",
+        &["id", "parent_id"],
+        Vec::new(),
+    );
 }
 
 #[test]
@@ -439,6 +704,28 @@ fn test_partial_index_not_used_without_matching_filter() {
     let result = execute_sql("SELECT id FROM pidx_guard WHERE val = 10 ORDER BY id").unwrap();
     assert!(result.contains("1"), "got: {result:?}");
     assert!(result.contains("2"), "got: {result:?}");
+}
+
+#[test]
+fn test_partial_index_numeric_filter_implication_uses_comparison_semantics() {
+    let _g = setup();
+    execute_sql("CREATE TABLE pidx_numeric (id INTEGER, active INTEGER, val INTEGER)").unwrap();
+    execute_sql("INSERT INTO pidx_numeric VALUES (1, 1, 30)").unwrap();
+    execute_sql("INSERT INTO pidx_numeric VALUES (2, 0, 30)").unwrap();
+    execute_sql("CREATE INDEX idx_numeric_active ON pidx_numeric(val) WHERE active = 1.0").unwrap();
+
+    let explain =
+        execute_sql("EXPLAIN SELECT id FROM pidx_numeric WHERE val = 30 AND active = 1").unwrap();
+    assert!(
+        explain.contains("Index Scan using idx_numeric_active"),
+        "expected numeric-equivalent partial-index use: {explain:?}"
+    );
+
+    let result =
+        execute_sql("SELECT id FROM pidx_numeric WHERE val = 30 AND active = 1 ORDER BY id")
+            .unwrap();
+    assert!(result.contains("1"), "got: {result:?}");
+    assert!(!result.contains("2"), "got: {result:?}");
 }
 
 #[test]

@@ -1,5 +1,6 @@
 mod common;
 use common::*;
+use rustql::ast::Value;
 use std::sync::Mutex;
 
 static TEST_MUTEX: Mutex<()> = Mutex::new(());
@@ -26,6 +27,18 @@ fn test_insert_with_column_names() {
     assert!(output.contains("1"));
     assert!(output.contains("Alice"));
     assert!(output.contains("25"));
+}
+
+#[test]
+fn test_escaped_string_literal_insert_and_predicate() {
+    let _guard = setup_test();
+
+    execute_sql("CREATE TABLE notes (id INTEGER, body TEXT)").unwrap();
+    execute_sql("INSERT INTO notes VALUES (1, 'Bob''s note')").unwrap();
+
+    let rows = query_rows("SELECT body FROM notes WHERE body = 'Bob''s note'").unwrap();
+    rows.assert_columns(&["body"]);
+    assert_eq!(rows.rows, vec![vec![Value::Text("Bob's note".to_string())]]);
 }
 
 #[test]
@@ -124,6 +137,26 @@ fn test_default_values() {
     let result = execute_sql("SELECT * FROM users WHERE id = 2").unwrap();
     assert!(result.contains("Alice"));
     assert!(result.contains("25"));
+}
+
+#[test]
+fn test_boolean_literals_in_insert_and_defaults() {
+    let _guard = setup_test();
+
+    execute_sql("CREATE TABLE flags (id INTEGER, active BOOLEAN DEFAULT TRUE)").unwrap();
+    execute_sql("INSERT INTO flags (id, active) VALUES (1, FALSE), (2, true)").unwrap();
+    execute_sql("INSERT INTO flags (id) VALUES (3)").unwrap();
+
+    let rows = query_rows("SELECT id, active FROM flags ORDER BY id").unwrap();
+    rows.assert_columns(&["id", "active"]);
+    assert_eq!(
+        rows.rows,
+        vec![
+            vec![Value::Integer(1), Value::Boolean(false)],
+            vec![Value::Integer(2), Value::Boolean(true)],
+            vec![Value::Integer(3), Value::Boolean(true)],
+        ]
+    );
 }
 
 #[test]

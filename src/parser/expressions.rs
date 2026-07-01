@@ -1,205 +1,6 @@
 use super::*;
 
 impl Parser {
-    pub(super) fn parse_arithmetic_expression(&mut self) -> Result<Expression, RustqlError> {
-        self.parse_arithmetic_term()
-    }
-
-    pub(super) fn parse_arithmetic_term(&mut self) -> Result<Expression, RustqlError> {
-        let mut expr = self.parse_arithmetic_factor()?;
-
-        loop {
-            let op = match self.current_token() {
-                Token::Plus => BinaryOperator::Plus,
-                Token::Minus => BinaryOperator::Minus,
-                Token::Concat => BinaryOperator::Concat,
-                _ => break,
-            };
-
-            self.advance();
-            let right = self.parse_arithmetic_factor()?;
-            expr = Expression::BinaryOp {
-                left: Box::new(expr),
-                op,
-                right: Box::new(right),
-            };
-        }
-
-        Ok(expr)
-    }
-
-    pub(super) fn parse_arithmetic_factor(&mut self) -> Result<Expression, RustqlError> {
-        let mut expr = self.parse_arithmetic_unary()?;
-
-        loop {
-            let op = match self.current_token() {
-                Token::Star => {
-                    self.advance();
-                    BinaryOperator::Multiply
-                }
-                Token::Divide => {
-                    self.advance();
-                    BinaryOperator::Divide
-                }
-                _ => break,
-            };
-
-            let right = self.parse_arithmetic_unary()?;
-            expr = Expression::BinaryOp {
-                left: Box::new(expr),
-                op,
-                right: Box::new(right),
-            };
-        }
-
-        Ok(expr)
-    }
-
-    pub(super) fn parse_arithmetic_unary(&mut self) -> Result<Expression, RustqlError> {
-        match self.current_token() {
-            Token::Minus => {
-                self.advance();
-                Ok(Expression::UnaryOp {
-                    op: UnaryOperator::Minus,
-                    expr: Box::new(self.parse_arithmetic_unary()?),
-                })
-            }
-            Token::Plus => {
-                self.advance();
-                self.parse_arithmetic_unary()
-            }
-            _ => self.parse_arithmetic_primary(),
-        }
-    }
-
-    pub(super) fn parse_arithmetic_primary(&mut self) -> Result<Expression, RustqlError> {
-        let expr = match self.current_token() {
-            Token::LeftParen => {
-                self.advance();
-                let expr = self.parse_arithmetic_expression()?;
-                self.consume(Token::RightParen)?;
-                expr
-            }
-            Token::Case => self.parse_case_expression()?,
-            Token::Cast => self.parse_cast_expression()?,
-            Token::Upper
-            | Token::Lower
-            | Token::Length
-            | Token::Substring
-            | Token::Abs
-            | Token::Round
-            | Token::Coalesce
-            | Token::Trim
-            | Token::Replace
-            | Token::Position
-            | Token::Instr
-            | Token::Ceil
-            | Token::Ceiling
-            | Token::Floor
-            | Token::Sqrt
-            | Token::Power
-            | Token::Mod
-            | Token::Now
-            | Token::Year
-            | Token::Month
-            | Token::Day
-            | Token::DateAdd
-            | Token::Datediff
-            | Token::ConcatFn
-            | Token::Ltrim
-            | Token::Rtrim
-            | Token::Ascii
-            | Token::Chr
-            | Token::Sin
-            | Token::Cos
-            | Token::Tan
-            | Token::Asin
-            | Token::Acos
-            | Token::Atan
-            | Token::Atan2
-            | Token::Random
-            | Token::Degrees
-            | Token::Radians
-            | Token::Quarter
-            | Token::Week
-            | Token::DayOfWeek
-            | Token::Pi
-            | Token::Trunc
-            | Token::Log10
-            | Token::Log2
-            | Token::Cbrt
-            | Token::Gcd
-            | Token::Lcm
-            | Token::Initcap
-            | Token::SplitPart
-            | Token::Translate
-            | Token::RegexpMatch
-            | Token::RegexpReplace => self.parse_scalar_function()?,
-            Token::Identifier(name) => {
-                let name = name.clone();
-                self.advance();
-                Expression::Column(name)
-            }
-            Token::Number(n) => {
-                let n = *n;
-                self.advance();
-                Expression::Value(Value::Integer(n))
-            }
-            Token::Float(n) => {
-                let n = *n;
-                self.advance();
-                Expression::Value(Value::Float(n))
-            }
-            Token::StringLiteral(s) => {
-                let s = s.clone();
-                self.advance();
-                Expression::Value(Value::Text(s))
-            }
-            Token::Null => {
-                self.advance();
-                Expression::Value(Value::Null)
-            }
-            Token::GenerateSeries
-            | Token::Filter
-            | Token::Lateral
-            | Token::Grouping
-            | Token::Sets
-            | Token::Cube
-            | Token::Rollup
-            | Token::Fetch
-            | Token::First
-            | Token::Next
-            | Token::Only
-            | Token::Ties
-            | Token::Row
-            | Token::Window
-            | Token::Merge
-            | Token::Matched
-            | Token::Generated
-            | Token::Always
-            | Token::Stored => {
-                let name = token_to_string(self.current_token()).to_lowercase();
-                self.advance();
-                Expression::Column(name)
-            }
-            _ => {
-                return Err(RustqlError::ParseError(format!(
-                    "Unexpected token in expression: {:?}",
-                    self.current_token()
-                )));
-            }
-        };
-        if *self.current_token() == Token::DoubleColon {
-            self.advance();
-            let data_type = self.parse_data_type()?;
-            return Ok(Expression::Cast {
-                expr: Box::new(expr),
-                data_type,
-            });
-        }
-        Ok(expr)
-    }
-
     pub(super) fn parse_case_expression(&mut self) -> Result<Expression, RustqlError> {
         self.consume(Token::Case)?;
         let operand = if *self.current_token() != Token::When {
@@ -654,6 +455,21 @@ impl Parser {
         }
     }
 
+    fn parse_like_pattern(&mut self) -> Result<Expression, RustqlError> {
+        let pattern = self.parse_term()?;
+        if *self.current_token() == Token::Escape {
+            self.advance();
+            let escape = self.parse_term()?;
+            Ok(Expression::BinaryOp {
+                left: Box::new(pattern),
+                op: BinaryOperator::Escape,
+                right: Box::new(escape),
+            })
+        } else {
+            Ok(pattern)
+        }
+    }
+
     pub(super) fn parse_comparison(&mut self) -> Result<Expression, RustqlError> {
         let mut expr = self.parse_term()?;
 
@@ -751,7 +567,7 @@ impl Parser {
                 }
                 Token::Like => {
                     self.advance();
-                    let right = self.parse_term()?;
+                    let right = self.parse_like_pattern()?;
                     expr = Expression::BinaryOp {
                         left: Box::new(expr),
                         op: BinaryOperator::Like,
@@ -760,7 +576,7 @@ impl Parser {
                 }
                 Token::ILike => {
                     self.advance();
-                    let right = self.parse_term()?;
+                    let right = self.parse_like_pattern()?;
                     expr = Expression::BinaryOp {
                         left: Box::new(expr),
                         op: BinaryOperator::ILike,
@@ -785,7 +601,7 @@ impl Parser {
                     } else {
                         let mut values = Vec::new();
                         while *self.current_token() != Token::RightParen {
-                            values.push(self.parse_value()?);
+                            values.push(self.parse_expression()?);
                             if *self.current_token() == Token::Comma {
                                 self.advance();
                             }
@@ -797,6 +613,96 @@ impl Parser {
                             values,
                         };
                     }
+                }
+                Token::Not => {
+                    self.advance();
+                    expr = match self.current_token() {
+                        Token::Like => {
+                            self.advance();
+                            let right = self.parse_like_pattern()?;
+                            Expression::UnaryOp {
+                                op: UnaryOperator::Not,
+                                expr: Box::new(Expression::BinaryOp {
+                                    left: Box::new(expr),
+                                    op: BinaryOperator::Like,
+                                    right: Box::new(right),
+                                }),
+                            }
+                        }
+                        Token::ILike => {
+                            self.advance();
+                            let right = self.parse_like_pattern()?;
+                            Expression::UnaryOp {
+                                op: UnaryOperator::Not,
+                                expr: Box::new(Expression::BinaryOp {
+                                    left: Box::new(expr),
+                                    op: BinaryOperator::ILike,
+                                    right: Box::new(right),
+                                }),
+                            }
+                        }
+                        Token::In => {
+                            self.advance();
+                            if *self.current_token() != Token::LeftParen {
+                                return Err(RustqlError::ParseError(
+                                    "Expected '(' after NOT IN".to_string(),
+                                ));
+                            }
+                            self.advance();
+
+                            let in_expr = if *self.current_token() == Token::Select {
+                                let subquery_stmt = self.parse_select_inner(Vec::new())?;
+                                self.consume(Token::RightParen)?;
+                                Expression::BinaryOp {
+                                    left: Box::new(expr),
+                                    op: BinaryOperator::In,
+                                    right: Box::new(Expression::Subquery(Box::new(subquery_stmt))),
+                                }
+                            } else {
+                                let mut values = Vec::new();
+                                while *self.current_token() != Token::RightParen {
+                                    values.push(self.parse_expression()?);
+                                    if *self.current_token() == Token::Comma {
+                                        self.advance();
+                                    }
+                                }
+                                self.consume(Token::RightParen)?;
+
+                                Expression::In {
+                                    left: Box::new(expr),
+                                    values,
+                                }
+                            };
+
+                            Expression::UnaryOp {
+                                op: UnaryOperator::Not,
+                                expr: Box::new(in_expr),
+                            }
+                        }
+                        Token::Between => {
+                            self.advance();
+                            let left_bound = self.parse_term()?;
+                            self.consume(Token::And)?;
+                            let right_bound = self.parse_term()?;
+                            Expression::UnaryOp {
+                                op: UnaryOperator::Not,
+                                expr: Box::new(Expression::BinaryOp {
+                                    left: Box::new(expr),
+                                    op: BinaryOperator::Between,
+                                    right: Box::new(Expression::BinaryOp {
+                                        left: Box::new(left_bound),
+                                        op: BinaryOperator::And,
+                                        right: Box::new(right_bound),
+                                    }),
+                                }),
+                            }
+                        }
+                        _ => {
+                            return Err(RustqlError::ParseError(
+                                "Expected IN, LIKE, ILIKE, or BETWEEN after NOT".to_string(),
+                            ));
+                        }
+                    };
                 }
                 Token::Between => {
                     self.advance();
@@ -828,6 +734,22 @@ impl Parser {
                         expr = Expression::IsDistinctFrom {
                             left: Box::new(expr),
                             right: Box::new(right),
+                            not,
+                        };
+                    } else if *self.current_token() == Token::True
+                        || *self.current_token() == Token::False
+                    {
+                        let truth_value = *self.current_token() == Token::True;
+                        self.advance();
+                        expr = Expression::IsDistinctFrom {
+                            left: Box::new(expr),
+                            right: Box::new(Expression::Value(Value::Boolean(truth_value))),
+                            not: !not,
+                        };
+                    } else if *self.current_token() == Token::Unknown {
+                        self.advance();
+                        expr = Expression::IsNull {
+                            expr: Box::new(expr),
                             not,
                         };
                     } else {
@@ -1040,6 +962,18 @@ impl Parser {
             Token::Null => {
                 self.advance();
                 Ok(Expression::Value(Value::Null))
+            }
+            Token::Unknown => {
+                self.advance();
+                Ok(Expression::Value(Value::Null))
+            }
+            Token::True => {
+                self.advance();
+                Ok(Expression::Value(Value::Boolean(true)))
+            }
+            Token::False => {
+                self.advance();
+                Ok(Expression::Value(Value::Boolean(false)))
             }
             Token::Identifier(name) => {
                 self.advance();

@@ -1,5 +1,6 @@
 mod common;
 use common::*;
+use rustql::ast::Value;
 use std::sync::Mutex;
 
 static TEST_MUTEX: Mutex<()> = Mutex::new(());
@@ -66,6 +67,39 @@ fn test_composite_index_exact_match_uses_named_index() {
         result.contains("Index Scan using idx_cust_date"),
         "{result:?}"
     );
+}
+
+#[test]
+fn test_composite_index_numeric_estimates_use_comparison_semantics() {
+    let _guard = setup_test();
+
+    execute_sql("CREATE TABLE composite_numeric (id INTEGER, a INTEGER, b INTEGER)").unwrap();
+    execute_sql("INSERT INTO composite_numeric VALUES (1, 1, 10)").unwrap();
+    execute_sql("INSERT INTO composite_numeric VALUES (2, 1, 20)").unwrap();
+    execute_sql("INSERT INTO composite_numeric VALUES (3, 2, 10)").unwrap();
+    execute_sql("CREATE INDEX idx_composite_numeric ON composite_numeric (a, b)").unwrap();
+
+    let exact_plan =
+        execute_sql("EXPLAIN SELECT id FROM composite_numeric WHERE a = 1.0 AND b = 10.0").unwrap();
+    assert!(
+        exact_plan.contains("Index Scan using idx_composite_numeric"),
+        "{exact_plan:?}"
+    );
+    assert!(exact_plan.contains("Rows: 1"), "{exact_plan:?}");
+
+    let prefix_plan =
+        execute_sql("EXPLAIN SELECT id FROM composite_numeric WHERE a = 1.0").unwrap();
+    assert!(
+        prefix_plan.contains("Index Scan using idx_composite_numeric"),
+        "{prefix_plan:?}"
+    );
+    assert!(prefix_plan.contains("Rows: 2"), "{prefix_plan:?}");
+
+    let rows =
+        query_rows("SELECT id FROM composite_numeric WHERE a = 1.0 AND b = 10.0 ORDER BY id")
+            .unwrap();
+    rows.assert_columns(&["id"]);
+    assert_eq!(rows.rows, vec![vec![Value::Integer(1)]]);
 }
 
 #[test]

@@ -20,46 +20,47 @@ impl<'a> PlanExecutor<'a> {
                 combined
             }
             SetOperation::Union => {
-                let mut seen = BTreeSet::new();
+                let mut seen = SqlRowMultiset::new();
                 let mut combined = Vec::new();
                 for row in left.rows.into_iter().chain(right.rows) {
-                    if seen.insert(row.clone()) {
+                    if seen.add(row.clone()) {
                         combined.push(row);
                     }
                 }
                 combined
             }
             SetOperation::Intersect => {
-                let right_set: BTreeSet<Vec<Value>> = right.rows.into_iter().collect();
-                let mut seen = BTreeSet::new();
+                let mut right_counts = SqlRowMultiset::new();
+                for row in right.rows {
+                    right_counts.add(row);
+                }
+                let mut seen = SqlRowMultiset::new();
                 let mut combined = Vec::new();
                 for row in left.rows {
-                    if right_set.contains(&row) && seen.insert(row.clone()) {
+                    if right_counts.contains(&row) && seen.add(row.clone()) {
                         combined.push(row);
                     }
                 }
                 combined
             }
             SetOperation::IntersectAll => {
-                let mut right_counts: BTreeMap<Vec<Value>, usize> = BTreeMap::new();
+                let mut right_counts = SqlRowMultiset::new();
                 for row in right.rows {
-                    *right_counts.entry(row).or_insert(0) += 1;
+                    right_counts.add(row);
                 }
 
-                let mut left_counts: BTreeMap<Vec<Value>, usize> = BTreeMap::new();
+                let mut left_counts = SqlRowMultiset::new();
                 let mut left_order = Vec::new();
                 for row in left.rows {
-                    let count = left_counts.entry(row.clone()).or_insert(0);
-                    if *count == 0 {
+                    if left_counts.add(row.clone()) {
                         left_order.push(row.clone());
                     }
-                    *count += 1;
                 }
 
                 let mut combined = Vec::new();
                 for row in left_order {
-                    let left_count = left_counts.get(&row).copied().unwrap_or(0);
-                    let right_count = right_counts.get(&row).copied().unwrap_or(0);
+                    let left_count = left_counts.count(&row);
+                    let right_count = right_counts.count(&row);
                     for _ in 0..left_count.min(right_count) {
                         combined.push(row.clone());
                     }
@@ -67,36 +68,37 @@ impl<'a> PlanExecutor<'a> {
                 combined
             }
             SetOperation::Except => {
-                let right_set: BTreeSet<Vec<Value>> = right.rows.into_iter().collect();
-                let mut seen = BTreeSet::new();
+                let mut right_counts = SqlRowMultiset::new();
+                for row in right.rows {
+                    right_counts.add(row);
+                }
+                let mut seen = SqlRowMultiset::new();
                 let mut combined = Vec::new();
                 for row in left.rows {
-                    if !right_set.contains(&row) && seen.insert(row.clone()) {
+                    if !right_counts.contains(&row) && seen.add(row.clone()) {
                         combined.push(row);
                     }
                 }
                 combined
             }
             SetOperation::ExceptAll => {
-                let mut right_counts: BTreeMap<Vec<Value>, usize> = BTreeMap::new();
+                let mut right_counts = SqlRowMultiset::new();
                 for row in right.rows {
-                    *right_counts.entry(row).or_insert(0) += 1;
+                    right_counts.add(row);
                 }
 
-                let mut left_counts: BTreeMap<Vec<Value>, usize> = BTreeMap::new();
+                let mut left_counts = SqlRowMultiset::new();
                 let mut left_order = Vec::new();
                 for row in left.rows {
-                    let count = left_counts.entry(row.clone()).or_insert(0);
-                    if *count == 0 {
+                    if left_counts.add(row.clone()) {
                         left_order.push(row.clone());
                     }
-                    *count += 1;
                 }
 
                 let mut combined = Vec::new();
                 for row in left_order {
-                    let left_count = left_counts.get(&row).copied().unwrap_or(0);
-                    let right_count = right_counts.get(&row).copied().unwrap_or(0);
+                    let left_count = left_counts.count(&row);
+                    let right_count = right_counts.count(&row);
                     for _ in 0..left_count.saturating_sub(right_count) {
                         combined.push(row.clone());
                     }

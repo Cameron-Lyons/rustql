@@ -65,9 +65,14 @@ impl Parser {
             }));
         }
 
-        self.consume(Token::Values)?;
-
-        let values = self.parse_values()?;
+        let values = if *self.current_token() == Token::Default {
+            self.advance();
+            self.consume(Token::Values)?;
+            vec![Vec::new()]
+        } else {
+            self.consume(Token::Values)?;
+            self.parse_values()?
+        };
 
         let on_conflict = if *self.current_token() == Token::On
             && self.current + 1 < self.tokens.len()
@@ -127,7 +132,7 @@ impl Parser {
         }))
     }
 
-    pub(crate) fn parse_values(&mut self) -> Result<Vec<Vec<Value>>, RustqlError> {
+    pub(crate) fn parse_values(&mut self) -> Result<Vec<Vec<Expression>>, RustqlError> {
         let mut all_values = Vec::new();
 
         loop {
@@ -135,7 +140,7 @@ impl Parser {
             let mut values = Vec::new();
 
             loop {
-                values.push(self.parse_value()?);
+                values.push(self.parse_insert_value_expression()?);
 
                 if *self.current_token() == Token::Comma {
                     self.advance();
@@ -157,9 +162,21 @@ impl Parser {
         Ok(all_values)
     }
 
+    fn parse_insert_value_expression(&mut self) -> Result<Expression, RustqlError> {
+        if *self.current_token() == Token::Default {
+            self.advance();
+            Ok(Expression::Default)
+        } else {
+            self.parse_expression()
+        }
+    }
+
     pub(crate) fn parse_value(&mut self) -> Result<Value, RustqlError> {
         match self.advance() {
             Token::Null => Ok(Value::Null),
+            Token::Unknown => Ok(Value::Null),
+            Token::True => Ok(Value::Boolean(true)),
+            Token::False => Ok(Value::Boolean(false)),
             Token::Number(n) => Ok(Value::Integer(n)),
             Token::Float(f) => Ok(Value::Float(f)),
             Token::StringLiteral(s) => Ok(Value::Text(s)),
@@ -188,6 +205,17 @@ impl Parser {
                         "Expected table name after FROM".to_string(),
                     ));
                 }
+            };
+            let from_alias = if self.is_alias_token() {
+                if *self.current_token() == Token::As {
+                    self.advance();
+                }
+                match self.advance() {
+                    Token::Identifier(alias) => Some(alias),
+                    _ => None,
+                }
+            } else {
+                None
             };
             let mut joins = Vec::new();
             loop {
@@ -219,12 +247,23 @@ impl Parser {
                             ));
                         }
                     };
+                    let join_alias = if self.is_alias_token() {
+                        if *self.current_token() == Token::As {
+                            self.advance();
+                        }
+                        match self.advance() {
+                            Token::Identifier(alias) => Some(alias),
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    };
                     self.consume(Token::On)?;
                     let on_expr = self.parse_expression()?;
                     joins.push(Join {
                         join_type,
                         table: join_table,
-                        table_alias: None,
+                        table_alias: join_alias,
                         on: Some(on_expr),
                         using_columns: None,
                         lateral: false,
@@ -236,6 +275,7 @@ impl Parser {
             }
             Some(UpdateFrom {
                 table: from_table,
+                alias: from_alias,
                 joins,
             })
         } else {
@@ -271,7 +311,12 @@ impl Parser {
 
             self.consume(Token::Equal)?;
 
-            let value = self.parse_expression()?;
+            let value = if *self.current_token() == Token::Default {
+                self.advance();
+                Expression::Default
+            } else {
+                self.parse_expression()?
+            };
 
             assignments.push(Assignment { column, value });
 
@@ -353,12 +398,23 @@ impl Parser {
                             ));
                         }
                     };
+                    let join_alias = if self.is_alias_token() {
+                        if *self.current_token() == Token::As {
+                            self.advance();
+                        }
+                        match self.advance() {
+                            Token::Identifier(alias) => Some(alias),
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    };
                     self.consume(Token::On)?;
                     let on_expr = self.parse_expression()?;
                     joins.push(Join {
                         join_type,
                         table: join_table,
-                        table_alias: None,
+                        table_alias: join_alias,
                         on: Some(on_expr),
                         using_columns: None,
                         lateral: false,
@@ -520,7 +576,7 @@ impl Parser {
                 self.consume(Token::LeftParen)?;
                 let mut values = Vec::new();
                 loop {
-                    values.push(self.parse_expression()?);
+                    values.push(self.parse_insert_value_expression()?);
                     if *self.current_token() == Token::Comma {
                         self.advance();
                     } else {

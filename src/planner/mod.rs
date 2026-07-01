@@ -101,13 +101,6 @@ impl<'a> QueryPlanner<'a> {
         }
 
         let db = self.db;
-        let mut join_tables: HashSet<String> = HashSet::new();
-        for join in &stmt.joins {
-            join_tables.insert(join.table.clone());
-            if let Some(alias) = join.table_alias.as_ref() {
-                join_tables.insert(alias.clone());
-            }
-        }
         let mut base_tables: HashSet<String> = HashSet::new();
         if !stmt.from.is_empty() {
             base_tables.insert(stmt.from.clone());
@@ -118,34 +111,47 @@ impl<'a> QueryPlanner<'a> {
         if let Some((_, alias, _)) = stmt.from_values.as_ref() {
             base_tables.insert(alias.clone());
         }
-        if let Some(function) = stmt.from_function.as_ref()
-            && let Some(alias) = function.alias.as_ref()
-        {
-            base_tables.insert(alias.clone());
+        if let Some(function) = stmt.from_function.as_ref() {
+            base_tables.insert(
+                function
+                    .alias
+                    .clone()
+                    .unwrap_or_else(|| function.name.clone()),
+            );
         }
         let base_column_names = self.base_column_names(stmt)?;
+        let has_outer_join = stmt.joins.iter().any(|join| {
+            matches!(
+                join.join_type,
+                JoinType::Left | JoinType::Right | JoinType::Full
+            )
+        });
 
         let (base_filter, remaining_predicates) = if let Some(ref where_expr) = stmt.where_clause {
             let conjuncts = self.extract_conjuncts(where_expr);
-            let mut base_preds = Vec::new();
-            let mut rest = Vec::new();
+            if has_outer_join {
+                (None, conjuncts)
+            } else {
+                let mut base_preds = Vec::new();
+                let mut rest = Vec::new();
 
-            for conj in conjuncts {
-                let refs = self.referenced_tables(&conj);
-                let pushable_unqualified = refs.is_empty()
-                    && (stmt.joins.is_empty()
-                        || self.unqualified_columns_resolve_to_base(&conj, &base_column_names));
-                let pushable_base_refs = !refs.is_empty()
-                    && refs.iter().all(|reference| base_tables.contains(reference))
-                    && self.unqualified_columns_resolve_to_base(&conj, &base_column_names);
-                if pushable_unqualified || pushable_base_refs {
-                    base_preds.push(conj);
-                } else {
-                    rest.push(conj);
+                for conj in conjuncts {
+                    let refs = self.referenced_tables(&conj);
+                    let pushable_unqualified = refs.is_empty()
+                        && (stmt.joins.is_empty()
+                            || self.unqualified_columns_resolve_to_base(&conj, &base_column_names));
+                    let pushable_base_refs = !refs.is_empty()
+                        && refs.iter().all(|reference| base_tables.contains(reference))
+                        && self.unqualified_columns_resolve_to_base(&conj, &base_column_names);
+                    if pushable_unqualified || pushable_base_refs {
+                        base_preds.push(conj);
+                    } else {
+                        rest.push(conj);
+                    }
                 }
-            }
 
-            (self.combine_conjuncts(base_preds), rest)
+                (self.combine_conjuncts(base_preds), rest)
+            }
         } else {
             (None, Vec::new())
         };
@@ -153,6 +159,13 @@ impl<'a> QueryPlanner<'a> {
         let base_output_label =
             if stmt.joins.is_empty() || stmt.from.starts_with(LATERAL_OUTER_TABLE_PREFIX) {
                 None
+            } else if let Some(function) = stmt.from_function.as_ref() {
+                Some(
+                    function
+                        .alias
+                        .clone()
+                        .unwrap_or_else(|| function.name.clone()),
+                )
             } else {
                 Some(stmt.from_alias.clone().unwrap_or_else(|| stmt.from.clone()))
             };

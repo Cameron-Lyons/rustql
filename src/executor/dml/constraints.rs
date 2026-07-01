@@ -1,6 +1,41 @@
 use super::generated::parse_wrapped_select;
 use super::*;
 
+enum CascadedIndexAction {
+    Delete {
+        table: String,
+        row_ids: Vec<crate::database::RowId>,
+    },
+    Update {
+        table: String,
+        row_id: crate::database::RowId,
+        old_row: Vec<Value>,
+        new_row: Vec<Value>,
+    },
+}
+
+fn apply_cascaded_index_actions(
+    db: &mut Database,
+    actions: Vec<CascadedIndexAction>,
+) -> Result<(), RustqlError> {
+    for action in actions {
+        match action {
+            CascadedIndexAction::Delete { table, row_ids } => {
+                ddl::update_indexes_on_delete(db, &table, &row_ids)?;
+            }
+            CascadedIndexAction::Update {
+                table,
+                row_id,
+                old_row,
+                new_row,
+            } => {
+                ddl::update_indexes_on_update(db, &table, row_id, &old_row, &new_row)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn validate_not_null_constraints(
     columns: &[ColumnDefinition],
     row: &[Value],
@@ -45,7 +80,7 @@ pub(super) fn validate_primary_keys_for_insert(
                 .ok_or_else(|| RustqlError::TableNotFound(table_name.to_string()))?;
 
             for existing_row in &table.rows {
-                if existing_row[col_idx] == *pk_value {
+                if values_equal_for_sql_identity(&existing_row[col_idx], pk_value) {
                     return Err(RustqlError::ConstraintViolation {
                         kind: ConstraintKind::PrimaryKey,
                         message: format!(
@@ -86,7 +121,7 @@ pub(super) fn validate_unique_constraints_for_insert(
                 {
                     continue;
                 }
-                if existing_row[col_idx] == *unique_value {
+                if values_equal_for_sql_identity(&existing_row[col_idx], unique_value) {
                     return Err(RustqlError::ConstraintViolation {
                         kind: ConstraintKind::Unique,
                         message: format!(
@@ -135,7 +170,7 @@ pub(super) fn validate_foreign_keys_for_insert(
             let value_exists = ref_table.rows.iter().any(|ref_row| {
                 ref_row
                     .get(ref_col_idx)
-                    .map(|v| v == fk_value)
+                    .map(|v| values_equal_for_sql_identity(v, fk_value))
                     .unwrap_or(false)
             });
 
@@ -168,6 +203,8 @@ pub(super) fn handle_foreign_keys_for_delete(
     columns: &[ColumnDefinition],
     row_to_delete: &[Value],
 ) -> Result<(), RustqlError> {
+    let mut index_actions = Vec::new();
+
     for (other_table_name, other_table) in db.tables.iter_mut() {
         if other_table_name == table_name {
             continue;
@@ -198,7 +235,7 @@ pub(super) fn handle_foreign_keys_for_delete(
                 for (row_idx, other_row) in other_table.rows.iter().enumerate() {
                     if other_row
                         .get(col_idx)
-                        .map(|v| v == ref_value)
+                        .map(|v| values_equal_for_sql_identity(v, ref_value))
                         .unwrap_or(false)
                     {
                         rows_to_modify.push(row_idx);
@@ -220,12 +257,14 @@ pub(super) fn handle_foreign_keys_for_delete(
                     ForeignKeyAction::Cascade => {
                         rows_to_modify.sort();
                         rows_to_modify.reverse();
+                        let mut deleted_row_ids = Vec::with_capacity(rows_to_modify.len());
                         for row_idx in &rows_to_modify {
                             let row_id = other_table.row_id_at(*row_idx).ok_or_else(|| {
                                 RustqlError::Internal(
                                     "Missing row id for cascading delete".to_string(),
                                 )
                             })?;
+                            deleted_row_ids.push(row_id);
                             let old_row = other_table.rows[*row_idx].clone();
                             record_wal_entry(
                                 context,
@@ -238,6 +277,12 @@ pub(super) fn handle_foreign_keys_for_delete(
                             );
                             let _ = other_table.remove_row_by_id(row_id);
                         }
+                        if !deleted_row_ids.is_empty() {
+                            index_actions.push(CascadedIndexAction::Delete {
+                                table: other_table_name.clone(),
+                                row_ids: deleted_row_ids,
+                            });
+                        }
                     }
                     ForeignKeyAction::SetNull => {
                         for row_idx in rows_to_modify {
@@ -247,15 +292,22 @@ pub(super) fn handle_foreign_keys_for_delete(
                                 )
                             })?;
                             if let Some(row) = other_table.rows.get_mut(row_idx) {
+                                let old_row = row.clone();
                                 record_wal_entry(
                                     context,
                                     WalEntry::UpdateRow {
                                         table: other_table_name.clone(),
                                         row_id,
-                                        old_row: row.clone(),
+                                        old_row: old_row.clone(),
                                     },
                                 );
                                 row[col_idx] = Value::Null;
+                                index_actions.push(CascadedIndexAction::Update {
+                                    table: other_table_name.clone(),
+                                    row_id,
+                                    old_row,
+                                    new_row: row.clone(),
+                                });
                             }
                         }
                     }
@@ -263,7 +315,7 @@ pub(super) fn handle_foreign_keys_for_delete(
             }
         }
     }
-    Ok(())
+    apply_cascaded_index_actions(db, index_actions)
 }
 
 pub(super) fn handle_foreign_keys_for_update(
@@ -274,6 +326,8 @@ pub(super) fn handle_foreign_keys_for_update(
     old_row: &[Value],
     new_row: &[Value],
 ) -> Result<(), RustqlError> {
+    let mut index_actions = Vec::new();
+
     for (other_table_name, other_table) in db.tables.iter_mut() {
         if other_table_name == table_name {
             continue;
@@ -298,7 +352,7 @@ pub(super) fn handle_foreign_keys_for_update(
                         )
                     })?;
 
-                if old_row[ref_col_idx] == new_row[ref_col_idx] {
+                if values_equal_for_sql_identity(&old_row[ref_col_idx], &new_row[ref_col_idx]) {
                     continue;
                 }
 
@@ -308,7 +362,7 @@ pub(super) fn handle_foreign_keys_for_update(
                 for (row_idx, other_row) in other_table.rows.iter().enumerate() {
                     if other_row
                         .get(col_idx)
-                        .map(|v| v == old_value)
+                        .map(|v| values_equal_for_sql_identity(v, old_value))
                         .unwrap_or(false)
                     {
                         rows_to_modify.push(row_idx);
@@ -336,15 +390,22 @@ pub(super) fn handle_foreign_keys_for_update(
                                 )
                             })?;
                             if let Some(row) = other_table.rows.get_mut(row_idx) {
+                                let old_row = row.clone();
                                 record_wal_entry(
                                     context,
                                     WalEntry::UpdateRow {
                                         table: other_table_name.clone(),
                                         row_id,
-                                        old_row: row.clone(),
+                                        old_row: old_row.clone(),
                                     },
                                 );
                                 row[col_idx] = new_value.clone();
+                                index_actions.push(CascadedIndexAction::Update {
+                                    table: other_table_name.clone(),
+                                    row_id,
+                                    old_row,
+                                    new_row: row.clone(),
+                                });
                             }
                         }
                     }
@@ -356,15 +417,22 @@ pub(super) fn handle_foreign_keys_for_update(
                                 )
                             })?;
                             if let Some(row) = other_table.rows.get_mut(row_idx) {
+                                let old_row = row.clone();
                                 record_wal_entry(
                                     context,
                                     WalEntry::UpdateRow {
                                         table: other_table_name.clone(),
                                         row_id,
-                                        old_row: row.clone(),
+                                        old_row: old_row.clone(),
                                     },
                                 );
                                 row[col_idx] = Value::Null;
+                                index_actions.push(CascadedIndexAction::Update {
+                                    table: other_table_name.clone(),
+                                    row_id,
+                                    old_row,
+                                    new_row: row.clone(),
+                                });
                             }
                         }
                     }
@@ -372,7 +440,7 @@ pub(super) fn handle_foreign_keys_for_update(
             }
         }
     }
-    Ok(())
+    apply_cascaded_index_actions(db, index_actions)
 }
 
 pub(super) fn find_conflict_row(
@@ -392,7 +460,7 @@ pub(super) fn find_conflict_row(
         let matches = conflict_indices.iter().all(|&col_idx| {
             col_idx < existing_row.len()
                 && col_idx < new_row.len()
-                && existing_row[col_idx] == new_row[col_idx]
+                && values_equal_for_sql_identity(&existing_row[col_idx], &new_row[col_idx])
                 && !matches!(existing_row[col_idx], Value::Null)
         });
         if matches {
@@ -446,7 +514,7 @@ pub(super) fn validate_table_constraints_for_insert(
                         .iter()
                         .map(|&i| existing_row[i].clone())
                         .collect();
-                    if existing_key == key {
+                    if rows_equal_for_sql_identity(&existing_key, &key) {
                         return Err(RustqlError::ConstraintViolation {
                             kind: crate::error::ConstraintKind::PrimaryKey,
                             message: format!(
@@ -468,7 +536,7 @@ pub(super) fn validate_table_constraints_for_insert(
                     continue;
                 }
                 let key: Vec<Value> = col_indices.iter().map(|&i| row[i].clone()).collect();
-                if key.iter().all(|v| matches!(v, Value::Null)) {
+                if key.iter().any(|v| matches!(v, Value::Null)) {
                     continue;
                 }
                 for (row_idx, existing_row) in table.rows.iter().enumerate() {
@@ -481,7 +549,7 @@ pub(super) fn validate_table_constraints_for_insert(
                         .iter()
                         .map(|&i| existing_row[i].clone())
                         .collect();
-                    if existing_key == key {
+                    if rows_equal_for_sql_identity(&existing_key, &key) {
                         return Err(RustqlError::ConstraintViolation {
                             kind: crate::error::ConstraintKind::Unique,
                             message: format!(

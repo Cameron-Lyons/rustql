@@ -7,25 +7,25 @@ pub(crate) fn execute_delete(
     let mut db = get_database_write(context);
 
     let using_matches: Option<HashSet<usize>> = if let Some(ref using) = stmt.using {
-        let using_table = db
-            .tables
-            .get(&using.table)
-            .ok_or_else(|| RustqlError::TableNotFound(using.table.clone()))?;
         let main_table = db
             .tables
             .get(&stmt.table)
             .ok_or_else(|| RustqlError::TableNotFound(stmt.table.clone()))?;
+        let using_source = build_joined_dml_source(
+            &db,
+            &using.table,
+            using.alias.as_deref(),
+            &using.joins,
+            "DELETE USING",
+        )?;
 
-        let using_rows = using_table.rows.clone();
-        let using_columns = using_table.columns.clone();
         let main_columns = main_table.columns.clone();
-
-        let mut combined_columns: Vec<ColumnDefinition> = main_columns.clone();
-        combined_columns.extend(using_columns.clone());
+        let mut combined_columns = qualify_columns(&main_columns, &stmt.table);
+        combined_columns.extend(using_source.columns.clone());
 
         let mut matching_indices: HashSet<usize> = HashSet::new();
         for (main_idx, main_row) in main_table.rows.iter().enumerate() {
-            for using_row in &using_rows {
+            for using_row in &using_source.rows {
                 let mut combined_row: Vec<Value> = main_row.clone();
                 combined_row.extend(using_row.clone());
 

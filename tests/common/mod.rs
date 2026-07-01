@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 pub use rustql::CommandTag;
-use rustql::ast::{Statement, Value};
+use rustql::ast::{Expression, Statement, Value};
 use rustql::{CommandResult, Database, Engine, EngineOptions, QueryResult, RowBatch, StorageMode};
 use std::cell::RefCell;
 
@@ -63,6 +63,12 @@ pub fn execute_statement(statement: Statement) -> Result<QueryResult, String> {
 
 pub fn execute(statement: Statement) -> Result<QueryResult, String> {
     execute_statement(statement)
+}
+
+pub fn insert_values(rows: Vec<Vec<Value>>) -> Vec<Vec<Expression>> {
+    rows.into_iter()
+        .map(|row| row.into_iter().map(Expression::Value).collect())
+        .collect()
 }
 
 pub fn query_rows(sql: &str) -> Result<RowBatch, String> {

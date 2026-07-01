@@ -2244,7 +2244,7 @@ fn explain_multi_join_returns_plan() {
 
     match result {
         QueryResult::Explain(plan) => {
-            assert!(matches!(plan, planner::PlanNode::NestedLoopJoin { .. }));
+            assert!(matches!(plan, planner::PlanNode::HashJoin { .. }));
         }
         other => panic!("expected explain result, got: {other:?}"),
     }

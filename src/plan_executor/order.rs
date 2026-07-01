@@ -25,9 +25,9 @@ impl<'a> PlanExecutor<'a> {
             for (idx, order_expr) in order_by.iter().enumerate() {
                 let a_val = a_keys.get(idx).unwrap_or(&Value::Null);
                 let b_val = b_keys.get(idx).unwrap_or(&Value::Null);
-                let cmp = compare_values_for_sort(a_val, b_val);
+                let cmp = compare_order_values(a_val, b_val, order_expr);
                 if cmp != Ordering::Equal {
-                    return if order_expr.asc { cmp } else { cmp.reverse() };
+                    return cmp;
                 }
             }
             Ordering::Equal
@@ -74,7 +74,7 @@ impl<'a> PlanExecutor<'a> {
                         &column_defs,
                         &rows[extended_limit],
                     )?;
-                    if values != boundary_values {
+                    if !order_values_equal(&values, &boundary_values) {
                         break;
                     }
                     extended_limit += 1;
@@ -115,7 +115,7 @@ impl<'a> PlanExecutor<'a> {
             })
             .collect();
 
-        let mut seen = BTreeSet::new();
+        let mut seen = SqlRowSet::new();
         let mut rows = Vec::new();
 
         for row in input.rows {
@@ -144,44 +144,8 @@ impl<'a> PlanExecutor<'a> {
         column_defs: &[ColumnDefinition],
         row: &[Value],
     ) -> Result<Value, RustqlError> {
-        match expr {
-            Expression::Column(col) => self.lookup_sort_column_value(columns, row, col),
-            Expression::Function(agg) => self.lookup_sort_aggregate_value(columns, row, agg),
-            Expression::BinaryOp { left, op, right } => {
-                let left_val = self.get_sort_value(left, columns, column_defs, row)?;
-                let right_val = self.get_sort_value(right, columns, column_defs, row)?;
-                match op {
-                    BinaryOperator::Plus
-                    | BinaryOperator::Minus
-                    | BinaryOperator::Multiply
-                    | BinaryOperator::Divide => apply_arithmetic(&left_val, &right_val, op),
-                    BinaryOperator::Concat => Ok(Value::Text(format!(
-                        "{}{}",
-                        format_value(&left_val),
-                        format_value(&right_val)
-                    ))),
-                    _ => Err(RustqlError::Internal(
-                        "Unsupported operator in ORDER BY".to_string(),
-                    )),
-                }
-            }
-            Expression::UnaryOp {
-                op: UnaryOperator::Minus,
-                expr,
-            } => match self.get_sort_value(expr, columns, column_defs, row)? {
-                Value::Integer(value) => Ok(Value::Integer(-value)),
-                Value::Float(value) => Ok(Value::Float(-value)),
-                _ => Err(RustqlError::Internal(
-                    "Unary minus only supported for numeric ORDER BY values".to_string(),
-                )),
-            },
-            Expression::ScalarFunction { .. } | Expression::Cast { .. } => {
-                let materialized = self.materialize_sort_expression(expr, columns, row)?;
-                self.evaluate_value_expression(&materialized, column_defs, row)
-            }
-            Expression::Value(value) => Ok(value.clone()),
-            _ => self.evaluate_value_expression(expr, column_defs, row),
-        }
+        let materialized = self.materialize_sort_expression(expr, columns, row)?;
+        self.evaluate_value_expression(&materialized, column_defs, row)
     }
 
     fn lookup_sort_column_value(
@@ -230,6 +194,52 @@ impl<'a> PlanExecutor<'a> {
                 op: op.clone(),
                 expr: Box::new(self.materialize_sort_expression(expr, columns, row)?),
             }),
+            Expression::In { left, values } => Ok(Expression::In {
+                left: Box::new(self.materialize_sort_expression(left, columns, row)?),
+                values: values
+                    .iter()
+                    .map(|value| self.materialize_sort_expression(value, columns, row))
+                    .collect::<Result<Vec<_>, _>>()?,
+            }),
+            Expression::IsNull { expr, not } => Ok(Expression::IsNull {
+                expr: Box::new(self.materialize_sort_expression(expr, columns, row)?),
+                not: *not,
+            }),
+            Expression::Any { left, op, subquery } => Ok(Expression::Any {
+                left: Box::new(self.materialize_sort_expression(left, columns, row)?),
+                op: op.clone(),
+                subquery: subquery.clone(),
+            }),
+            Expression::All { left, op, subquery } => Ok(Expression::All {
+                left: Box::new(self.materialize_sort_expression(left, columns, row)?),
+                op: op.clone(),
+                subquery: subquery.clone(),
+            }),
+            Expression::Case {
+                operand,
+                when_clauses,
+                else_clause,
+            } => Ok(Expression::Case {
+                operand: operand
+                    .as_ref()
+                    .map(|expr| self.materialize_sort_expression(expr, columns, row))
+                    .transpose()?
+                    .map(Box::new),
+                when_clauses: when_clauses
+                    .iter()
+                    .map(|(when_expr, then_expr)| {
+                        Ok((
+                            self.materialize_sort_expression(when_expr, columns, row)?,
+                            self.materialize_sort_expression(then_expr, columns, row)?,
+                        ))
+                    })
+                    .collect::<Result<Vec<_>, RustqlError>>()?,
+                else_clause: else_clause
+                    .as_ref()
+                    .map(|expr| self.materialize_sort_expression(expr, columns, row))
+                    .transpose()?
+                    .map(Box::new),
+            }),
             Expression::ScalarFunction { name, args } => Ok(Expression::ScalarFunction {
                 name: name.clone(),
                 args: args
@@ -240,6 +250,11 @@ impl<'a> PlanExecutor<'a> {
             Expression::Cast { expr, data_type } => Ok(Expression::Cast {
                 expr: Box::new(self.materialize_sort_expression(expr, columns, row)?),
                 data_type: data_type.clone(),
+            }),
+            Expression::IsDistinctFrom { left, right, not } => Ok(Expression::IsDistinctFrom {
+                left: Box::new(self.materialize_sort_expression(left, columns, row)?),
+                right: Box::new(self.materialize_sort_expression(right, columns, row)?),
+                not: *not,
             }),
             _ => Ok(expr.clone()),
         }
@@ -273,4 +288,12 @@ impl<'a> PlanExecutor<'a> {
             .map(|order_expr| self.get_sort_value(&order_expr.expr, columns, column_defs, row))
             .collect()
     }
+}
+
+fn order_values_equal(left: &[Value], right: &[Value]) -> bool {
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right)
+            .all(|(left, right)| compare_values_for_sort(left, right) == Ordering::Equal)
 }

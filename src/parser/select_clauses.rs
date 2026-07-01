@@ -1079,7 +1079,7 @@ impl Parser {
     pub(super) fn parse_column_expression(
         &mut self,
     ) -> Result<(Expression, Option<String>), RustqlError> {
-        let expr = self.parse_arithmetic_expression()?;
+        let expr = self.parse_expression()?;
 
         let alias = if *self.current_token() == Token::As {
             self.advance();
@@ -1224,7 +1224,28 @@ impl Parser {
                 true
             };
 
-            order_exprs.push(OrderByExpr { expr, asc });
+            let nulls_first = if *self.current_token() == Token::Nulls {
+                self.advance();
+                if *self.current_token() == Token::First {
+                    self.advance();
+                    Some(true)
+                } else if *self.current_token() == Token::Last {
+                    self.advance();
+                    Some(false)
+                } else {
+                    return Err(RustqlError::ParseError(
+                        "Expected FIRST or LAST after NULLS".to_string(),
+                    ));
+                }
+            } else {
+                None
+            };
+
+            order_exprs.push(OrderByExpr {
+                expr,
+                asc,
+                nulls_first,
+            });
 
             if *self.current_token() == Token::Comma {
                 self.advance();

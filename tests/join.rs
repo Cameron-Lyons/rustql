@@ -54,6 +54,50 @@ fn test_left_join() {
 }
 
 #[test]
+fn test_left_join_where_on_right_filters_null_extended_rows() {
+    let _guard = setup_test();
+
+    execute_sql("CREATE TABLE users (id INTEGER, name TEXT)").unwrap();
+    execute_sql("CREATE TABLE orders (user_id INTEGER, product TEXT)").unwrap();
+
+    execute_sql("INSERT INTO users VALUES (1, 'Alice'), (2, 'Bob'), (3, 'Charlie')").unwrap();
+    execute_sql("INSERT INTO orders VALUES (1, 'Laptop'), (2, 'Mouse')").unwrap();
+
+    let rows = query_rows(
+        "SELECT users.name \
+         FROM users LEFT JOIN orders ON users.id = orders.user_id \
+         WHERE orders.product = 'Laptop' \
+         ORDER BY users.name",
+    )
+    .unwrap();
+
+    rows.assert_columns(&["users.name"]);
+    assert_eq!(rows.rows, vec![vec![Value::Text("Alice".into())]]);
+}
+
+#[test]
+fn test_right_join_where_on_left_filters_null_extended_rows() {
+    let _guard = setup_test();
+
+    execute_sql("CREATE TABLE customers (id INTEGER, name TEXT)").unwrap();
+    execute_sql("CREATE TABLE orders (customer_id INTEGER, product TEXT)").unwrap();
+
+    execute_sql("INSERT INTO customers VALUES (1, 'Alice'), (2, 'Bob')").unwrap();
+    execute_sql("INSERT INTO orders VALUES (1, 'Laptop'), (999, 'Mystery')").unwrap();
+
+    let rows = query_rows(
+        "SELECT orders.product \
+         FROM customers RIGHT JOIN orders ON customers.id = orders.customer_id \
+         WHERE customers.name = 'Alice' \
+         ORDER BY orders.product",
+    )
+    .unwrap();
+
+    rows.assert_columns(&["orders.product"]);
+    assert_eq!(rows.rows, vec![vec![Value::Text("Laptop".into())]]);
+}
+
+#[test]
 fn test_join_with_where_clause() {
     let _guard = setup_test();
 
@@ -256,6 +300,237 @@ fn test_join_no_matching_rows() {
 
     let lines: Vec<String> = result.lines().collect();
     assert!(lines.len() <= 2);
+}
+
+#[test]
+fn test_inner_hash_join_does_not_match_null_keys() {
+    let _guard = setup_test();
+
+    execute_sql("CREATE TABLE left_items (id INTEGER, label TEXT)").unwrap();
+    execute_sql("CREATE TABLE right_items (id INTEGER, label TEXT)").unwrap();
+
+    execute_sql("INSERT INTO left_items VALUES (NULL, 'left-null'), (1, 'left-one')").unwrap();
+    execute_sql("INSERT INTO right_items VALUES (NULL, 'right-null'), (1, 'right-one')").unwrap();
+
+    let plan = execute_sql(
+        "EXPLAIN SELECT left_items.label, right_items.label \
+         FROM left_items JOIN right_items ON left_items.id = right_items.id",
+    )
+    .unwrap();
+    assert!(plan.contains("Hash Join"));
+
+    let rows = query_rows(
+        "SELECT left_items.label, right_items.label \
+         FROM left_items JOIN right_items ON left_items.id = right_items.id",
+    )
+    .unwrap();
+
+    rows.assert_columns(&["left_items.label", "right_items.label"]);
+    assert_eq!(
+        rows.rows,
+        vec![vec![
+            Value::Text("left-one".into()),
+            Value::Text("right-one".into()),
+        ]]
+    );
+}
+
+#[test]
+fn test_inner_hash_join_matches_numeric_compatible_keys() {
+    let _guard = setup_test();
+
+    execute_sql("CREATE TABLE int_items (id INTEGER, label TEXT)").unwrap();
+    execute_sql("CREATE TABLE float_items (id FLOAT, label TEXT)").unwrap();
+
+    execute_sql("INSERT INTO int_items VALUES (1, 'int-one'), (2, 'int-two')").unwrap();
+    execute_sql("INSERT INTO float_items VALUES (1.0, 'float-one'), (3.0, 'float-three')").unwrap();
+
+    let plan = execute_sql(
+        "EXPLAIN SELECT int_items.label, float_items.label \
+         FROM int_items JOIN float_items ON int_items.id = float_items.id",
+    )
+    .unwrap();
+    assert!(plan.contains("Hash Join"));
+
+    let rows = query_rows(
+        "SELECT int_items.label, float_items.label \
+         FROM int_items JOIN float_items ON int_items.id = float_items.id",
+    )
+    .unwrap();
+
+    rows.assert_columns(&["int_items.label", "float_items.label"]);
+    assert_eq!(
+        rows.rows,
+        vec![vec![
+            Value::Text("int-one".into()),
+            Value::Text("float-one".into()),
+        ]]
+    );
+}
+
+#[test]
+fn test_inner_hash_join_uses_qualified_key_columns() {
+    let _guard = setup_test();
+
+    execute_sql("CREATE TABLE left_items (id INTEGER, fk INTEGER, label TEXT)").unwrap();
+    execute_sql("CREATE TABLE right_items (id INTEGER, fk INTEGER, label TEXT)").unwrap();
+
+    execute_sql(
+        "INSERT INTO left_items VALUES \
+         (10, 100, 'left-ten'), \
+         (20, 200, 'left-twenty'), \
+         (999, 999, 'left-none')",
+    )
+    .unwrap();
+    execute_sql(
+        "INSERT INTO right_items VALUES \
+         (1, 10, 'right-ten'), \
+         (2, 20, 'right-twenty')",
+    )
+    .unwrap();
+
+    let plan = execute_sql(
+        "EXPLAIN SELECT left_items.label, right_items.label \
+         FROM left_items JOIN right_items ON left_items.id = right_items.fk",
+    )
+    .unwrap();
+    assert!(plan.contains("Hash Join"));
+
+    let rows = query_rows(
+        "SELECT left_items.label, right_items.label \
+         FROM left_items JOIN right_items ON left_items.id = right_items.fk \
+         ORDER BY left_items.label",
+    )
+    .unwrap();
+
+    rows.assert_columns(&["left_items.label", "right_items.label"]);
+    assert_eq!(
+        rows.rows,
+        vec![
+            vec![
+                Value::Text("left-ten".into()),
+                Value::Text("right-ten".into())
+            ],
+            vec![
+                Value::Text("left-twenty".into()),
+                Value::Text("right-twenty".into()),
+            ],
+        ]
+    );
+}
+
+#[test]
+fn test_multi_inner_join_uses_hash_joins() {
+    let _guard = setup_test();
+
+    execute_sql("CREATE TABLE customers (id INTEGER, name TEXT)").unwrap();
+    execute_sql("CREATE TABLE orders (id INTEGER, customer_id INTEGER, product_id INTEGER)")
+        .unwrap();
+    execute_sql("CREATE TABLE products (id INTEGER, product TEXT)").unwrap();
+
+    execute_sql("INSERT INTO customers VALUES (1, 'Alice'), (2, 'Bob'), (3, 'Charlie')").unwrap();
+    execute_sql("INSERT INTO orders VALUES (10, 1, 100), (11, 2, 101), (12, 999, 102)").unwrap();
+    execute_sql("INSERT INTO products VALUES (100, 'Laptop'), (101, 'Keyboard'), (102, 'Mouse')")
+        .unwrap();
+
+    let plan = execute_sql(
+        "EXPLAIN SELECT customers.name, products.product \
+         FROM customers \
+         JOIN orders ON customers.id = orders.customer_id \
+         JOIN products ON orders.product_id = products.id",
+    )
+    .unwrap()
+    .output_text();
+    assert_eq!(plan.matches("Hash Join").count(), 2);
+
+    let rows = query_rows(
+        "SELECT customers.name, products.product \
+         FROM customers \
+         JOIN orders ON customers.id = orders.customer_id \
+         JOIN products ON orders.product_id = products.id \
+         ORDER BY customers.name",
+    )
+    .unwrap();
+
+    rows.assert_columns(&["customers.name", "products.product"]);
+    assert_eq!(
+        rows.rows,
+        vec![
+            vec![Value::Text("Alice".into()), Value::Text("Laptop".into())],
+            vec![Value::Text("Bob".into()), Value::Text("Keyboard".into())],
+        ]
+    );
+}
+
+#[test]
+fn test_expression_equality_join_uses_nested_loop() {
+    let _guard = setup_test();
+
+    execute_sql("CREATE TABLE users (id INTEGER, name TEXT)").unwrap();
+    execute_sql("CREATE TABLE orders (user_id INTEGER, product TEXT)").unwrap();
+
+    execute_sql("INSERT INTO users VALUES (1, 'Alice'), (2, 'Bob')").unwrap();
+    execute_sql("INSERT INTO orders VALUES (2, 'Laptop'), (3, 'Mouse')").unwrap();
+
+    let plan = execute_sql(
+        "EXPLAIN SELECT users.name, orders.product \
+         FROM users JOIN orders ON users.id + 1 = orders.user_id",
+    )
+    .unwrap();
+    assert!(plan.contains("Nested Loop Join"));
+    assert!(!plan.contains("Hash Join"));
+
+    let rows = query_rows(
+        "SELECT users.name, orders.product \
+         FROM users JOIN orders ON users.id + 1 = orders.user_id \
+         ORDER BY users.name",
+    )
+    .unwrap();
+
+    rows.assert_columns(&["users.name", "orders.product"]);
+    assert_eq!(
+        rows.rows,
+        vec![
+            vec![Value::Text("Alice".into()), Value::Text("Laptop".into())],
+            vec![Value::Text("Bob".into()), Value::Text("Mouse".into())],
+        ]
+    );
+}
+
+#[test]
+fn test_natural_join_excludes_unmatched_left_rows() {
+    let _guard = setup_test();
+
+    execute_sql("CREATE TABLE departments (id INTEGER, dept_name TEXT)").unwrap();
+    execute_sql("CREATE TABLE staff (id INTEGER, staff_name TEXT)").unwrap();
+
+    execute_sql(
+        "INSERT INTO departments VALUES \
+         (1, 'Engineering'), \
+         (2, 'Sales'), \
+         (3, 'Support')",
+    )
+    .unwrap();
+    execute_sql("INSERT INTO staff VALUES (1, 'Alice'), (2, 'Bob')").unwrap();
+
+    let rows = query_rows(
+        "SELECT dept_name, staff_name \
+         FROM departments NATURAL JOIN staff \
+         ORDER BY dept_name",
+    )
+    .unwrap();
+
+    rows.assert_columns(&["dept_name", "staff_name"]);
+    assert_eq!(
+        rows.rows,
+        vec![
+            vec![
+                Value::Text("Engineering".into()),
+                Value::Text("Alice".into()),
+            ],
+            vec![Value::Text("Sales".into()), Value::Text("Bob".into())],
+        ]
+    );
 }
 
 #[test]

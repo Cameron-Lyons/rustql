@@ -57,6 +57,20 @@ fn test_composite_unique_constraint() {
 }
 
 #[test]
+fn test_composite_unique_allows_null_keys() {
+    let _guard = setup_test();
+    execute_sql(
+        "CREATE TABLE schedule (room TEXT, time_slot TEXT, course TEXT, UNIQUE (room, time_slot))",
+    )
+    .unwrap();
+
+    assert!(execute_sql("INSERT INTO schedule VALUES ('101', NULL, 'Math')").is_ok());
+    assert!(execute_sql("INSERT INTO schedule VALUES ('101', NULL, 'Science')").is_ok());
+    assert!(execute_sql("INSERT INTO schedule VALUES ('102', '9AM', 'History')").is_ok());
+    assert!(execute_sql("INSERT INTO schedule VALUES ('102', '9AM', 'Art')").is_err());
+}
+
+#[test]
 fn test_named_constraint() {
     let _guard = setup_test();
     let result = execute_sql(
