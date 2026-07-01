@@ -453,6 +453,21 @@ fn btree_cache_lru_eviction() {
     let (_, _, size1) = engine.cache_stats();
     assert!(size1 > 0, "Cache should have pages after load");
 
+    let cached_page_ids = {
+        let cache = engine.page_cache.read().expect("cache read lock");
+        cache.pages.keys().copied().collect::<Vec<_>>()
+    };
+    engine.invalidate_pages(&cached_page_ids);
+    let (_, _, invalidated_size) = engine.cache_stats();
+    assert_eq!(
+        invalidated_size, 0,
+        "Cache should be empty after invalidating cached pages"
+    );
+
+    let _ = engine.load();
+    let (_, _, reloaded_size) = engine.cache_stats();
+    assert!(reloaded_size > 0, "Cache should refill after load");
+
     engine.clear_cache();
     let (_, _, size2) = engine.cache_stats();
     assert_eq!(size2, 0, "Cache should be empty after clear");
