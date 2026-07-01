@@ -41,10 +41,10 @@ fn test_where_exists_true() {
     execute(Statement::Insert(InsertStatement {
         table: "users_ex1".to_string(),
         columns: Some(vec!["id".into(), "name".into()]),
-        values: vec![
+        values: insert_values(vec![
             vec![Value::Integer(1), Value::Text("Alice".into())],
             vec![Value::Integer(2), Value::Text("Bob".into())],
-        ],
+        ]),
         source_query: None,
         on_conflict: None,
         returning: None,
@@ -88,10 +88,10 @@ fn test_where_exists_true() {
     execute(Statement::Insert(InsertStatement {
         table: "orders_ex1".to_string(),
         columns: Some(vec!["id".into(), "amount".into()]),
-        values: vec![
+        values: insert_values(vec![
             vec![Value::Integer(1), Value::Float(150.0)],
             vec![Value::Integer(2), Value::Float(50.0)],
-        ],
+        ]),
         source_query: None,
         on_conflict: None,
         returning: None,
@@ -190,10 +190,10 @@ fn test_where_exists_false_filters_all() {
     execute(Statement::Insert(InsertStatement {
         table: "users_ex2".to_string(),
         columns: Some(vec!["id".into(), "name".into()]),
-        values: vec![
+        values: insert_values(vec![
             vec![Value::Integer(1), Value::Text("Alice".into())],
             vec![Value::Integer(2), Value::Text("Bob".into())],
-        ],
+        ]),
         source_query: None,
         on_conflict: None,
         returning: None,
@@ -237,10 +237,10 @@ fn test_where_exists_false_filters_all() {
     execute(Statement::Insert(InsertStatement {
         table: "orders_ex2".to_string(),
         columns: Some(vec!["id".into(), "amount".into()]),
-        values: vec![
+        values: insert_values(vec![
             vec![Value::Integer(1), Value::Float(150.0)],
             vec![Value::Integer(2), Value::Float(50.0)],
-        ],
+        ]),
         source_query: None,
         on_conflict: None,
         returning: None,
@@ -339,10 +339,10 @@ fn test_where_not_exists_true_filters_all() {
     execute(Statement::Insert(InsertStatement {
         table: "t_users_ne1".to_string(),
         columns: Some(vec!["id".into(), "name".into()]),
-        values: vec![
+        values: insert_values(vec![
             vec![Value::Integer(1), Value::Text("Alice".into())],
             vec![Value::Integer(2), Value::Text("Bob".into())],
-        ],
+        ]),
         source_query: None,
         on_conflict: None,
         returning: None,
@@ -386,10 +386,10 @@ fn test_where_not_exists_true_filters_all() {
     execute(Statement::Insert(InsertStatement {
         table: "t_orders_ne1".to_string(),
         columns: Some(vec!["id".into(), "amount".into()]),
-        values: vec![
+        values: insert_values(vec![
             vec![Value::Integer(1), Value::Float(150.0)],
             vec![Value::Integer(2), Value::Float(50.0)],
-        ],
+        ]),
         source_query: None,
         on_conflict: None,
         returning: None,
@@ -491,10 +491,10 @@ fn test_where_exists_correlated_true() {
     execute(Statement::Insert(InsertStatement {
         table: "users_corr1".to_string(),
         columns: Some(vec!["id".into(), "name".into()]),
-        values: vec![
+        values: insert_values(vec![
             vec![Value::Integer(1), Value::Text("Alice".into())],
             vec![Value::Integer(2), Value::Text("Bob".into())],
-        ],
+        ]),
         source_query: None,
         on_conflict: None,
         returning: None,
@@ -538,10 +538,10 @@ fn test_where_exists_correlated_true() {
     execute(Statement::Insert(InsertStatement {
         table: "orders_corr1".to_string(),
         columns: Some(vec!["user_id".into(), "amount".into()]),
-        values: vec![
+        values: insert_values(vec![
             vec![Value::Integer(1), Value::Float(150.0)],
             vec![Value::Integer(2), Value::Float(50.0)],
-        ],
+        ]),
         source_query: None,
         on_conflict: None,
         returning: None,
@@ -648,10 +648,10 @@ fn test_where_not_exists_false() {
     execute(Statement::Insert(InsertStatement {
         table: "t_users_ne2".to_string(),
         columns: Some(vec!["id".into(), "name".into()]),
-        values: vec![
+        values: insert_values(vec![
             vec![Value::Integer(1), Value::Text("Alice".into())],
             vec![Value::Integer(2), Value::Text("Bob".into())],
-        ],
+        ]),
         source_query: None,
         on_conflict: None,
         returning: None,
@@ -695,10 +695,10 @@ fn test_where_not_exists_false() {
     execute(Statement::Insert(InsertStatement {
         table: "t_orders_ne2".to_string(),
         columns: Some(vec!["id".into(), "amount".into()]),
-        values: vec![
+        values: insert_values(vec![
             vec![Value::Integer(1), Value::Float(150.0)],
             vec![Value::Integer(2), Value::Float(50.0)],
-        ],
+        ]),
         source_query: None,
         on_conflict: None,
         returning: None,
@@ -800,10 +800,10 @@ fn test_where_exists_correlated_false() {
     execute(Statement::Insert(InsertStatement {
         table: "users_corr2".to_string(),
         columns: Some(vec!["id".into(), "name".into()]),
-        values: vec![
+        values: insert_values(vec![
             vec![Value::Integer(1), Value::Text("Alice".into())],
             vec![Value::Integer(2), Value::Text("Bob".into())],
-        ],
+        ]),
         source_query: None,
         on_conflict: None,
         returning: None,
@@ -847,10 +847,10 @@ fn test_where_exists_correlated_false() {
     execute(Statement::Insert(InsertStatement {
         table: "orders_corr2".to_string(),
         columns: Some(vec!["user_id".into(), "amount".into()]),
-        values: vec![
+        values: insert_values(vec![
             vec![Value::Integer(1), Value::Float(50.0)],
             vec![Value::Integer(2), Value::Float(30.0)],
-        ],
+        ]),
         source_query: None,
         on_conflict: None,
         returning: None,
@@ -957,10 +957,10 @@ fn test_where_exists_with_join() {
     execute(Statement::Insert(InsertStatement {
         table: "users_join1".to_string(),
         columns: Some(vec!["id".into(), "name".into()]),
-        values: vec![
+        values: insert_values(vec![
             vec![Value::Integer(1), Value::Text("Alice".into())],
             vec![Value::Integer(2), Value::Text("Bob".into())],
-        ],
+        ]),
         source_query: None,
         on_conflict: None,
         returning: None,
@@ -1004,10 +1004,10 @@ fn test_where_exists_with_join() {
     execute(Statement::Insert(InsertStatement {
         table: "orders_join1".to_string(),
         columns: Some(vec!["id".into(), "user_id".into()]),
-        values: vec![
+        values: insert_values(vec![
             vec![Value::Integer(1), Value::Integer(1)],
             vec![Value::Integer(2), Value::Integer(1)],
-        ],
+        ]),
         source_query: None,
         on_conflict: None,
         returning: None,
@@ -1051,7 +1051,7 @@ fn test_where_exists_with_join() {
     execute(Statement::Insert(InsertStatement {
         table: "payments_join1".to_string(),
         columns: Some(vec!["id".into(), "order_id".into()]),
-        values: vec![vec![Value::Integer(1), Value::Integer(1)]],
+        values: insert_values(vec![vec![Value::Integer(1), Value::Integer(1)]]),
         source_query: None,
         on_conflict: None,
         returning: None,

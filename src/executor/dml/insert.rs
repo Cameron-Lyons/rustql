@@ -1,5 +1,16 @@
 use super::*;
 
+fn evaluate_insert_value(
+    expr: &Expression,
+    column: &ColumnDefinition,
+    db: &dyn crate::database::DatabaseCatalog,
+) -> Result<Value, RustqlError> {
+    match expr {
+        Expression::Default => Ok(column_default_value(column)),
+        _ => evaluate_value_expression_with_db(expr, &[], &[], Some(db)),
+    }
+}
+
 pub(crate) fn execute_insert(
     context: &ExecutionContext,
     mut stmt: InsertStatement,
@@ -11,7 +22,8 @@ pub(crate) fn execute_insert(
         };
 
         for row in typed_rows.rows {
-            stmt.values.push(row);
+            stmt.values
+                .push(row.into_iter().map(Expression::Value).collect());
         }
     }
 
@@ -22,7 +34,12 @@ pub(crate) fn execute_insert(
         .get(&stmt.table)
         .ok_or_else(|| RustqlError::TableNotFound(stmt.table.clone()))?;
 
-    let mapped_values: Vec<Vec<Value>> = if let Some(ref specified_columns) = stmt.columns {
+    let default_values =
+        stmt.columns.is_none() && stmt.values.len() == 1 && stmt.values[0].is_empty();
+
+    let mapped_values: Vec<Vec<Value>> = if default_values {
+        vec![table_ref.columns.iter().map(column_default_value).collect()]
+    } else if let Some(ref specified_columns) = stmt.columns {
         for col_name in specified_columns {
             if !table_ref.columns.iter().any(|c| c.name == *col_name) {
                 return Err(RustqlError::ColumnNotFound(format!(
@@ -44,11 +61,8 @@ pub(crate) fn execute_insert(
                     )));
                 }
 
-                let mut full_row: Vec<Value> = table_ref
-                    .columns
-                    .iter()
-                    .map(|col| col.default_value.clone().unwrap_or(Value::Null))
-                    .collect();
+                let mut full_row: Vec<Value> =
+                    table_ref.columns.iter().map(column_default_value).collect();
 
                 for (idx, col_name) in specified_columns.iter().enumerate() {
                     let col_pos = table_ref
@@ -56,7 +70,8 @@ pub(crate) fn execute_insert(
                         .iter()
                         .position(|c| c.name == *col_name)
                         .ok_or_else(|| RustqlError::ColumnNotFound(col_name.clone()))?;
-                    full_row[col_pos] = values[idx].clone();
+                    full_row[col_pos] =
+                        evaluate_insert_value(&values[idx], &table_ref.columns[col_pos], &*db)?;
                 }
 
                 Ok(full_row)
@@ -66,25 +81,6 @@ pub(crate) fn execute_insert(
         stmt.values
             .iter()
             .map(|values| {
-                let mut full_row: Vec<Value> = table_ref
-                    .columns
-                    .iter()
-                    .enumerate()
-                    .map(|(idx, col)| {
-                        if idx < values.len() {
-                            values[idx].clone()
-                        } else {
-                            col.default_value.clone().unwrap_or(Value::Null)
-                        }
-                    })
-                    .collect();
-
-                for (idx, val) in values.iter().enumerate() {
-                    if idx < full_row.len() {
-                        full_row[idx] = val.clone();
-                    }
-                }
-
                 if values.len() != table_ref.columns.len() {
                     return Err(RustqlError::Internal(format!(
                         "Column count mismatch: expected {}, got {}",
@@ -92,6 +88,13 @@ pub(crate) fn execute_insert(
                         values.len()
                     )));
                 }
+
+                let full_row: Vec<Value> = table_ref
+                    .columns
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, col)| evaluate_insert_value(&values[idx], col, &*db))
+                    .collect::<Result<Vec<_>, _>>()?;
 
                 Ok(full_row)
             })
@@ -174,11 +177,12 @@ pub(crate) fn execute_insert(
                                     .iter()
                                     .position(|c| c.name == assignment.column)
                                 {
-                                    updated_row[idx] = evaluate_value_expression_with_db(
+                                    updated_row[idx] = evaluate_assignment_value(
                                         &assignment.value,
+                                        &columns_snapshot[idx],
                                         &columns_snapshot,
                                         values,
-                                        Some(&*db),
+                                        &*db,
                                     )?;
                                 }
                             }

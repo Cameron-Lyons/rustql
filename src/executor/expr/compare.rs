@@ -185,6 +185,18 @@ pub fn compare_values_for_sort(left: &Value, right: &Value) -> Ordering {
     }
 }
 
+pub fn compare_order_values(left: &Value, right: &Value, order_expr: &OrderByExpr) -> Ordering {
+    match (left, right, order_expr.nulls_first) {
+        (Value::Null, Value::Null, _) => Ordering::Equal,
+        (Value::Null, _, Some(true)) | (_, Value::Null, Some(false)) => Ordering::Less,
+        (_, Value::Null, Some(true)) | (Value::Null, _, Some(false)) => Ordering::Greater,
+        _ => {
+            let cmp = compare_values_for_sort(left, right);
+            if order_expr.asc { cmp } else { cmp.reverse() }
+        }
+    }
+}
+
 fn sort_rank(value: &Value) -> u8 {
     match value {
         Value::Integer(_) | Value::Float(_) => 0,

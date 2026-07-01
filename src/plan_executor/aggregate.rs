@@ -1,10 +1,106 @@
 use super::*;
 use crate::error::QueryClause;
+use std::collections::BTreeSet;
 
 struct PreparedAggregateInput {
     count_star: bool,
     filtered_row_count: usize,
     values: Vec<Value>,
+}
+
+struct AggregateDistinctTracker {
+    numeric_seen: Vec<f64>,
+    other_seen: BTreeSet<Value>,
+}
+
+impl AggregateDistinctTracker {
+    fn new() -> Self {
+        Self {
+            numeric_seen: Vec::new(),
+            other_seen: BTreeSet::new(),
+        }
+    }
+
+    fn insert(&mut self, value: &Value) -> bool {
+        match numeric_distinct_value(value) {
+            Some(numeric) => {
+                if self
+                    .numeric_seen
+                    .iter()
+                    .any(|seen| (seen - numeric).abs() < f64::EPSILON)
+                {
+                    false
+                } else {
+                    self.numeric_seen.push(numeric);
+                    true
+                }
+            }
+            None => self.other_seen.insert(value.clone()),
+        }
+    }
+}
+
+struct AggregateGroup<'a> {
+    key: Vec<Value>,
+    rows: Vec<&'a [Value]>,
+}
+
+struct AggregateGroupCollection<'a> {
+    non_numeric_groups: BTreeMap<Vec<Value>, Vec<&'a [Value]>>,
+    numeric_groups: Vec<AggregateGroup<'a>>,
+}
+
+impl<'a> AggregateGroupCollection<'a> {
+    fn new() -> Self {
+        Self {
+            non_numeric_groups: BTreeMap::new(),
+            numeric_groups: Vec::new(),
+        }
+    }
+
+    fn insert(&mut self, key: Vec<Value>, row: &'a [Value]) {
+        if row_has_finite_numeric_value(&key) {
+            if let Some(group) = self
+                .numeric_groups
+                .iter_mut()
+                .find(|group| rows_equal_for_sql_identity(&group.key, &key))
+            {
+                group.rows.push(row);
+            } else {
+                self.numeric_groups.push(AggregateGroup {
+                    key,
+                    rows: vec![row],
+                });
+            }
+        } else {
+            self.non_numeric_groups.entry(key).or_default().push(row);
+        }
+    }
+
+    fn insert_empty_group(&mut self, key: Vec<Value>) {
+        if row_has_finite_numeric_value(&key) {
+            self.numeric_groups.push(AggregateGroup {
+                key,
+                rows: Vec::new(),
+            });
+        } else {
+            self.non_numeric_groups.entry(key).or_default();
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.non_numeric_groups.is_empty() && self.numeric_groups.is_empty()
+    }
+
+    fn into_groups(self) -> Vec<AggregateGroup<'a>> {
+        let mut groups: Vec<AggregateGroup<'a>> = self
+            .non_numeric_groups
+            .into_iter()
+            .map(|(key, rows)| AggregateGroup { key, rows })
+            .collect();
+        groups.extend(self.numeric_groups);
+        groups
+    }
 }
 
 struct HavingContext<'a> {
@@ -72,36 +168,18 @@ impl<'a> PlanExecutor<'a> {
             .collect();
 
         let mut result_rows = Vec::new();
-        let build_groups = |exprs: &[Expression]| -> BTreeMap<Vec<Value>, Vec<&[Value]>> {
-            let mut groups: BTreeMap<Vec<Value>, Vec<&[Value]>> = BTreeMap::new();
-            for row in &input.rows {
-                let key: Vec<Value> = exprs
-                    .iter()
-                    .map(|expr| {
-                        self.evaluate_value_expression(expr, &column_defs, row)
-                            .unwrap_or(Value::Null)
-                    })
-                    .collect();
-                groups.entry(key).or_default().push(row.as_slice());
-            }
-
-            if groups.is_empty() && exprs.is_empty() {
-                groups.insert(Vec::new(), Vec::new());
-            }
-
-            groups
-        };
 
         if let Some(grouping_sets) = grouping_sets {
             for set in grouping_sets {
-                let groups = build_groups(set);
+                let groups = self.build_aggregate_groups(&input, set, &column_defs);
 
-                for group_rows in groups.into_values() {
+                for group in groups {
                     let mut result_row = Vec::with_capacity(group_by.len() + aggregates.len());
 
                     for group_expr in group_by {
                         if set.iter().any(|active_expr| active_expr == group_expr) {
-                            let value = group_rows
+                            let value = group
+                                .rows
                                 .first()
                                 .map(|row| {
                                     self.evaluate_value_expression(group_expr, &column_defs, row)
@@ -115,7 +193,7 @@ impl<'a> PlanExecutor<'a> {
                     }
 
                     let aggregate_values =
-                        self.compute_group_aggregate_values(aggregates, &group_rows, &column_defs)?;
+                        self.compute_group_aggregate_values(aggregates, &group.rows, &column_defs)?;
                     result_row.extend(aggregate_values.iter().cloned());
 
                     if let Some(having_expr) = having {
@@ -125,7 +203,7 @@ impl<'a> PlanExecutor<'a> {
                             input_columns: &column_defs,
                             selected_aggregates: aggregates,
                             aggregate_values: &aggregate_values,
-                            group_rows: &group_rows,
+                            group_rows: &group.rows,
                         };
                         let include = self.evaluate_having(having_expr, &having_context)?;
 
@@ -138,12 +216,12 @@ impl<'a> PlanExecutor<'a> {
                 }
             }
         } else {
-            let groups = build_groups(group_by);
+            let groups = self.build_aggregate_groups(&input, group_by, &column_defs);
 
-            for (group_key, group_rows) in groups {
-                let mut result_row = group_key.clone();
+            for group in groups {
+                let mut result_row = group.key.clone();
                 let aggregate_values =
-                    self.compute_group_aggregate_values(aggregates, &group_rows, &column_defs)?;
+                    self.compute_group_aggregate_values(aggregates, &group.rows, &column_defs)?;
                 result_row.extend(aggregate_values.iter().cloned());
 
                 if let Some(having_expr) = having {
@@ -153,7 +231,7 @@ impl<'a> PlanExecutor<'a> {
                         input_columns: &column_defs,
                         selected_aggregates: aggregates,
                         aggregate_values: &aggregate_values,
-                        group_rows: &group_rows,
+                        group_rows: &group.rows,
                     };
                     let include = self.evaluate_having(having_expr, &having_context)?;
 
@@ -170,6 +248,31 @@ impl<'a> PlanExecutor<'a> {
             columns: group_by_names.into_iter().chain(aggregate_names).collect(),
             rows: result_rows,
         })
+    }
+
+    fn build_aggregate_groups<'row>(
+        &self,
+        input: &'row ExecutionResult,
+        exprs: &[Expression],
+        columns: &[ColumnDefinition],
+    ) -> Vec<AggregateGroup<'row>> {
+        let mut groups = AggregateGroupCollection::new();
+        for row in &input.rows {
+            let key: Vec<Value> = exprs
+                .iter()
+                .map(|expr| {
+                    self.evaluate_value_expression(expr, columns, row)
+                        .unwrap_or(Value::Null)
+                })
+                .collect();
+            groups.insert(key, row.as_slice());
+        }
+
+        if groups.is_empty() && exprs.is_empty() {
+            groups.insert_empty_group(Vec::new());
+        }
+
+        groups.into_groups()
     }
 
     fn compute_group_aggregate_values(
@@ -211,8 +314,6 @@ impl<'a> PlanExecutor<'a> {
         rows: &[&[Value]],
         columns: &[ColumnDefinition],
     ) -> Result<PreparedAggregateInput, RustqlError> {
-        use std::collections::BTreeSet;
-
         let count_star = matches!(agg.expr.as_ref(), Expression::Column(name) if name == "*")
             && matches!(agg.function, AggregateFunctionType::Count);
 
@@ -224,7 +325,7 @@ impl<'a> PlanExecutor<'a> {
 
         let mut filtered_row_count = 0usize;
         let mut values = Vec::new();
-        let mut seen = agg.distinct.then(BTreeSet::new);
+        let mut seen = agg.distinct.then(AggregateDistinctTracker::new);
 
         for row in rows {
             if let Some(filter_expr) = agg.filter.as_deref()
@@ -244,7 +345,7 @@ impl<'a> PlanExecutor<'a> {
             }
 
             if let Some(seen) = seen.as_mut()
-                && !seen.insert(value.clone())
+                && !seen.insert(&value)
             {
                 continue;
             }
@@ -522,92 +623,136 @@ impl<'a> PlanExecutor<'a> {
         expr: &Expression,
         context: &HavingContext<'_>,
     ) -> Result<bool, RustqlError> {
-        match expr {
-            Expression::BinaryOp { left, op, right } => {
-                match op {
-                    BinaryOperator::And => Ok(self.evaluate_having(left, context)?
-                        && self.evaluate_having(right, context)?),
-                    BinaryOperator::Or => Ok(self.evaluate_having(left, context)?
-                        || self.evaluate_having(right, context)?),
-                    _ => {
-                        let left_val = self.evaluate_having_value(left, context)?;
-                        let right_val = self.evaluate_having_value(right, context)?;
-                        compare_values(&left_val, op, &right_val)
-                    }
-                }
-            }
-            Expression::IsNull { expr, not } => {
-                let value = self.evaluate_having_value(expr, context)?;
-                let is_null = matches!(value, Value::Null);
-                Ok(if *not { !is_null } else { is_null })
-            }
-            Expression::UnaryOp { op, expr } => match op {
-                UnaryOperator::Not => Ok(!self.evaluate_having(expr, context)?),
-                _ => Err(RustqlError::Internal(
-                    "Unsupported unary operation in HAVING clause".to_string(),
-                )),
-            },
-            _ => Err(RustqlError::Internal(
-                "Invalid expression in HAVING clause".to_string(),
-            )),
-        }
+        let materialized = self.materialize_having_expression(expr, context)?;
+        self.evaluate_expression(&materialized, context.result_columns, context.result_row)
+            .map_err(map_having_error)
     }
 
-    fn evaluate_having_value(
+    fn materialize_having_expression(
         &self,
         expr: &Expression,
         context: &HavingContext<'_>,
-    ) -> Result<Value, RustqlError> {
+    ) -> Result<Expression, RustqlError> {
         match expr {
-            Expression::Function(agg) => {
-                if let Some(idx) = context
-                    .selected_aggregates
+            Expression::BinaryOp { left, op, right } => Ok(Expression::BinaryOp {
+                left: Box::new(self.materialize_having_expression(left, context)?),
+                op: op.clone(),
+                right: Box::new(self.materialize_having_expression(right, context)?),
+            }),
+            Expression::UnaryOp { op, expr } => Ok(Expression::UnaryOp {
+                op: op.clone(),
+                expr: Box::new(self.materialize_having_expression(expr, context)?),
+            }),
+            Expression::In { left, values } => Ok(Expression::In {
+                left: Box::new(self.materialize_having_expression(left, context)?),
+                values: values
                     .iter()
-                    .position(|candidate| candidate == agg)
-                {
-                    Ok(context
-                        .aggregate_values
-                        .get(idx)
-                        .cloned()
-                        .unwrap_or(Value::Null))
-                } else {
-                    self.compute_aggregate(agg, context.group_rows, context.input_columns)
-                }
-            }
-            Expression::Value(val) => Ok(val.clone()),
-            Expression::Column(name) => {
-                let col_name = if name.contains('.') {
-                    name.split('.').next_back().unwrap_or(name)
-                } else {
-                    name.as_str()
-                };
-                let idx = context
-                    .result_columns
-                    .iter()
-                    .position(|c| column_names_match(&c.name, col_name))
-                    .ok_or_else(|| RustqlError::ColumnNotFoundInClause {
-                        name: name.clone(),
-                        clause: QueryClause::Having,
-                    })?;
-                Ok(context.result_row.get(idx).cloned().unwrap_or(Value::Null))
-            }
-            Expression::BinaryOp { left, op, right } => {
-                let left_val = self.evaluate_having_value(left, context)?;
-                let right_val = self.evaluate_having_value(right, context)?;
-                match op {
-                    BinaryOperator::Plus
-                    | BinaryOperator::Minus
-                    | BinaryOperator::Multiply
-                    | BinaryOperator::Divide => apply_arithmetic(&left_val, &right_val, op),
-                    _ => Err(RustqlError::Internal(
-                        "Only arithmetic operators are supported in HAVING expressions".to_string(),
-                    )),
-                }
-            }
-            _ => Err(RustqlError::Internal(
-                "Complex expressions not yet supported in HAVING".to_string(),
+                    .map(|value| self.materialize_having_expression(value, context))
+                    .collect::<Result<Vec<_>, _>>()?,
+            }),
+            Expression::IsNull { expr, not } => Ok(Expression::IsNull {
+                expr: Box::new(self.materialize_having_expression(expr, context)?),
+                not: *not,
+            }),
+            Expression::Any { left, op, subquery } => Ok(Expression::Any {
+                left: Box::new(self.materialize_having_expression(left, context)?),
+                op: op.clone(),
+                subquery: subquery.clone(),
+            }),
+            Expression::All { left, op, subquery } => Ok(Expression::All {
+                left: Box::new(self.materialize_having_expression(left, context)?),
+                op: op.clone(),
+                subquery: subquery.clone(),
+            }),
+            Expression::Function(agg) => Ok(Expression::Value(
+                self.evaluate_having_aggregate(agg, context)?,
             )),
+            Expression::Case {
+                operand,
+                when_clauses,
+                else_clause,
+            } => Ok(Expression::Case {
+                operand: operand
+                    .as_ref()
+                    .map(|operand| self.materialize_having_expression(operand, context))
+                    .transpose()?
+                    .map(Box::new),
+                when_clauses: when_clauses
+                    .iter()
+                    .map(|(when_expr, then_expr)| {
+                        Ok((
+                            self.materialize_having_expression(when_expr, context)?,
+                            self.materialize_having_expression(then_expr, context)?,
+                        ))
+                    })
+                    .collect::<Result<Vec<_>, RustqlError>>()?,
+                else_clause: else_clause
+                    .as_ref()
+                    .map(|else_expr| self.materialize_having_expression(else_expr, context))
+                    .transpose()?
+                    .map(Box::new),
+            }),
+            Expression::ScalarFunction { name, args } => Ok(Expression::ScalarFunction {
+                name: name.clone(),
+                args: args
+                    .iter()
+                    .map(|arg| self.materialize_having_expression(arg, context))
+                    .collect::<Result<Vec<_>, RustqlError>>()?,
+            }),
+            Expression::Cast { expr, data_type } => Ok(Expression::Cast {
+                expr: Box::new(self.materialize_having_expression(expr, context)?),
+                data_type: data_type.clone(),
+            }),
+            Expression::IsDistinctFrom { left, right, not } => Ok(Expression::IsDistinctFrom {
+                left: Box::new(self.materialize_having_expression(left, context)?),
+                right: Box::new(self.materialize_having_expression(right, context)?),
+                not: *not,
+            }),
+            Expression::Column(_)
+            | Expression::Default
+            | Expression::Value(_)
+            | Expression::Subquery(_)
+            | Expression::Exists(_)
+            | Expression::WindowFunction { .. } => Ok(expr.clone()),
         }
+    }
+
+    fn evaluate_having_aggregate(
+        &self,
+        agg: &AggregateFunction,
+        context: &HavingContext<'_>,
+    ) -> Result<Value, RustqlError> {
+        if let Some(idx) = context
+            .selected_aggregates
+            .iter()
+            .position(|candidate| candidate == agg)
+        {
+            Ok(context
+                .aggregate_values
+                .get(idx)
+                .cloned()
+                .unwrap_or(Value::Null))
+        } else {
+            self.compute_aggregate(agg, context.group_rows, context.input_columns)
+        }
+    }
+}
+
+fn map_having_error(error: RustqlError) -> RustqlError {
+    match error {
+        RustqlError::ColumnNotFound(name) => RustqlError::ColumnNotFoundInClause {
+            name,
+            clause: QueryClause::Having,
+        },
+        other => other,
+    }
+}
+
+fn numeric_distinct_value(value: &Value) -> Option<f64> {
+    match value {
+        Value::Integer(value) => Some(*value as f64),
+        Value::Float(value) if value.is_finite() => Some(*value),
+        _ => None,
     }
 }
 

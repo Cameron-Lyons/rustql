@@ -11,6 +11,7 @@ impl<'a> QueryPlanner<'a> {
             .map(|item| OrderByExpr {
                 expr: self.resolve_order_by_alias(stmt, &item.expr),
                 asc: item.asc,
+                nulls_first: item.nulls_first,
             })
             .collect()
     }
@@ -51,6 +52,27 @@ impl<'a> QueryPlanner<'a> {
             Expression::UnaryOp { op, expr } => Expression::UnaryOp {
                 op: op.clone(),
                 expr: Box::new(self.resolve_order_by_expression(stmt, expr, false)),
+            },
+            Expression::In { left, values } => Expression::In {
+                left: Box::new(self.resolve_order_by_expression(stmt, left, false)),
+                values: values
+                    .iter()
+                    .map(|value| self.resolve_order_by_expression(stmt, value, false))
+                    .collect(),
+            },
+            Expression::IsNull { expr, not } => Expression::IsNull {
+                expr: Box::new(self.resolve_order_by_expression(stmt, expr, false)),
+                not: *not,
+            },
+            Expression::Any { left, op, subquery } => Expression::Any {
+                left: Box::new(self.resolve_order_by_expression(stmt, left, false)),
+                op: op.clone(),
+                subquery: subquery.clone(),
+            },
+            Expression::All { left, op, subquery } => Expression::All {
+                left: Box::new(self.resolve_order_by_expression(stmt, left, false)),
+                op: op.clone(),
+                subquery: subquery.clone(),
             },
             Expression::ScalarFunction { name, args } => Expression::ScalarFunction {
                 name: name.clone(),

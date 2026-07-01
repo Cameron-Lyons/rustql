@@ -171,3 +171,64 @@ fn test_union_distinguishes_unrelated_literal_types() {
         vec![vec![Value::Integer(1)], vec![Value::Text("a".to_string())],]
     );
 }
+
+#[test]
+fn test_union_uses_numeric_equality_semantics() {
+    let _guard = setup_test();
+
+    let rows = query_rows("SELECT 1 AS x UNION SELECT 1.0 AS x UNION SELECT '1' AS x").unwrap();
+
+    rows.assert_columns(&["x"]);
+    assert_eq!(
+        rows.rows,
+        vec![vec![Value::Integer(1)], vec![Value::Text("1".to_string())]]
+    );
+}
+
+#[test]
+fn test_intersect_uses_numeric_equality_semantics() {
+    let _guard = setup_test();
+
+    let rows = query_rows(
+        "SELECT x FROM (VALUES (1), (1.0), (2)) AS l(x) \
+         INTERSECT \
+         SELECT x FROM (VALUES (1.0), (3)) AS r(x)",
+    )
+    .unwrap();
+
+    rows.assert_columns(&["x"]);
+    assert_eq!(rows.rows, vec![vec![Value::Integer(1)]]);
+}
+
+#[test]
+fn test_all_set_operations_use_numeric_counts() {
+    let _guard = setup_test();
+
+    let intersect_rows = query_rows(
+        "SELECT x FROM (VALUES (1), (1.0), (1)) AS l(x) \
+         INTERSECT ALL \
+         SELECT x FROM (VALUES (1.0), (1)) AS r(x)",
+    )
+    .unwrap();
+    intersect_rows.assert_columns(&["x"]);
+    assert_eq!(
+        intersect_rows.rows,
+        vec![vec![Value::Integer(1)], vec![Value::Integer(1)]]
+    );
+
+    let except_rows = query_rows(
+        "SELECT x FROM (VALUES (1), (1.0), (1), (2)) AS l(x) \
+         EXCEPT ALL \
+         SELECT x FROM (VALUES (1.0)) AS r(x)",
+    )
+    .unwrap();
+    except_rows.assert_columns(&["x"]);
+    assert_eq!(
+        except_rows.rows,
+        vec![
+            vec![Value::Integer(1)],
+            vec![Value::Integer(1)],
+            vec![Value::Integer(2)],
+        ]
+    );
+}

@@ -1,5 +1,6 @@
 mod common;
 use common::*;
+use rustql::ast::Value;
 use std::sync::Mutex;
 
 static GLOBAL_TEST_LOCK: Mutex<()> = Mutex::new(());
@@ -36,6 +37,53 @@ fn test_first_value_with_partition() {
     )
     .unwrap();
     assert!(result.contains("first_in_region"));
+}
+
+#[test]
+fn test_window_partition_uses_numeric_equality_semantics() {
+    let _lock = GLOBAL_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    reset_database();
+
+    let rows = query_rows(
+        "SELECT label, ROW_NUMBER() OVER (PARTITION BY k ORDER BY amount) AS rn \
+         FROM (VALUES (1, 'int', 20), (1.0, 'float', 10), ('1', 'text', 30)) AS t(k, label, amount) \
+         ORDER BY label",
+    )
+    .unwrap();
+
+    rows.assert_columns(&["label", "rn"]);
+    assert_eq!(
+        rows.rows,
+        vec![
+            vec![Value::Text("float".to_string()), Value::Integer(1)],
+            vec![Value::Text("int".to_string()), Value::Integer(2)],
+            vec![Value::Text("text".to_string()), Value::Integer(1)],
+        ]
+    );
+}
+
+#[test]
+fn test_window_order_by_nulls_last() {
+    let _lock = GLOBAL_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    reset_database();
+
+    let rows = query_rows(
+        "SELECT id, ROW_NUMBER() OVER (ORDER BY score DESC NULLS LAST, id) AS rn \
+         FROM (VALUES (1, NULL), (2, 10), (3, 5), (4, NULL)) AS t(id, score) \
+         ORDER BY id",
+    )
+    .unwrap();
+
+    rows.assert_columns(&["id", "rn"]);
+    assert_eq!(
+        rows.rows,
+        vec![
+            vec![Value::Integer(1), Value::Integer(3)],
+            vec![Value::Integer(2), Value::Integer(1)],
+            vec![Value::Integer(3), Value::Integer(2)],
+            vec![Value::Integer(4), Value::Integer(4)],
+        ]
+    );
 }
 
 #[test]

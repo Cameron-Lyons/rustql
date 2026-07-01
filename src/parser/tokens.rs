@@ -2,10 +2,10 @@ use super::*;
 
 pub(super) fn token_to_string(tok: &Token) -> String {
     match tok {
-        Token::Identifier(s) => s.clone(),
+        Token::Identifier(s) => quote_identifier(s),
         Token::Number(n) => n.to_string(),
         Token::Float(f) => f.to_string(),
-        Token::StringLiteral(s) => format!("'{}'", s),
+        Token::StringLiteral(s) => quote_string_literal(s),
         Token::Equal => "=".to_string(),
         Token::NotEqual => "<>".to_string(),
         Token::LessThan => "<".to_string(),
@@ -20,10 +20,15 @@ pub(super) fn token_to_string(tok: &Token) -> String {
         Token::Or => "OR".to_string(),
         Token::Not => "NOT".to_string(),
         Token::Null => "NULL".to_string(),
+        Token::Nulls => "NULLS".to_string(),
+        Token::Unknown => "UNKNOWN".to_string(),
+        Token::True => "TRUE".to_string(),
+        Token::False => "FALSE".to_string(),
         Token::Is => "IS".to_string(),
         Token::In => "IN".to_string(),
         Token::Like => "LIKE".to_string(),
         Token::ILike => "ILIKE".to_string(),
+        Token::Escape => "ESCAPE".to_string(),
         Token::Between => "BETWEEN".to_string(),
         Token::Comma => ",".to_string(),
         Token::Intersect => "INTERSECT".to_string(),
@@ -68,6 +73,7 @@ pub(super) fn token_to_string(tok: &Token) -> String {
         Token::Fetch => "FETCH".to_string(),
         Token::First => "FIRST".to_string(),
         Token::Next => "NEXT".to_string(),
+        Token::Last => "LAST".to_string(),
         Token::Only => "ONLY".to_string(),
         Token::Ties => "TIES".to_string(),
         Token::Row => "ROW".to_string(),
@@ -97,10 +103,10 @@ pub(super) fn token_to_string(tok: &Token) -> String {
 
 pub(super) fn token_to_sql(tok: &Token) -> String {
     match tok {
-        Token::Identifier(s) => s.clone(),
+        Token::Identifier(s) => quote_identifier(s),
         Token::Number(n) => n.to_string(),
         Token::Float(f) => f.to_string(),
-        Token::StringLiteral(s) => format!("'{}'", s),
+        Token::StringLiteral(s) => quote_string_literal(s),
         Token::LeftParen => "(".to_string(),
         Token::RightParen => ")".to_string(),
         Token::Comma => ",".to_string(),
@@ -161,9 +167,14 @@ pub(super) fn token_to_sql(tok: &Token) -> String {
         Token::On => "ON".to_string(),
         Token::In => "IN".to_string(),
         Token::Like => "LIKE".to_string(),
+        Token::Escape => "ESCAPE".to_string(),
         Token::Between => "BETWEEN".to_string(),
         Token::Is => "IS".to_string(),
         Token::Null => "NULL".to_string(),
+        Token::Nulls => "NULLS".to_string(),
+        Token::Unknown => "UNKNOWN".to_string(),
+        Token::True => "TRUE".to_string(),
+        Token::False => "FALSE".to_string(),
         Token::Boolean => "BOOLEAN".to_string(),
         Token::Date => "DATE".to_string(),
         Token::Time => "TIME".to_string(),
@@ -311,6 +322,7 @@ pub(super) fn token_to_sql(tok: &Token) -> String {
         Token::Fetch => "FETCH".to_string(),
         Token::First => "FIRST".to_string(),
         Token::Next => "NEXT".to_string(),
+        Token::Last => "LAST".to_string(),
         Token::Only => "ONLY".to_string(),
         Token::Ties => "TIES".to_string(),
         Token::Row => "ROW".to_string(),
@@ -318,4 +330,36 @@ pub(super) fn token_to_sql(tok: &Token) -> String {
         Token::GenerateSeries => "GENERATE_SERIES".to_string(),
         _ => format!("{:?}", tok),
     }
+}
+
+fn quote_string_literal(value: &str) -> String {
+    let mut quoted = String::with_capacity(value.len() + 2);
+    quoted.push('\'');
+    for ch in value.chars() {
+        match ch {
+            '\'' => quoted.push_str("''"),
+            '\\' => quoted.push_str("\\\\"),
+            _ => quoted.push(ch),
+        }
+    }
+    quoted.push('\'');
+    quoted
+}
+
+fn quote_identifier(value: &str) -> String {
+    if value.contains('.') {
+        return value.to_string();
+    }
+
+    let mut quoted = String::with_capacity(value.len() + 2);
+    quoted.push('"');
+    for ch in value.chars() {
+        if ch == '"' {
+            quoted.push_str("\"\"");
+        } else {
+            quoted.push(ch);
+        }
+    }
+    quoted.push('"');
+    quoted
 }

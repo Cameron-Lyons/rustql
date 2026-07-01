@@ -1,4 +1,6 @@
 use super::*;
+use crate::database::{CompositeIndex, Index};
+use crate::executor::expr::compare_values;
 
 impl<'a> QueryPlanner<'a> {
     pub(super) fn estimate_cost(&self, plan: &PlanNode) -> f64 {
@@ -119,7 +121,7 @@ impl<'a> QueryPlanner<'a> {
             Expression::UnaryOp {
                 op: UnaryOperator::Minus,
                 expr,
-            } => self.constant_integer(expr).map(|value| -value),
+            } => self.constant_integer(expr).and_then(i64::checked_neg),
             _ => None,
         }
     }
@@ -180,15 +182,14 @@ impl<'a> QueryPlanner<'a> {
         match index_usage {
             IndexUsage::Equality { index_name, value } => db
                 .get_index(index_name)
-                .and_then(|index| index.entries.get(value))
-                .map(|rows| rows.len())
+                .map(|index| estimate_index_entry_rows(index, value))
                 .unwrap_or(0),
             IndexUsage::In { index_name, values } => db
                 .get_index(index_name)
                 .map(|index| {
                     values
                         .iter()
-                        .map(|value| index.entries.get(value).map(|rows| rows.len()).unwrap_or(0))
+                        .map(|value| estimate_index_entry_rows(index, value))
                         .sum()
                 })
                 .unwrap_or(0),
@@ -199,23 +200,56 @@ impl<'a> QueryPlanner<'a> {
             }
             IndexUsage::CompositePrefix { index_name, values } => db
                 .get_composite_index(index_name)
-                .map(|index| {
-                    if values.len() == index.columns.len() {
-                        index
-                            .entries
-                            .get(values)
-                            .map(|rows| rows.len())
-                            .unwrap_or(0)
-                    } else {
-                        index
-                            .entries
-                            .iter()
-                            .filter(|(key, _)| key.starts_with(values))
-                            .map(|(_, rows)| rows.len())
-                            .sum()
-                    }
-                })
+                .map(|index| estimate_composite_index_entry_rows(index, values))
                 .unwrap_or(0),
         }
     }
+}
+
+fn estimate_index_entry_rows(index: &Index, value: &Value) -> usize {
+    if is_numeric_value(value) {
+        index
+            .entries
+            .iter()
+            .filter(|(key, _)| values_equal_for_index_selectivity(key, value))
+            .map(|(_, rows)| rows.len())
+            .sum()
+    } else {
+        index.entries.get(value).map(Vec::len).unwrap_or(0)
+    }
+}
+
+fn estimate_composite_index_entry_rows(index: &CompositeIndex, values: &[Value]) -> usize {
+    if values.iter().any(is_numeric_value) {
+        index
+            .entries
+            .iter()
+            .filter(|(key, _)| composite_key_matches_prefix_for_selectivity(key, values))
+            .map(|(_, rows)| rows.len())
+            .sum()
+    } else if values.len() == index.columns.len() {
+        index.entries.get(values).map(Vec::len).unwrap_or(0)
+    } else {
+        index
+            .entries
+            .iter()
+            .filter(|(key, _)| key.starts_with(values))
+            .map(|(_, rows)| rows.len())
+            .sum()
+    }
+}
+
+fn composite_key_matches_prefix_for_selectivity(key: &[Value], prefix: &[Value]) -> bool {
+    prefix.len() <= key.len()
+        && key.iter().zip(prefix).all(|(key_value, prefix_value)| {
+            values_equal_for_index_selectivity(key_value, prefix_value)
+        })
+}
+
+fn values_equal_for_index_selectivity(left: &Value, right: &Value) -> bool {
+    compare_values(left, &BinaryOperator::Equal, right).unwrap_or(false)
+}
+
+fn is_numeric_value(value: &Value) -> bool {
+    matches!(value, Value::Integer(_) | Value::Float(_))
 }

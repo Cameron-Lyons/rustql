@@ -1,5 +1,6 @@
 mod common;
 use common::*;
+use rustql::ast::Value;
 use std::sync::Mutex;
 
 static TEST_MUTEX: Mutex<()> = Mutex::new(());
@@ -35,6 +36,49 @@ fn test_case_when_no_else() {
     )
     .unwrap();
     assert!(result.contains("yes"));
+}
+
+#[test]
+fn test_select_predicates_over_table_rows_return_booleans() {
+    let _guard = setup_test();
+    execute_sql(
+        "CREATE TABLE pred_projection (id INTEGER, name TEXT, score INTEGER, active INTEGER)",
+    )
+    .unwrap();
+    execute_sql(
+        "INSERT INTO pred_projection VALUES \
+         (1, 'Alice', 95, 1), \
+         (2, 'Bob', 70, NULL)",
+    )
+    .unwrap();
+
+    let rows = query_rows(
+        "SELECT name, \
+                score >= 90 AS high_score, \
+                name ILIKE 'a%' AS starts_a, \
+                active IS NULL AS missing_active \
+         FROM pred_projection ORDER BY id",
+    )
+    .unwrap();
+
+    rows.assert_columns(&["name", "high_score", "starts_a", "missing_active"]);
+    assert_eq!(
+        rows.rows,
+        vec![
+            vec![
+                Value::Text("Alice".to_string()),
+                Value::Boolean(true),
+                Value::Boolean(true),
+                Value::Boolean(false),
+            ],
+            vec![
+                Value::Text("Bob".to_string()),
+                Value::Boolean(false),
+                Value::Boolean(false),
+                Value::Boolean(true),
+            ],
+        ]
+    );
 }
 
 #[test]
@@ -185,6 +229,28 @@ fn test_check_constraint() {
     assert!(result.is_err());
     let err = result.unwrap_err();
     assert!(err.contains("CHECK") || err.contains("constraint"));
+}
+
+#[test]
+fn test_check_constraint_escapes_string_literals() {
+    let _guard = setup_test();
+    execute_sql("CREATE TABLE names (name TEXT CHECK (name <> 'O''Malley'))").unwrap();
+
+    assert!(execute_sql("INSERT INTO names VALUES ('Alice')").is_ok());
+
+    let result = execute_sql("INSERT INTO names VALUES ('O''Malley')");
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(err.contains("CHECK") || err.contains("constraint"));
+}
+
+#[test]
+fn test_check_constraint_round_trips_unknown_truth_test() {
+    let _guard = setup_test();
+    execute_sql("CREATE TABLE truth_check (active BOOLEAN CHECK (active IS NOT UNKNOWN))").unwrap();
+
+    assert!(execute_sql("INSERT INTO truth_check VALUES (TRUE)").is_ok());
+    assert!(execute_sql("INSERT INTO truth_check VALUES (UNKNOWN)").is_err());
 }
 
 #[test]
@@ -351,12 +417,64 @@ fn test_case_when_in_where() {
     )
     .unwrap();
 
-    let result = execute_sql(
-        "SELECT * FROM products WHERE CASE WHEN category = 'electronics' THEN price > 150 ELSE price > 0 END",
+    let rows = query_rows(
+        "SELECT id \
+         FROM products \
+         WHERE CASE WHEN category = 'electronics' THEN price > 150 ELSE price > 0 END \
+         ORDER BY id",
+    )
+    .unwrap();
+
+    rows.assert_columns(&["id"]);
+    assert_eq!(
+        rows.rows,
+        vec![vec![Value::Integer(2)], vec![Value::Integer(3)]]
     );
-    if let Ok(output) = result {
-        assert!(output.contains("200"));
-    }
+}
+
+#[test]
+fn test_boolean_value_expression_in_where() {
+    let _guard = setup_test();
+    execute_sql("CREATE TABLE flags (id INTEGER, active BOOLEAN)").unwrap();
+    execute_sql("INSERT INTO flags VALUES (1, 'true'), (2, 'false'), (3, NULL)").unwrap();
+
+    let rows = query_rows("SELECT id FROM flags WHERE active ORDER BY id").unwrap();
+    rows.assert_columns(&["id"]);
+    assert_eq!(rows.rows, vec![vec![Value::Integer(1)]]);
+
+    let rows = query_rows(
+        "SELECT id \
+         FROM flags \
+         WHERE CASE WHEN id = 3 THEN NULL ELSE active END \
+         ORDER BY id",
+    )
+    .unwrap();
+    rows.assert_columns(&["id"]);
+    assert_eq!(rows.rows, vec![vec![Value::Integer(1)]]);
+}
+
+#[test]
+fn test_truth_tests_filter_boolean_values() {
+    let _guard = setup_test();
+    execute_sql("CREATE TABLE truth_flags (id INTEGER, active BOOLEAN)").unwrap();
+    execute_sql("INSERT INTO truth_flags VALUES (1, TRUE), (2, FALSE), (3, UNKNOWN)").unwrap();
+
+    let rows = query_rows("SELECT id FROM truth_flags WHERE active IS TRUE ORDER BY id").unwrap();
+    rows.assert_columns(&["id"]);
+    assert_eq!(rows.rows, vec![vec![Value::Integer(1)]]);
+
+    let rows =
+        query_rows("SELECT id FROM truth_flags WHERE active IS NOT TRUE ORDER BY id").unwrap();
+    rows.assert_columns(&["id"]);
+    assert_eq!(
+        rows.rows,
+        vec![vec![Value::Integer(2)], vec![Value::Integer(3)]]
+    );
+
+    let rows =
+        query_rows("SELECT id FROM truth_flags WHERE active IS UNKNOWN ORDER BY id").unwrap();
+    rows.assert_columns(&["id"]);
+    assert_eq!(rows.rows, vec![vec![Value::Integer(3)]]);
 }
 
 #[test]

@@ -15,6 +15,9 @@ pub fn evaluate_value_expression_with_db(
     db: Option<&dyn DatabaseCatalog>,
 ) -> Result<Value, RustqlError> {
     match expr {
+        Expression::Default => Err(RustqlError::Internal(
+            "DEFAULT must be resolved by INSERT".to_string(),
+        )),
         Expression::Column(name) => {
             if name == "*" {
                 return Ok(Value::Integer(1));
@@ -39,39 +42,52 @@ pub fn evaluate_value_expression_with_db(
             Err(RustqlError::ColumnNotFound(name.clone()))
         }
         Expression::Value(val) => Ok(val.clone()),
-        Expression::BinaryOp { left, op, right } => {
-            let left_val = evaluate_value_expression_with_db(left, columns, row, db)?;
-            let right_val = evaluate_value_expression_with_db(right, columns, row, db)?;
-            match op {
-                BinaryOperator::Plus
-                | BinaryOperator::Minus
-                | BinaryOperator::Multiply
-                | BinaryOperator::Divide => apply_arithmetic(&left_val, &right_val, op),
-                BinaryOperator::Concat => {
-                    let l = format_value(&left_val);
-                    let r = format_value(&right_val);
-                    Ok(Value::Text(format!("{}{}", l, r)))
-                }
-                _ => Err(RustqlError::Internal(
-                    "Only arithmetic operators are supported in SELECT expressions".to_string(),
-                )),
+        Expression::BinaryOp { left, op, right } => match op {
+            BinaryOperator::Plus
+            | BinaryOperator::Minus
+            | BinaryOperator::Multiply
+            | BinaryOperator::Divide => {
+                let left_val = evaluate_value_expression_with_db(left, columns, row, db)?;
+                let right_val = evaluate_value_expression_with_db(right, columns, row, db)?;
+                apply_arithmetic(&left_val, &right_val, op)
             }
-        }
-        Expression::UnaryOp { op, expr } => {
-            let val = evaluate_value_expression_with_db(expr, columns, row, db)?;
-            match op {
-                UnaryOperator::Minus => match val {
+            BinaryOperator::Concat => {
+                let left_val = evaluate_value_expression_with_db(left, columns, row, db)?;
+                let right_val = evaluate_value_expression_with_db(right, columns, row, db)?;
+                let l = format_value(&left_val);
+                let r = format_value(&right_val);
+                Ok(Value::Text(format!("{}{}", l, r)))
+            }
+            BinaryOperator::Escape => Err(RustqlError::Internal(
+                "LIKE ESCAPE marker must be evaluated by LIKE".to_string(),
+            )),
+            _ => evaluate_predicate_value(db, expr, columns, row),
+        },
+        Expression::UnaryOp { op, expr } => match op {
+            UnaryOperator::Minus => {
+                let val = evaluate_value_expression_with_db(expr, columns, row, db)?;
+                match val {
                     Value::Integer(n) => Ok(Value::Integer(-n)),
                     Value::Float(f) => Ok(Value::Float(-f)),
                     _ => Err(RustqlError::Internal(
                         "Unary minus only supported for numeric types".to_string(),
                     )),
-                },
-                _ => Err(RustqlError::Internal(
-                    "Unsupported unary operator in SELECT expression".to_string(),
-                )),
+                }
             }
-        }
+            UnaryOperator::Not => match evaluate_predicate_value(db, expr, columns, row)? {
+                Value::Boolean(value) => Ok(Value::Boolean(!value)),
+                Value::Null => Ok(Value::Null),
+                _ => Err(RustqlError::TypeMismatch(
+                    "NOT operand must evaluate to BOOLEAN".to_string(),
+                )),
+            },
+        },
+        Expression::In { .. }
+        | Expression::IsNull { .. }
+        | Expression::Exists(_)
+        | Expression::Any { .. }
+        | Expression::All { .. }
+        | Expression::IsDistinctFrom { .. } => evaluate_predicate_value(db, expr, columns, row),
         Expression::Case {
             operand,
             when_clauses,
@@ -82,7 +98,9 @@ pub fn evaluate_value_expression_with_db(
                     evaluate_value_expression_with_db(operand_expr, columns, row, db)?;
                 for (when_expr, then_expr) in when_clauses {
                     let when_val = evaluate_value_expression_with_db(when_expr, columns, row, db)?;
-                    if operand_val == when_val {
+                    if compare_values(&operand_val, &BinaryOperator::Equal, &when_val)
+                        .unwrap_or(false)
+                    {
                         return evaluate_value_expression_with_db(then_expr, columns, row, db);
                     }
                 }

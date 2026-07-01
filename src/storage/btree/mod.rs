@@ -12,6 +12,7 @@ use super::StorageEngine;
 use super::atomic_file::{cleanup_temp_file, rename_synced, storage_temp_path};
 use crate::database::Database;
 use crate::error::RustqlError;
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
@@ -91,14 +92,19 @@ impl BTreeStorageEngine {
     }
 
     pub fn invalidate_pages(&self, page_ids: &[u64]) {
+        if page_ids.is_empty() {
+            return;
+        }
+
         let mut cache = self
             .page_cache
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        for &page_id in page_ids {
-            cache.pages.remove(&page_id);
-            cache.access_order.retain(|&id| id != page_id);
+        let page_ids: HashSet<u64> = page_ids.iter().copied().collect();
+        for page_id in &page_ids {
+            cache.pages.remove(page_id);
         }
+        cache.access_order.retain(|id| !page_ids.contains(id));
     }
 
     pub(super) fn save_locked(&self, db: &Database) -> Result<(), RustqlError> {

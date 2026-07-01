@@ -1,6 +1,7 @@
 mod common;
 use common::reset_database;
 use common::*;
+use rustql::ast::Value;
 use std::sync::Once;
 
 static INIT: Once = Once::new();
@@ -28,6 +29,23 @@ fn test_recursive_cte_numbers() {
     assert!(result.contains("3"));
     assert!(result.contains("4"));
     assert!(result.contains("5"));
+}
+
+#[test]
+fn test_recursive_union_uses_numeric_equality_semantics() {
+    setup();
+    let rows = query_rows(
+        "WITH RECURSIVE nums AS (
+            SELECT 1 AS n
+            UNION
+            SELECT 1.0 FROM nums WHERE n = 1
+        )
+        SELECT n FROM nums",
+    )
+    .unwrap();
+
+    rows.assert_columns(&["n"]);
+    assert_eq!(rows.rows, vec![vec![Value::Integer(1)]]);
 }
 
 #[test]
