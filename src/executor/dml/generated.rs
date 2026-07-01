@@ -8,9 +8,23 @@ pub(super) fn coerce_row_to_column_types(
         if col_idx >= row.len() {
             continue;
         }
+        if value_already_matches_type(&row[col_idx], &col_def.data_type) {
+            continue;
+        }
         row[col_idx] = coerce_value_for_type(row[col_idx].clone(), &col_def.data_type)?;
     }
     Ok(())
+}
+
+fn value_already_matches_type(value: &Value, data_type: &DataType) -> bool {
+    match (value, data_type) {
+        (Value::Null, _) => true,
+        (Value::Integer(_), DataType::Integer)
+        | (Value::Text(_), DataType::Text)
+        | (Value::Boolean(_), DataType::Boolean) => true,
+        (Value::Float(value), DataType::Float) => value.is_finite(),
+        _ => false,
+    }
 }
 
 pub(super) fn parse_wrapped_select(sql: &str) -> Result<SelectStatement, RustqlError> {
@@ -94,4 +108,46 @@ pub(super) fn evaluate_generated_columns_update(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn matching_values_skip_coercion() {
+        assert!(value_already_matches_type(
+            &Value::Integer(7),
+            &DataType::Integer
+        ));
+        assert!(value_already_matches_type(
+            &Value::Text("ready".to_string()),
+            &DataType::Text
+        ));
+        assert!(value_already_matches_type(
+            &Value::Boolean(true),
+            &DataType::Boolean
+        ));
+        assert!(value_already_matches_type(
+            &Value::Float(1.25),
+            &DataType::Float
+        ));
+        assert!(value_already_matches_type(&Value::Null, &DataType::Date));
+    }
+
+    #[test]
+    fn values_requiring_validation_or_conversion_do_not_skip_coercion() {
+        assert!(!value_already_matches_type(
+            &Value::Text("7".to_string()),
+            &DataType::Integer
+        ));
+        assert!(!value_already_matches_type(
+            &Value::Float(f64::NAN),
+            &DataType::Float
+        ));
+        assert!(!value_already_matches_type(
+            &Value::Date("2024-01-01".to_string()),
+            &DataType::Date
+        ));
+    }
 }
