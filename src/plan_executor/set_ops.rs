@@ -41,21 +41,8 @@ impl<'a> PlanExecutor<'a> {
                 combined
             }
             SetOperation::IntersectAll => {
-                let mut right_counts: BTreeMap<Vec<Value>, usize> = BTreeMap::new();
-                for row in right.rows {
-                    *right_counts.entry(row).or_insert(0) += 1;
-                }
-
-                let mut left_counts: BTreeMap<Vec<Value>, usize> = BTreeMap::new();
-                let mut left_order = Vec::new();
-                for row in left.rows {
-                    let count = left_counts.entry(row.clone()).or_insert(0);
-                    if *count == 0 {
-                        left_order.push(row.clone());
-                    }
-                    *count += 1;
-                }
-
+                let right_counts = row_counts(right.rows);
+                let (left_counts, left_order) = ordered_row_counts(left.rows);
                 let mut combined = Vec::new();
                 for row in left_order {
                     let left_count = left_counts.get(&row).copied().unwrap_or(0);
@@ -78,21 +65,8 @@ impl<'a> PlanExecutor<'a> {
                 combined
             }
             SetOperation::ExceptAll => {
-                let mut right_counts: BTreeMap<Vec<Value>, usize> = BTreeMap::new();
-                for row in right.rows {
-                    *right_counts.entry(row).or_insert(0) += 1;
-                }
-
-                let mut left_counts: BTreeMap<Vec<Value>, usize> = BTreeMap::new();
-                let mut left_order = Vec::new();
-                for row in left.rows {
-                    let count = left_counts.entry(row.clone()).or_insert(0);
-                    if *count == 0 {
-                        left_order.push(row.clone());
-                    }
-                    *count += 1;
-                }
-
+                let right_counts = row_counts(right.rows);
+                let (left_counts, left_order) = ordered_row_counts(left.rows);
                 let mut combined = Vec::new();
                 for row in left_order {
                     let left_count = left_counts.get(&row).copied().unwrap_or(0);
@@ -110,4 +84,28 @@ impl<'a> PlanExecutor<'a> {
             rows,
         })
     }
+}
+
+fn row_counts(rows: Vec<Vec<Value>>) -> BTreeMap<Vec<Value>, usize> {
+    let mut counts = BTreeMap::new();
+    for row in rows {
+        *counts.entry(row).or_insert(0) += 1;
+    }
+    counts
+}
+
+fn ordered_row_counts(rows: Vec<Vec<Value>>) -> (BTreeMap<Vec<Value>, usize>, Vec<Vec<Value>>) {
+    let mut counts = BTreeMap::new();
+    let mut order = Vec::new();
+
+    for row in rows {
+        if let Some(count) = counts.get_mut(&row) {
+            *count += 1;
+        } else {
+            order.push(row.clone());
+            counts.insert(row, 1);
+        }
+    }
+
+    (counts, order)
 }
