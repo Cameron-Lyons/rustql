@@ -43,14 +43,7 @@ pub(crate) fn coerce_value_for_type(
         DataType::Boolean => match &val {
             Value::Boolean(_) => Ok(val),
             Value::Integer(i) => Ok(Value::Boolean(*i != 0)),
-            Value::Text(s) => match s.trim().to_lowercase().as_str() {
-                "true" | "1" | "yes" => Ok(Value::Boolean(true)),
-                "false" | "0" | "no" => Ok(Value::Boolean(false)),
-                _ => Err(RustqlError::TypeMismatch(format!(
-                    "Cannot cast '{}' to BOOLEAN",
-                    s
-                ))),
-            },
+            Value::Text(s) => cast_text_to_boolean(s),
             _ => Err(RustqlError::TypeMismatch(format!(
                 "Cannot cast {:?} to BOOLEAN",
                 val
@@ -137,9 +130,55 @@ fn cast_float_to_integer(value: f64) -> Result<Value, RustqlError> {
     Ok(Value::Integer(truncated as i64))
 }
 
+fn cast_text_to_boolean(value: &str) -> Result<Value, RustqlError> {
+    let trimmed = value.trim();
+    let is_true_literal = trimmed == "1"
+        || trimmed.eq_ignore_ascii_case("true")
+        || trimmed.eq_ignore_ascii_case("yes");
+    if is_true_literal {
+        return Ok(Value::Boolean(true));
+    }
+
+    let is_false_literal = trimmed == "0"
+        || trimmed.eq_ignore_ascii_case("false")
+        || trimmed.eq_ignore_ascii_case("no");
+    if is_false_literal {
+        return Ok(Value::Boolean(false));
+    }
+
+    Err(RustqlError::TypeMismatch(format!(
+        "Cannot cast '{}' to BOOLEAN",
+        value
+    )))
+}
+
 fn temporal_cast_error(value: &str, target: &str, expected_format: &str) -> RustqlError {
     RustqlError::TypeMismatch(format!(
         "Cannot cast '{}' to {}; expected {}",
         value, target, expected_format
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn casts_text_boolean_literals_case_insensitively() {
+        assert_eq!(
+            execute_cast(Value::Text(" YeS ".to_string()), &DataType::Boolean).unwrap(),
+            Value::Boolean(true)
+        );
+        assert_eq!(
+            execute_cast(Value::Text("FALSE".to_string()), &DataType::Boolean).unwrap(),
+            Value::Boolean(false)
+        );
+    }
+
+    #[test]
+    fn invalid_text_boolean_cast_reports_original_value() {
+        let error = execute_cast(Value::Text(" maybe ".to_string()), &DataType::Boolean)
+            .expect_err("invalid boolean text should fail");
+        assert_eq!(error.to_string(), "Cannot cast ' maybe ' to BOOLEAN");
+    }
 }
