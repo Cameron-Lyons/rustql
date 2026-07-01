@@ -66,25 +66,6 @@ pub(crate) fn execute_insert(
         stmt.values
             .iter()
             .map(|values| {
-                let mut full_row: Vec<Value> = table_ref
-                    .columns
-                    .iter()
-                    .enumerate()
-                    .map(|(idx, col)| {
-                        if idx < values.len() {
-                            values[idx].clone()
-                        } else {
-                            col.default_value.clone().unwrap_or(Value::Null)
-                        }
-                    })
-                    .collect();
-
-                for (idx, val) in values.iter().enumerate() {
-                    if idx < full_row.len() {
-                        full_row[idx] = val.clone();
-                    }
-                }
-
                 if values.len() != table_ref.columns.len() {
                     return Err(RustqlError::Internal(format!(
                         "Column count mismatch: expected {}, got {}",
@@ -93,7 +74,7 @@ pub(crate) fn execute_insert(
                     )));
                 }
 
-                Ok(full_row)
+                Ok(values.clone())
             })
             .collect::<Result<Vec<Vec<Value>>, RustqlError>>()?
     };
