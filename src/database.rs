@@ -302,7 +302,8 @@ mod optional_filter_expression {
 
 mod composite_index_entries {
     use super::*;
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use serde::ser::SerializeSeq;
+    use serde::{Deserialize, Deserializer, Serializer};
 
     pub fn serialize<S>(
         entries: &BTreeMap<Vec<Value>, Vec<RowId>>,
@@ -311,11 +312,11 @@ mod composite_index_entries {
     where
         S: Serializer,
     {
-        let converted: Vec<(Vec<Value>, Vec<RowId>)> = entries
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-        converted.serialize(serializer)
+        let mut seq = serializer.serialize_seq(Some(entries.len()))?;
+        for (key, row_ids) in entries {
+            seq.serialize_element(&(key, row_ids))?;
+        }
+        seq.end()
     }
 
     pub fn deserialize<'de, D>(

@@ -1,5 +1,8 @@
 mod common;
 use common::*;
+use rustql::Value;
+use rustql::database::{CompositeIndex, RowId};
+use std::collections::BTreeMap;
 use std::sync::Mutex;
 
 static TEST_MUTEX: Mutex<()> = Mutex::new(());
@@ -123,4 +126,33 @@ fn test_composite_index_tracks_insert_update_and_delete() {
     execute_sql("DELETE FROM lifecycle_idx WHERE a = 3 AND b = 4").unwrap();
     let deleted = execute_sql("SELECT payload FROM lifecycle_idx WHERE a = 3 AND b = 4").unwrap();
     assert!(!deleted.contains("new"), "{deleted:?}");
+}
+
+#[test]
+fn test_composite_index_serialization_round_trips_entries() {
+    let mut entries = BTreeMap::new();
+    entries.insert(
+        vec![Value::Integer(1), Value::Text("2024-01-01".to_string())],
+        vec![RowId(7), RowId(9)],
+    );
+
+    let index = CompositeIndex {
+        name: "idx_orders_customer_date".to_string(),
+        table: "orders".to_string(),
+        columns: vec!["customer_id".to_string(), "order_date".to_string()],
+        entries: entries.clone(),
+        filter_expr: None,
+    };
+
+    let encoded = serde_json::to_value(&index).expect("composite index should serialize");
+    assert!(
+        encoded
+            .get("entries")
+            .and_then(|entries| entries.as_array())
+            .is_some_and(|entries| entries.len() == 1)
+    );
+
+    let decoded: CompositeIndex =
+        serde_json::from_value(encoded).expect("composite index should deserialize");
+    assert_eq!(decoded.entries, entries);
 }
