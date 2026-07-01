@@ -30,23 +30,14 @@ pub(crate) fn execute_update(
 
     let mut rows_to_update: Vec<(usize, crate::database::RowId, Vec<Value>)> = Vec::new();
 
-    let rows_to_check: Vec<(usize, crate::database::RowId, &Vec<Value>)> =
-        if let Some(ref candidate_set) = candidate_indices {
-            table_ref
-                .iter_rows_with_ids()
-                .enumerate()
-                .filter(|(_, (row_id, _))| candidate_set.contains(row_id))
-                .map(|(idx, (row_id, row))| (idx, row_id, row))
-                .collect()
-        } else {
-            table_ref
-                .iter_rows_with_ids()
-                .enumerate()
-                .map(|(idx, (row_id, row))| (idx, row_id, row))
-                .collect()
-        };
+    for (row_idx, (row_id, row)) in table_ref.iter_rows_with_ids().enumerate() {
+        if candidate_indices
+            .as_ref()
+            .is_some_and(|candidate_set| !candidate_set.contains(&row_id))
+        {
+            continue;
+        }
 
-    for (row_idx, row_id, row) in rows_to_check {
         let should_update = if let Some(ref where_expr) = stmt.where_clause {
             evaluate_expression(Some(&*db), where_expr, &table_ref.columns, row)?
         } else {
