@@ -75,6 +75,7 @@ pub enum RustqlError {
     TypeMismatch(String),
     TransactionError(String),
     AggregateError(String),
+    ArithmeticError(String),
     IndexError(String),
     IndexNotFound {
         name: String,
@@ -120,6 +121,7 @@ impl fmt::Display for RustqlError {
             RustqlError::TypeMismatch(msg) => write!(f, "{}", msg),
             RustqlError::TransactionError(msg) => write!(f, "{}", msg),
             RustqlError::AggregateError(msg) => write!(f, "{}", msg),
+            RustqlError::ArithmeticError(msg) => write!(f, "{}", msg),
             RustqlError::IndexError(msg) => write!(f, "{}", msg),
             RustqlError::IndexNotFound { name } => {
                 write!(f, "Index '{}' does not exist", name)
