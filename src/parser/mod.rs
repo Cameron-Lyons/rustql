@@ -19,7 +19,7 @@ use tokens::{token_to_sql, token_to_string};
 
 pub struct Parser {
     tokens: Vec<Token>,
-    spans: Vec<Option<SourceSpan>>,
+    spans: Option<Vec<Option<SourceSpan>>>,
     current: usize,
 }
 
