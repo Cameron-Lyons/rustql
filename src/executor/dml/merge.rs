@@ -78,44 +78,28 @@ pub(crate) fn execute_merge(
             .tables
             .get(&stmt.target_table)
             .ok_or_else(|| RustqlError::TableNotFound(stmt.target_table.clone()))?;
-        let target_rows_snapshot: Vec<(usize, Vec<Value>)> = target_table
-            .rows
-            .iter()
-            .enumerate()
-            .map(|(i, r)| (i, r.clone()))
-            .collect();
 
-        let mut matched_indices: Vec<usize> = Vec::new();
-        for (row_idx, target_row) in &target_rows_snapshot {
-            let mut combined_row: Vec<Value> = target_row.clone();
-            combined_row.extend(source_row.clone());
+        let mut matched_rows: Vec<(usize, Vec<Value>)> = Vec::new();
+        for (row_idx, target_row) in target_table.rows.iter().enumerate() {
+            let combined_row = combined_merge_row(target_row, source_row);
             if evaluate_expression(
                 Some(&*db),
                 &stmt.on_condition,
                 &combined_columns,
                 &combined_row,
             )? {
-                matched_indices.push(*row_idx);
+                matched_rows.push((row_idx, target_row.clone()));
             }
         }
 
-        let is_matched = !matched_indices.is_empty();
+        let is_matched = !matched_rows.is_empty();
 
         for when_clause in &stmt.when_clauses {
             match when_clause {
                 MergeWhenClause::Matched { condition, action } if is_matched => {
-                    for &row_idx in &matched_indices {
-                        let target_row = target_rows_snapshot
-                            .iter()
-                            .find(|(i, _)| *i == row_idx)
-                            .map(|(_, r)| r.clone())
-                            .ok_or_else(|| {
-                                RustqlError::Internal(
-                                    "Missing matched target row for merge".to_string(),
-                                )
-                            })?;
-                        let mut combined_row: Vec<Value> = target_row.clone();
-                        combined_row.extend(source_row.clone());
+                    for (row_idx, target_row) in &matched_rows {
+                        let row_idx = *row_idx;
+                        let combined_row = combined_merge_row(target_row, source_row);
 
                         let passes_condition = if let Some(cond) = condition {
                             evaluate_expression(Some(&*db), cond, &combined_columns, &combined_row)?
@@ -261,4 +245,11 @@ pub(crate) fn execute_merge(
 
     save_if_not_in_transaction(context, &db)?;
     Ok(command_result(CommandTag::Merge, affected as u64))
+}
+
+fn combined_merge_row(target_row: &[Value], source_row: &[Value]) -> Vec<Value> {
+    let mut combined_row = Vec::with_capacity(target_row.len() + source_row.len());
+    combined_row.extend_from_slice(target_row);
+    combined_row.extend_from_slice(source_row);
+    combined_row
 }
