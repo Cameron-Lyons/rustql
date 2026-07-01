@@ -12,22 +12,25 @@ pub(super) struct PageCache {
 impl PageCache {
     pub(super) fn new() -> Self {
         PageCache {
-            pages: HashMap::new(),
-            access_order: VecDeque::new(),
+            pages: HashMap::with_capacity(MAX_CACHE_SIZE),
+            access_order: VecDeque::with_capacity(MAX_CACHE_SIZE),
             hits: 0,
             misses: 0,
         }
     }
 
     pub(super) fn get(&mut self, page_id: &u64) -> Option<&BTreePage> {
-        if self.pages.contains_key(page_id) {
-            self.hits += 1;
-            self.access_order.retain(|&id| id != *page_id);
-            self.access_order.push_back(*page_id);
-            self.pages.get(page_id)
-        } else {
-            self.misses += 1;
-            None
+        match self.pages.get(page_id) {
+            Some(page) => {
+                self.hits += 1;
+                self.access_order.retain(|&id| id != *page_id);
+                self.access_order.push_back(*page_id);
+                Some(page)
+            }
+            None => {
+                self.misses += 1;
+                None
+            }
         }
     }
 
@@ -56,5 +59,18 @@ impl PageCache {
 
     pub(super) fn stats(&self) -> (u64, u64, usize) {
         (self.hits, self.misses, self.pages.len())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn page_cache_preallocates_for_cache_limit() {
+        let cache = PageCache::new();
+
+        assert!(cache.pages.capacity() >= MAX_CACHE_SIZE);
+        assert!(cache.access_order.capacity() >= MAX_CACHE_SIZE);
     }
 }
