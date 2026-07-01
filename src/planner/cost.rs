@@ -78,6 +78,9 @@ impl<'a> QueryPlanner<'a> {
     }
 
     pub(super) fn estimate_sort_cost(&self, row_count: usize) -> f64 {
+        if row_count <= 1 {
+            return 0.0;
+        }
         row_count as f64 * (row_count as f64).ln() * SORT_COMPLEXITY_COST
     }
 
