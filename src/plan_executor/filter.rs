@@ -9,10 +9,10 @@ impl<'a> PlanExecutor<'a> {
         let mut filtered_rows = Vec::new();
         let columns = column_definitions_from_names(&input.columns);
 
-        for row in &input.rows {
-            let include = self.evaluate_expression(condition, &columns, row)?;
+        for row in input.rows {
+            let include = self.evaluate_expression(condition, &columns, &row)?;
             if include {
-                filtered_rows.push(row.clone());
+                filtered_rows.push(row);
             }
         }
 
