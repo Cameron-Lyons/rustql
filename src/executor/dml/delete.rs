@@ -131,12 +131,6 @@ pub(crate) fn execute_delete(
         };
 
         let columns = table_ref.columns.clone();
-        let rows: Vec<(usize, Vec<Value>)> = table_ref
-            .rows
-            .iter()
-            .enumerate()
-            .map(|(i, r)| (i, r.clone()))
-            .collect();
 
         let mut rows_to_delete_indices = Vec::new();
 
@@ -151,17 +145,14 @@ pub(crate) fn execute_delete(
         } else if let Some(ref where_expr) = stmt.where_clause {
             let rows_to_check: Vec<(usize, &Vec<Value>)> =
                 if let Some(ref candidate_set) = candidate_indices {
-                    rows.iter()
-                        .filter(|(idx, _)| {
-                            table_ref
-                                .row_id_at(*idx)
-                                .map(|row_id| candidate_set.contains(&row_id))
-                                .unwrap_or(false)
-                        })
-                        .map(|(i, r)| (*i, r))
+                    table_ref
+                        .iter_rows_with_ids()
+                        .enumerate()
+                        .filter(|(_, (row_id, _))| candidate_set.contains(row_id))
+                        .map(|(idx, (_, row))| (idx, row))
                         .collect()
                 } else {
-                    rows.iter().map(|(i, r)| (*i, r)).collect()
+                    table_ref.rows.iter().enumerate().collect()
                 };
 
             for (idx, row) in rows_to_check {
@@ -170,7 +161,7 @@ pub(crate) fn execute_delete(
                 }
             }
         } else {
-            rows_to_delete_indices = (0..rows.len()).collect();
+            rows_to_delete_indices = (0..table_ref.rows.len()).collect();
         }
 
         rows_to_delete_indices.sort();
