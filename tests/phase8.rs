@@ -263,6 +263,34 @@ fn test_merge_insert_applies_auto_increment_generated_columns_and_indexes() {
 }
 
 #[test]
+fn test_merge_insert_rejects_auto_increment_overflow() {
+    let _g = setup();
+    execute_sql("CREATE TABLE merge_auto_overflow (id INTEGER AUTO_INCREMENT, label TEXT)")
+        .unwrap();
+    execute_sql("INSERT INTO merge_auto_overflow VALUES (9223372036854775807, 'max')").unwrap();
+    execute_sql("CREATE TABLE merge_auto_overflow_source (label TEXT)").unwrap();
+    execute_sql("INSERT INTO merge_auto_overflow_source VALUES ('next')").unwrap();
+
+    let err = execute_sql(
+        "MERGE INTO merge_auto_overflow USING merge_auto_overflow_source
+         ON merge_auto_overflow.label = merge_auto_overflow_source.label
+         WHEN NOT MATCHED THEN INSERT (label)
+         VALUES (merge_auto_overflow_source.label)",
+    )
+    .unwrap_err();
+
+    assert!(err.contains("AUTO_INCREMENT value overflow"), "{err}");
+    assert_rows(
+        "SELECT id, label FROM merge_auto_overflow",
+        &["id", "label"],
+        vec![vec![
+            Value::Integer(i64::MAX),
+            Value::Text("max".to_string()),
+        ]],
+    );
+}
+
+#[test]
 fn test_merge_insert_validates_unique_constraints() {
     let _g = setup();
     execute_sql(

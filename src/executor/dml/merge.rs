@@ -361,7 +361,12 @@ fn apply_merge_auto_increment_values(
                 })
                 .max()
                 .unwrap_or(0);
-            row[col_idx] = Value::Integer(max_val + 1);
+            row[col_idx] = Value::Integer(max_val.checked_add(1).ok_or_else(|| {
+                RustqlError::Internal(format!(
+                    "AUTO_INCREMENT value overflow for column '{}'",
+                    col_def.name
+                ))
+            })?);
         }
     }
 
