@@ -19,16 +19,16 @@ impl PageCache {
         }
     }
 
-    pub(super) fn get(&mut self, page_id: &u64) -> Option<&BTreePage> {
-        if self.pages.contains_key(page_id) {
-            self.hits += 1;
-            self.access_order.retain(|&id| id != *page_id);
-            self.access_order.push_back(*page_id);
-            self.pages.get(page_id)
-        } else {
+    pub(super) fn get_cloned(&mut self, page_id: u64) -> Option<BTreePage> {
+        let Some(page) = self.pages.get(&page_id).cloned() else {
             self.misses += 1;
-            None
-        }
+            return None;
+        };
+
+        self.hits += 1;
+        self.access_order.retain(|&id| id != page_id);
+        self.access_order.push_back(page_id);
+        Some(page)
     }
 
     pub(super) fn insert(&mut self, page_id: u64, page: BTreePage) {
@@ -56,5 +56,41 @@ impl PageCache {
 
     pub(super) fn stats(&self) -> (u64, u64, usize) {
         (self.hits, self.misses, self.pages.len())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::btree::page::PageKind;
+
+    #[test]
+    fn get_cloned_tracks_hits_and_refreshes_recency() {
+        let mut cache = PageCache::new();
+        cache.insert(1, BTreePage::new(1, PageKind::Leaf));
+        cache.insert(2, BTreePage::new(2, PageKind::Leaf));
+
+        let page = cache.get_cloned(1).expect("page should be cached");
+
+        assert_eq!(page.header.page_id, 1);
+        assert_eq!(cache.stats(), (1, 0, 2));
+        assert_eq!(
+            cache.access_order.iter().copied().collect::<Vec<_>>(),
+            vec![2, 1]
+        );
+    }
+
+    #[test]
+    fn get_cloned_tracks_misses_without_changing_cache_contents() {
+        let mut cache = PageCache::new();
+        cache.insert(1, BTreePage::new(1, PageKind::Leaf));
+
+        assert!(cache.get_cloned(2).is_none());
+
+        assert_eq!(cache.stats(), (0, 1, 1));
+        assert_eq!(
+            cache.access_order.iter().copied().collect::<Vec<_>>(),
+            vec![1]
+        );
     }
 }
