@@ -1,7 +1,10 @@
 use super::*;
 
 impl<'a> QueryPlanner<'a> {
-    pub(super) fn plan_constant_select(&self, stmt: &SelectStatement) -> PlanNode {
+    pub(super) fn plan_constant_select(
+        &self,
+        stmt: &SelectStatement,
+    ) -> Result<PlanNode, RustqlError> {
         let mut plan = PlanNode::OneRow {
             cost: 0.01,
             rows: 1,
@@ -10,6 +13,12 @@ impl<'a> QueryPlanner<'a> {
         if let Some(ref where_clause) = stmt.where_clause {
             plan = self.plan_filter(plan, where_clause.clone());
         }
+
+        let planned_order_by = stmt
+            .order_by
+            .as_ref()
+            .map(|order_by| self.resolve_order_by_aliases(stmt, order_by))
+            .transpose()?;
 
         let (limit, with_ties) = match stmt.fetch.as_ref() {
             Some(fetch) => (fetch.count, fetch.with_ties),
@@ -22,11 +31,11 @@ impl<'a> QueryPlanner<'a> {
                 limit,
                 offset,
                 with_ties,
-                stmt.order_by.clone().unwrap_or_default(),
+                planned_order_by.unwrap_or_default(),
             );
         }
 
-        plan
+        Ok(plan)
     }
 
     pub(super) fn plan_filter(&self, input: PlanNode, condition: Expression) -> PlanNode {
