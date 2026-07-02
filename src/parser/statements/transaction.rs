@@ -21,7 +21,6 @@ impl Parser {
         self.consume(Token::Rollback)?;
         if *self.current_token() == Token::Transaction {
             self.advance();
-            return Ok(Statement::RollbackTransaction);
         }
         if *self.current_token() == Token::To {
             self.advance();
@@ -68,5 +67,32 @@ impl Parser {
             }
         };
         Ok(Statement::ReleaseSavepoint(name))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lexer::tokenize;
+    use crate::parser::parse;
+
+    fn parse_sql(sql: &str) -> Result<Statement, RustqlError> {
+        parse(tokenize(sql).expect("SQL should lex"))
+    }
+
+    #[test]
+    fn rollback_transaction_to_savepoint_parses_savepoint_target() {
+        let statement = parse_sql("ROLLBACK TRANSACTION TO SAVEPOINT sp1")
+            .expect("ROLLBACK TRANSACTION TO SAVEPOINT should parse");
+
+        assert_eq!(statement, Statement::RollbackToSavepoint("sp1".to_string()));
+    }
+
+    #[test]
+    fn rollback_transaction_without_target_stays_full_transaction_rollback() {
+        let statement =
+            parse_sql("ROLLBACK TRANSACTION").expect("ROLLBACK TRANSACTION should parse");
+
+        assert_eq!(statement, Statement::RollbackTransaction);
     }
 }
