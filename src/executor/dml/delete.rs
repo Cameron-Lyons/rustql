@@ -20,14 +20,15 @@ pub(crate) fn execute_delete(
         )?;
 
         let main_columns = main_table.columns.clone();
-        let mut combined_columns = qualify_columns(&main_columns, &stmt.table);
+        let mut combined_columns =
+            Vec::with_capacity(main_columns.len() + using_source.columns.len());
+        combined_columns.extend(qualify_columns(&main_columns, &stmt.table));
         combined_columns.extend(using_source.columns.clone());
 
-        let mut matching_indices: HashSet<usize> = HashSet::new();
+        let mut matching_indices: HashSet<usize> = HashSet::with_capacity(main_table.rows.len());
         for (main_idx, main_row) in main_table.rows.iter().enumerate() {
             for using_row in &using_source.rows {
-                let mut combined_row: Vec<Value> = main_row.clone();
-                combined_row.extend(using_row.clone());
+                let combined_row = combined_delete_using_row(main_row, using_row);
 
                 let matches = if let Some(ref where_expr) = stmt.where_clause {
                     evaluate_expression(Some(&*db), where_expr, &combined_columns, &combined_row)?
@@ -237,4 +238,11 @@ pub(crate) fn execute_delete(
     }
 
     Ok(command_result(CommandTag::Delete, deleted_count as u64))
+}
+
+fn combined_delete_using_row(main_row: &[Value], using_row: &[Value]) -> Vec<Value> {
+    let mut combined = Vec::with_capacity(main_row.len() + using_row.len());
+    combined.extend_from_slice(main_row);
+    combined.extend_from_slice(using_row);
+    combined
 }
