@@ -129,7 +129,9 @@ impl BTreeEntry {
             Value::Integer(_) => 9,
             Value::Float(_) => 9,
             Value::Boolean(_) => 2,
-            Value::Text(s) | Value::Date(s) | Value::Time(s) | Value::DateTime(s) => 1 + s.len(),
+            Value::Text(s) | Value::Date(s) | Value::Time(s) | Value::DateTime(s) => {
+                1 + std::mem::size_of::<u32>() + s.len()
+            }
         };
         let value_size = if kind == PageKind::Leaf && reserved & LEAF_INLINE_DATA_FLAG != 0 {
             4 + self
@@ -412,5 +414,34 @@ impl BTreePage {
         }
 
         Ok(BTreePage { header, entries })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn can_accept_entry_accounts_for_text_key_length_prefix() {
+        let page = BTreePage::new(1, PageKind::Leaf);
+        let max_text_len = BTREE_PAGE_SIZE
+            - BTREE_PAGE_HEADER_SIZE
+            - 1
+            - std::mem::size_of::<u32>()
+            - std::mem::size_of::<u64>();
+
+        let fitting = BTreeEntry::new(Value::Text("x".repeat(max_text_len)), 7);
+        assert!(page.can_accept_entry(&fitting));
+
+        let mut fitting_page = BTreePage::new(1, PageKind::Leaf);
+        fitting_page.push_entry(fitting);
+        assert!(fitting_page.to_bytes().is_ok());
+
+        let oversized = BTreeEntry::new(Value::Text("x".repeat(max_text_len + 1)), 7);
+        assert!(!page.can_accept_entry(&oversized));
+
+        let mut oversized_page = BTreePage::new(1, PageKind::Leaf);
+        oversized_page.push_entry(oversized);
+        assert!(oversized_page.to_bytes().is_err());
     }
 }
