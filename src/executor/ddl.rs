@@ -203,6 +203,36 @@ pub fn execute_alter_table(
         return Ok(command_result(CommandTag::AlterTable, 0));
     }
 
+    if let AlterOperation::RenameColumn { ref old, ref new } = stmt.operation {
+        let table = db
+            .tables
+            .get(&stmt.table)
+            .ok_or_else(|| RustqlError::TableNotFound(stmt.table.clone()))?;
+        let col_exists = table.columns.iter().any(|c| c.name == *old);
+        if !col_exists {
+            return Err(RustqlError::ColumnDoesNotExist { name: old.clone() });
+        }
+        if table
+            .columns
+            .iter()
+            .any(|c| c.name == *new && c.name != *old)
+        {
+            return Err(RustqlError::ColumnAlreadyExists { name: new.clone() });
+        }
+
+        rename_column_schema_references(&mut db, &stmt.table, old, new);
+        super::record_wal_entry(
+            context,
+            WalEntry::AlterRenameColumn {
+                table: stmt.table.clone(),
+                old_name: old.clone(),
+                new_name: new.clone(),
+            },
+        );
+        save_if_not_in_transaction(context, &db)?;
+        return Ok(command_result(CommandTag::AlterTable, 0));
+    }
+
     let table = db
         .tables
         .get_mut(&stmt.table)
@@ -265,31 +295,9 @@ pub fn execute_alter_table(
             save_if_not_in_transaction(context, &db)?;
             Ok(command_result(CommandTag::AlterTable, 0))
         }
-        AlterOperation::RenameColumn { old, new } => {
-            let col_exists = table.columns.iter().any(|c| c.name == old);
-            if !col_exists {
-                return Err(RustqlError::ColumnDoesNotExist { name: old.clone() });
-            }
-            if table.columns.iter().any(|c| c.name == new && c.name != old) {
-                return Err(RustqlError::ColumnAlreadyExists { name: new.clone() });
-            }
-            for column in &mut table.columns {
-                if column.name == old {
-                    column.name = new.clone();
-                    break;
-                }
-            }
-            super::record_wal_entry(
-                context,
-                WalEntry::AlterRenameColumn {
-                    table: stmt.table.clone(),
-                    old_name: old.clone(),
-                    new_name: new.clone(),
-                },
-            );
-            save_if_not_in_transaction(context, &db)?;
-            Ok(command_result(CommandTag::AlterTable, 0))
-        }
+        AlterOperation::RenameColumn { .. } => Err(RustqlError::Internal(
+            "ALTER TABLE RENAME COLUMN must be handled before table lookup".to_string(),
+        )),
         AlterOperation::RenameTable(_) => Err(RustqlError::Internal(
             "ALTER TABLE RENAME must be handled before table lookup".to_string(),
         )),
@@ -377,6 +385,158 @@ pub fn execute_alter_table(
             save_if_not_in_transaction(context, &db)?;
             Ok(command_result(CommandTag::AlterTable, 0))
         }
+    }
+}
+
+pub(crate) fn rename_column_schema_references(
+    db: &mut Database,
+    table_name: &str,
+    old_name: &str,
+    new_name: &str,
+) {
+    if let Some(table) = db.tables.get_mut(table_name) {
+        for column in &mut table.columns {
+            if column.name == old_name {
+                column.name = new_name.to_string();
+                break;
+            }
+        }
+        rename_table_constraint_columns(&mut table.constraints, old_name, new_name);
+    }
+
+    for table in db.tables.values_mut() {
+        for column in &mut table.columns {
+            if let Some(foreign_key) = &mut column.foreign_key
+                && foreign_key.referenced_table == table_name
+                && foreign_key.referenced_column == old_name
+            {
+                foreign_key.referenced_column = new_name.to_string();
+            }
+        }
+    }
+
+    for index in db.indexes.values_mut() {
+        if index.table == table_name {
+            rename_column_identifier(&mut index.column, old_name, new_name);
+            rename_optional_expression_columns(&mut index.filter_expr, old_name, new_name);
+        }
+    }
+
+    for index in db.composite_indexes.values_mut() {
+        if index.table == table_name {
+            for column in &mut index.columns {
+                rename_column_identifier(column, old_name, new_name);
+            }
+            rename_optional_expression_columns(&mut index.filter_expr, old_name, new_name);
+        }
+    }
+}
+
+fn rename_table_constraint_columns(
+    constraints: &mut [TableConstraint],
+    old_name: &str,
+    new_name: &str,
+) {
+    for constraint in constraints {
+        let columns = match constraint {
+            TableConstraint::PrimaryKey { columns, .. }
+            | TableConstraint::Unique { columns, .. } => columns,
+        };
+        for column in columns {
+            if column == old_name {
+                *column = new_name.to_string();
+            }
+        }
+    }
+}
+
+fn rename_optional_expression_columns(
+    expression: &mut Option<Expression>,
+    old_name: &str,
+    new_name: &str,
+) {
+    if let Some(expression) = expression {
+        rename_expression_columns(expression, old_name, new_name);
+    }
+}
+
+fn rename_expression_columns(expression: &mut Expression, old_name: &str, new_name: &str) {
+    match expression {
+        Expression::Column(column) => rename_column_identifier(column, old_name, new_name),
+        Expression::BinaryOp { left, right, .. }
+        | Expression::IsDistinctFrom { left, right, .. } => {
+            rename_expression_columns(left, old_name, new_name);
+            rename_expression_columns(right, old_name, new_name);
+        }
+        Expression::UnaryOp { expr, .. }
+        | Expression::IsNull { expr, .. }
+        | Expression::Cast { expr, .. } => rename_expression_columns(expr, old_name, new_name),
+        Expression::In { left, values } => {
+            rename_expression_columns(left, old_name, new_name);
+            for value in values {
+                rename_expression_columns(value, old_name, new_name);
+            }
+        }
+        Expression::Any { left, .. } | Expression::All { left, .. } => {
+            rename_expression_columns(left, old_name, new_name);
+        }
+        Expression::Function(aggregate) => {
+            rename_expression_columns(&mut aggregate.expr, old_name, new_name);
+            if let Some(filter) = &mut aggregate.filter {
+                rename_expression_columns(filter, old_name, new_name);
+            }
+        }
+        Expression::Case {
+            operand,
+            when_clauses,
+            else_clause,
+        } => {
+            if let Some(operand) = operand {
+                rename_expression_columns(operand, old_name, new_name);
+            }
+            for (when, then) in when_clauses {
+                rename_expression_columns(when, old_name, new_name);
+                rename_expression_columns(then, old_name, new_name);
+            }
+            if let Some(else_clause) = else_clause {
+                rename_expression_columns(else_clause, old_name, new_name);
+            }
+        }
+        Expression::ScalarFunction { args, .. } => {
+            for arg in args {
+                rename_expression_columns(arg, old_name, new_name);
+            }
+        }
+        Expression::WindowFunction {
+            args,
+            partition_by,
+            order_by,
+            ..
+        } => {
+            for arg in args {
+                rename_expression_columns(arg, old_name, new_name);
+            }
+            for partition in partition_by {
+                rename_expression_columns(partition, old_name, new_name);
+            }
+            for order in order_by {
+                rename_expression_columns(&mut order.expr, old_name, new_name);
+            }
+        }
+        Expression::Default
+        | Expression::Value(_)
+        | Expression::Subquery(_)
+        | Expression::Exists(_) => {}
+    }
+}
+
+fn rename_column_identifier(column: &mut String, old_name: &str, new_name: &str) {
+    if column == old_name {
+        *column = new_name.to_string();
+    } else if let Some((qualifier, name)) = column.rsplit_once('.')
+        && name == old_name
+    {
+        *column = format!("{qualifier}.{new_name}");
     }
 }
 

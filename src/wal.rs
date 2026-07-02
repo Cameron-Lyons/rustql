@@ -260,14 +260,9 @@ impl WalLog {
                     old_name,
                     new_name,
                 } => {
-                    if let Some(t) = db.tables.get_mut(&table) {
-                        for col in &mut t.columns {
-                            if col.name == new_name {
-                                col.name = old_name;
-                                break;
-                            }
-                        }
-                    }
+                    crate::executor::ddl::rename_column_schema_references(
+                        db, &table, &new_name, &old_name,
+                    );
                 }
                 WalEntry::TruncateTable {
                     name,
@@ -486,14 +481,7 @@ fn rollback_single_entry(entry: WalEntry, db: &mut Database) {
             old_name,
             new_name,
         } => {
-            if let Some(t) = db.tables.get_mut(&table) {
-                for col in &mut t.columns {
-                    if col.name == new_name {
-                        col.name = old_name;
-                        break;
-                    }
-                }
-            }
+            crate::executor::ddl::rename_column_schema_references(db, &table, &new_name, &old_name);
         }
         WalEntry::TruncateTable {
             name,
