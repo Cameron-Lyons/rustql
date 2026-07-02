@@ -275,6 +275,22 @@ fn test_order_by_ordinal() {
 }
 
 #[test]
+fn test_order_by_rejects_invalid_ordinal() {
+    let _guard = setup_test();
+    execute_sql("CREATE TABLE users (id INTEGER, name TEXT, age INTEGER)").unwrap();
+    execute_sql("INSERT INTO users VALUES (1, 'Alice', 30)").unwrap();
+
+    let zero_error = execute_sql("SELECT name, age FROM users ORDER BY 0").unwrap_err();
+    assert!(zero_error.contains("ORDER BY position 0 is not in select list"));
+
+    let out_of_range_error = execute_sql("SELECT name, age FROM users ORDER BY 3").unwrap_err();
+    assert!(out_of_range_error.contains("ORDER BY position 3 is not in select list"));
+
+    let wildcard_error = execute_sql("SELECT * FROM users ORDER BY 4").unwrap_err();
+    assert!(wildcard_error.contains("ORDER BY position 4 is not in select list"));
+}
+
+#[test]
 fn test_order_by_expression() {
     let _guard = setup_test();
     execute_sql("CREATE TABLE sales (id INTEGER, price INTEGER, quantity INTEGER)").unwrap();

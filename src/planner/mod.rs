@@ -95,7 +95,7 @@ impl<'a> QueryPlanner<'a> {
         }
 
         if stmt.from.is_empty() && stmt.from_function.is_none() {
-            return Ok(self.plan_constant_select(stmt));
+            return self.plan_constant_select(stmt);
         }
 
         let db = self.db;
@@ -205,7 +205,8 @@ impl<'a> QueryPlanner<'a> {
         let planned_order_by = stmt
             .order_by
             .as_ref()
-            .map(|order_by| self.resolve_order_by_aliases(stmt, order_by));
+            .map(|order_by| self.resolve_order_by_aliases(stmt, order_by))
+            .transpose()?;
 
         if let Some(ref order_by) = planned_order_by {
             plan = self.plan_sort(plan, order_by.clone());
