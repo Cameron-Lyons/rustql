@@ -9,8 +9,7 @@ impl<'a> PlanExecutor<'a> {
         condition: &Expression,
     ) -> Result<ExecutionResult, RustqlError> {
         let mut joined_rows = Vec::new();
-        let mut joined_columns = left.columns.clone();
-        joined_columns.extend(right.columns.clone());
+        let joined_columns = joined_column_names(&left.columns, &right.columns);
         let mut matched_right = vec![false; right.rows.len()];
         let combined_columns = (!matches!(join_type, JoinType::Cross))
             .then(|| combined_column_definitions(&left.columns, &right.columns));
@@ -68,8 +67,7 @@ impl<'a> PlanExecutor<'a> {
     ) -> Result<ExecutionResult, RustqlError> {
         let outer_scope_columns = column_definitions_from_names(&left.columns);
         let mut joined_rows = Vec::new();
-        let mut joined_columns = left.columns.clone();
-        joined_columns.extend(right_columns.iter().cloned());
+        let joined_columns = joined_column_names(&left.columns, right_columns);
         let temp_table_name = format!("__lateral_outer_{}", alias);
         let rewritten_subquery = lateral_subquery_with_outer_scope(subquery, &temp_table_name);
         let mut scoped_db =
@@ -153,8 +151,7 @@ impl<'a> PlanExecutor<'a> {
         }
 
         let mut joined_rows = Vec::new();
-        let mut joined_columns = left.columns.clone();
-        joined_columns.extend(right.columns.clone());
+        let joined_columns = joined_column_names(&left.columns, &right.columns);
         let combined_columns = combined_column_definitions(&left.columns, &right.columns);
         let match_context = HashJoinMatchContext {
             build,
@@ -280,6 +277,13 @@ fn hash_join_column_index(columns: &[String], reference: &str) -> Option<usize> 
     } else {
         Some(first)
     }
+}
+
+fn joined_column_names(left: &[String], right: &[String]) -> Vec<String> {
+    let mut columns = Vec::with_capacity(left.len() + right.len());
+    columns.extend(left.iter().cloned());
+    columns.extend(right.iter().cloned());
+    columns
 }
 
 struct HashJoinMatchContext<'a> {
