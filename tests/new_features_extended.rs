@@ -107,11 +107,17 @@ fn test_lower_function() {
 fn test_length_function() {
     let _guard = setup_test();
     execute_sql("CREATE TABLE words (id INTEGER, word TEXT)").unwrap();
-    execute_sql("INSERT INTO words VALUES (1, 'hello'), (2, 'ab')").unwrap();
+    execute_sql("INSERT INTO words VALUES (1, 'hello'), (2, 'ab'), (3, 'h\u{e9}llo')").unwrap();
 
-    let result = execute_sql("SELECT LENGTH(word) FROM words").unwrap();
-    assert!(result.contains("5"));
-    assert!(result.contains("2"));
+    let rows = query_rows("SELECT id, LENGTH(word) FROM words ORDER BY id").unwrap();
+    assert_eq!(
+        rows.rows,
+        vec![
+            vec![Value::Integer(1), Value::Integer(5)],
+            vec![Value::Integer(2), Value::Integer(2)],
+            vec![Value::Integer(3), Value::Integer(5)],
+        ]
+    );
 }
 
 #[test]

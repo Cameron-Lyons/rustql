@@ -28,7 +28,7 @@ pub(super) fn evaluate_scalar_function(
             )),
         },
         ScalarFunctionType::Length => match evaluated_args.first() {
-            Some(Value::Text(s)) => Ok(Value::Integer(s.len() as i64)),
+            Some(Value::Text(s)) => Ok(Value::Integer(s.chars().count() as i64)),
             Some(Value::Null) => Ok(Value::Null),
             _ => Err(RustqlError::TypeMismatch(
                 "LENGTH requires a text argument".to_string(),
