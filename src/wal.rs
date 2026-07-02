@@ -86,7 +86,14 @@ pub enum WalEntry {
 #[derive(Debug, Default)]
 pub struct WalLog {
     entries: Vec<WalEntry>,
-    savepoints: HashMap<String, usize>,
+    savepoints: HashMap<String, SavepointMarker>,
+    next_savepoint_sequence: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SavepointMarker {
+    position: usize,
+    sequence: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -111,7 +118,12 @@ impl WalLog {
     }
 
     pub fn savepoint(&mut self, name: &str) {
-        self.savepoints.insert(name.to_string(), self.entries.len());
+        let marker = SavepointMarker {
+            position: self.entries.len(),
+            sequence: self.next_savepoint_sequence,
+        };
+        self.next_savepoint_sequence += 1;
+        self.savepoints.insert(name.to_string(), marker);
     }
 
     pub fn release_savepoint(&mut self, name: &str) -> Result<(), RustqlError> {
@@ -126,10 +138,13 @@ impl WalLog {
         name: &str,
         db: &mut Database,
     ) -> Result<(), RustqlError> {
-        let position = self.savepoints.get(name).copied().ok_or_else(|| {
+        let marker = self.savepoints.get(name).copied().ok_or_else(|| {
             RustqlError::TransactionError(format!("Savepoint '{}' does not exist", name))
         })?;
-        self.rollback_to_position(position, db)
+        self.rollback_to_position(marker.position, db)?;
+        self.savepoints
+            .retain(|_, savepoint| savepoint.sequence <= marker.sequence);
+        Ok(())
     }
 
     pub fn rollback_to_position(
@@ -142,8 +157,7 @@ impl WalLog {
                 "Statement savepoint is no longer valid".to_string(),
             ));
         }
-        let entries_to_rollback: Vec<WalEntry> = self.entries.drain(position..).collect();
-        for entry in entries_to_rollback.into_iter().rev() {
+        for entry in self.entries.drain(position..).rev() {
             rollback_single_entry(entry, db);
         }
         rebuild_all_indexes(db)?;
