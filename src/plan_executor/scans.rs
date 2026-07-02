@@ -127,7 +127,7 @@ impl<'a> PlanExecutor<'a> {
 
     fn all_row_ids_for_index(&self, index_name: &str) -> Result<HashSet<RowId>, RustqlError> {
         if let Some(index) = self.db.get_index(index_name) {
-            let mut row_ids = HashSet::new();
+            let mut row_ids = HashSet::with_capacity(index_row_id_count(&index.entries));
             for rows in index.entries.values() {
                 row_ids.extend(rows.iter().copied());
             }
@@ -135,7 +135,7 @@ impl<'a> PlanExecutor<'a> {
         }
 
         if let Some(index) = self.db.get_composite_index(index_name) {
-            let mut row_ids = HashSet::new();
+            let mut row_ids = HashSet::with_capacity(index_row_id_count(&index.entries));
             for rows in index.entries.values() {
                 row_ids.extend(rows.iter().copied());
             }
@@ -370,6 +370,10 @@ impl<'a> PlanExecutor<'a> {
         }
         Ok(result)
     }
+}
+
+fn index_row_id_count<K: Ord>(entries: &BTreeMap<K, Vec<RowId>>) -> usize {
+    entries.values().map(Vec::len).sum()
 }
 
 fn generate_series_preallocation(start: i64, stop: i64, step: i64) -> usize {
