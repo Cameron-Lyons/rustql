@@ -125,6 +125,44 @@ fn test_nth_value_out_of_range() {
 }
 
 #[test]
+fn test_lag_and_lead_zero_offsets_use_current_row() {
+    let _lock = GLOBAL_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    setup_sales();
+
+    let rows = query_rows(
+        "SELECT id, LAG(amount, 0) OVER (ORDER BY id) AS lag_same, \
+         LEAD(amount, 0) OVER (ORDER BY id) AS lead_same \
+         FROM sales ORDER BY id",
+    )
+    .unwrap();
+
+    rows.assert_columns(&["id", "lag_same", "lead_same"]);
+    assert_eq!(
+        rows.rows[0],
+        vec![Value::Integer(1), Value::Integer(100), Value::Integer(100)]
+    );
+    assert_eq!(
+        rows.rows[5],
+        vec![Value::Integer(6), Value::Integer(300), Value::Integer(300)]
+    );
+}
+
+#[test]
+fn test_window_functions_reject_invalid_offsets() {
+    let _lock = GLOBAL_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    setup_sales();
+
+    for sql in [
+        "SELECT LAG(amount, -1) OVER (ORDER BY id) FROM sales",
+        "SELECT LEAD(amount, -1) OVER (ORDER BY id) FROM sales",
+        "SELECT NTILE(0) OVER (ORDER BY id) FROM sales",
+        "SELECT NTH_VALUE(amount, 0) OVER (ORDER BY id ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) FROM sales",
+    ] {
+        assert!(execute_sql(sql).is_err(), "expected error for {sql}");
+    }
+}
+
+#[test]
 fn test_percent_rank() {
     let _lock = GLOBAL_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     setup_sales();
