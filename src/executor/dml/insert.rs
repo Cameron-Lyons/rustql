@@ -21,6 +21,7 @@ pub(crate) fn execute_insert(
             select::execute_select_internal(Some(context), *source_query, &db)?
         };
 
+        stmt.values.reserve(typed_rows.rows.len());
         for row in typed_rows.rows {
             stmt.values
                 .push(row.into_iter().map(Expression::Value).collect());
@@ -40,14 +41,18 @@ pub(crate) fn execute_insert(
     let mapped_values: Vec<Vec<Value>> = if default_values {
         vec![table_ref.columns.iter().map(column_default_value).collect()]
     } else if let Some(ref specified_columns) = stmt.columns {
-        for col_name in specified_columns {
-            if !table_ref.columns.iter().any(|c| c.name == *col_name) {
-                return Err(RustqlError::ColumnNotFound(format!(
-                    "{} (table: {})",
-                    col_name, stmt.table
-                )));
-            }
-        }
+        let specified_column_positions: Vec<usize> = specified_columns
+            .iter()
+            .map(|col_name| {
+                table_ref
+                    .columns
+                    .iter()
+                    .position(|c| c.name == *col_name)
+                    .ok_or_else(|| {
+                        RustqlError::ColumnNotFound(format!("{} (table: {})", col_name, stmt.table))
+                    })
+            })
+            .collect::<Result<Vec<_>, RustqlError>>()?;
 
         stmt.values
             .iter()
@@ -64,12 +69,7 @@ pub(crate) fn execute_insert(
                 let mut full_row: Vec<Value> =
                     table_ref.columns.iter().map(column_default_value).collect();
 
-                for (idx, col_name) in specified_columns.iter().enumerate() {
-                    let col_pos = table_ref
-                        .columns
-                        .iter()
-                        .position(|c| c.name == *col_name)
-                        .ok_or_else(|| RustqlError::ColumnNotFound(col_name.clone()))?;
+                for (idx, &col_pos) in specified_column_positions.iter().enumerate() {
                     full_row[col_pos] =
                         evaluate_insert_value(&values[idx], &table_ref.columns[col_pos], &*db)?;
                 }
@@ -131,7 +131,11 @@ pub(crate) fn execute_insert(
 
     let mut inserted_count = 0usize;
     let mut updated_count = 0usize;
-    let mut affected_rows: Vec<Vec<Value>> = Vec::new();
+    let mut affected_rows: Vec<Vec<Value>> = Vec::with_capacity(if stmt.returning.is_some() {
+        mapped_values.len()
+    } else {
+        0
+    });
 
     for values in &mapped_values {
         validate_not_null_constraints(&columns_snapshot, values)?;
