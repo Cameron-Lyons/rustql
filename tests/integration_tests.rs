@@ -348,6 +348,19 @@ fn test_limit_offset() {
 }
 
 #[test]
+fn test_limit_offset_reject_negative_counts() {
+    let _guard = setup_test();
+    execute_sql("CREATE TABLE users (id INTEGER, name TEXT)").unwrap();
+    execute_sql("INSERT INTO users VALUES (1, 'Alice')").unwrap();
+
+    let limit_error = execute_sql("SELECT name FROM users LIMIT -1").unwrap_err();
+    assert!(limit_error.contains("LIMIT count cannot be negative"));
+
+    let offset_error = execute_sql("SELECT name FROM users OFFSET -1").unwrap_err();
+    assert!(offset_error.contains("OFFSET count cannot be negative"));
+}
+
+#[test]
 fn test_aggregate_functions() {
     let _guard = setup_test();
     execute_sql("CREATE TABLE sales (id INTEGER, amount FLOAT, quantity INTEGER)").unwrap();
