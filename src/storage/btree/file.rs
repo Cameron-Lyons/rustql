@@ -23,11 +23,12 @@ pub(super) struct CachedBTreeFile<'a> {
 
 impl<'a> CachedBTreeFile<'a> {
     pub(super) fn read_page(&mut self, page_id: u64) -> Result<BTreePage, RustqlError> {
-        let data_path = self.engine.data_path.clone();
+        let engine = self.engine;
+        let data_path = &engine.data_path;
         let file = &mut self.file;
-        self.engine.read_page_cached_with(page_id, || {
+        engine.read_page_cached_with(page_id, || {
             if file.is_none() {
-                *file = Some(BTreeFile::open_read(&data_path)?);
+                *file = Some(BTreeFile::open_read(data_path)?);
             }
             file.as_mut()
                 .expect("cached B-tree file should be initialized")
