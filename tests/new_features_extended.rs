@@ -279,6 +279,49 @@ fn test_auto_increment() {
 }
 
 #[test]
+fn test_auto_increment_multi_row_insert_advances_per_row() {
+    let _guard = setup_test();
+    execute_sql("CREATE TABLE auto_items (id INTEGER PRIMARY KEY AUTO_INCREMENT, name TEXT)")
+        .unwrap();
+
+    execute_sql("INSERT INTO auto_items (name) VALUES ('first'), ('second'), ('third')").unwrap();
+
+    assert_rows(
+        "SELECT id, name FROM auto_items ORDER BY id",
+        &["id", "name"],
+        vec![
+            vec![Value::Integer(1), Value::Text("first".to_string())],
+            vec![Value::Integer(2), Value::Text("second".to_string())],
+            vec![Value::Integer(3), Value::Text("third".to_string())],
+        ],
+    );
+}
+
+#[test]
+fn test_auto_increment_multi_row_insert_tracks_explicit_values() {
+    let _guard = setup_test();
+    execute_sql("CREATE TABLE auto_mixed (id INTEGER PRIMARY KEY AUTO_INCREMENT, name TEXT)")
+        .unwrap();
+
+    execute_sql(
+        "INSERT INTO auto_mixed (id, name)
+         VALUES (10, 'manual'), (NULL, 'generated'), (5, 'low'), (NULL, 'after')",
+    )
+    .unwrap();
+
+    assert_rows(
+        "SELECT id, name FROM auto_mixed ORDER BY id",
+        &["id", "name"],
+        vec![
+            vec![Value::Integer(5), Value::Text("low".to_string())],
+            vec![Value::Integer(10), Value::Text("manual".to_string())],
+            vec![Value::Integer(11), Value::Text("generated".to_string())],
+            vec![Value::Integer(12), Value::Text("after".to_string())],
+        ],
+    );
+}
+
+#[test]
 fn test_savepoint_and_release() {
     let _guard = setup_test();
     execute_sql("CREATE TABLE sp_test (id INTEGER, name TEXT)").unwrap();
