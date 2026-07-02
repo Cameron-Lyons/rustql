@@ -1,6 +1,8 @@
 use super::*;
 use crate::database::{CompositeIndex, Index, Table, View};
 
+const MAX_GENERATE_SERIES_PREALLOCATION: usize = 16_384;
+
 impl<'a> PlanExecutor<'a> {
     pub(super) fn execute_values_scan(
         &self,
@@ -59,7 +61,7 @@ impl<'a> PlanExecutor<'a> {
             .get_table(table_name)
             .ok_or_else(|| RustqlError::TableNotFound(table_name.to_string()))?;
 
-        let mut rows = Vec::new();
+        let mut rows = Vec::with_capacity(table.rows.len());
 
         for row in &table.rows {
             let include = if let Some(filter_expr) = filter {
@@ -103,7 +105,7 @@ impl<'a> PlanExecutor<'a> {
             self.all_row_ids_for_index(index_name)?
         };
 
-        let mut rows = Vec::new();
+        let mut rows = Vec::with_capacity(row_ids.len());
         for row_id in row_ids {
             if let Some(row) = table.row_by_id(row_id) {
                 let include = if let Some(filter_expr) = filter {
@@ -228,7 +230,7 @@ impl<'a> PlanExecutor<'a> {
                     generated: None,
                 }];
 
-                let mut rows = Vec::new();
+                let mut rows = Vec::with_capacity(generate_series_preallocation(start, stop, step));
                 let mut current = start;
                 if step > 0 {
                     while current <= stop {
@@ -370,6 +372,31 @@ impl<'a> PlanExecutor<'a> {
     }
 }
 
+fn generate_series_preallocation(start: i64, stop: i64, step: i64) -> usize {
+    if step == 0 {
+        return 0;
+    }
+
+    let start = i128::from(start);
+    let stop = i128::from(stop);
+    let step = i128::from(step);
+
+    let span = if step > 0 {
+        if start > stop {
+            return 0;
+        }
+        stop - start
+    } else {
+        if start < stop {
+            return 0;
+        }
+        start - stop
+    };
+
+    let row_count = (span / step.abs()) + 1;
+    row_count.min(MAX_GENERATE_SERIES_PREALLOCATION as i128) as usize
+}
+
 struct ScopedTableDatabase<'a> {
     base: &'a dyn DatabaseCatalog,
     table_name: String,
@@ -413,5 +440,34 @@ impl DatabaseCatalog for ScopedTableDatabase<'_> {
 
     fn composite_indexes_iter(&self) -> Box<dyn Iterator<Item = &CompositeIndex> + '_> {
         self.base.composite_indexes_iter()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generate_series_preallocation_counts_bounded_series() {
+        assert_eq!(generate_series_preallocation(1, 5, 1), 5);
+        assert_eq!(generate_series_preallocation(0, 10, 2), 6);
+        assert_eq!(generate_series_preallocation(5, 1, -1), 5);
+    }
+
+    #[test]
+    fn generate_series_preallocation_handles_empty_and_boundary_series() {
+        assert_eq!(generate_series_preallocation(5, 1, 1), 0);
+        assert_eq!(generate_series_preallocation(1, 5, -1), 0);
+        assert_eq!(generate_series_preallocation(1, 5, 0), 0);
+        assert_eq!(generate_series_preallocation(i64::MAX - 1, i64::MAX, 1), 2);
+        assert_eq!(generate_series_preallocation(i64::MIN + 1, i64::MIN, -1), 2);
+    }
+
+    #[test]
+    fn generate_series_preallocation_caps_large_series() {
+        assert_eq!(
+            generate_series_preallocation(1, i64::MAX, 1),
+            MAX_GENERATE_SERIES_PREALLOCATION
+        );
     }
 }
