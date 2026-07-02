@@ -11,6 +11,59 @@ fn evaluate_insert_value(
     }
 }
 
+fn apply_auto_increment_values(
+    columns: &[ColumnDefinition],
+    existing_rows: &[Vec<Value>],
+    rows: &mut [Vec<Value>],
+) -> Result<(), RustqlError> {
+    let mut next_values: Vec<Option<i64>> = columns
+        .iter()
+        .enumerate()
+        .map(|(col_idx, col_def)| {
+            col_def.auto_increment.then(|| {
+                existing_rows
+                    .iter()
+                    .filter_map(|row| match row.get(col_idx) {
+                        Some(Value::Integer(value)) => Some(*value),
+                        _ => None,
+                    })
+                    .max()
+                    .unwrap_or(0)
+            })
+        })
+        .collect();
+
+    for row in rows {
+        for (col_idx, next_value) in next_values.iter_mut().enumerate() {
+            let Some(current_max) = next_value else {
+                continue;
+            };
+            let Some(value) = row.get_mut(col_idx) else {
+                continue;
+            };
+
+            match value {
+                Value::Null => {
+                    let generated = current_max.checked_add(1).ok_or_else(|| {
+                        RustqlError::Internal(format!(
+                            "AUTO_INCREMENT value overflow for column '{}'",
+                            columns[col_idx].name
+                        ))
+                    })?;
+                    *value = Value::Integer(generated);
+                    *current_max = generated;
+                }
+                Value::Integer(explicit) if *explicit > *current_max => {
+                    *current_max = *explicit;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    Ok(())
+}
+
 pub(crate) fn execute_insert(
     context: &ExecutionContext,
     mut stmt: InsertStatement,
@@ -103,25 +156,7 @@ pub(crate) fn execute_insert(
     };
 
     let mut mapped_values = mapped_values;
-    for values in &mut mapped_values {
-        for (col_idx, col_def) in table_ref.columns.iter().enumerate() {
-            if col_def.auto_increment
-                && col_idx < values.len()
-                && matches!(values[col_idx], Value::Null)
-            {
-                let max_val = table_ref
-                    .rows
-                    .iter()
-                    .filter_map(|row| match row.get(col_idx) {
-                        Some(Value::Integer(i)) => Some(*i),
-                        _ => None,
-                    })
-                    .max()
-                    .unwrap_or(0);
-                values[col_idx] = Value::Integer(max_val + 1);
-            }
-        }
-    }
+    apply_auto_increment_values(&table_ref.columns, &table_ref.rows, &mut mapped_values)?;
 
     for values in &mut mapped_values {
         evaluate_generated_columns(&table_ref.columns, values, &stmt.columns)?;
