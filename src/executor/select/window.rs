@@ -86,6 +86,7 @@ mod tests {
             order_by: vec![OrderByExpr {
                 expr: Expression::Column("amount".to_string()),
                 asc: false,
+                nulls_first: None,
             }],
             frame: Some(WindowFrame {
                 mode: WindowFrameMode::Rows,
