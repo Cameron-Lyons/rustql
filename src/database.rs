@@ -197,6 +197,20 @@ impl Table {
         self.rebuild_row_id_positions();
     }
 
+    fn has_normalized_row_ids(&self) -> bool {
+        if self.row_ids.len() != self.rows.len() || self.next_row_id == 0 {
+            return false;
+        }
+
+        let max_existing = self
+            .row_ids
+            .iter()
+            .map(|row_id| row_id.0)
+            .max()
+            .unwrap_or(0);
+        self.next_row_id > max_existing
+    }
+
     pub fn iter_rows_with_ids(&self) -> impl Iterator<Item = (RowId, &Vec<Value>)> {
         self.row_ids.iter().copied().zip(self.rows.iter())
     }
@@ -338,6 +352,10 @@ impl Database {
         for table in self.tables.values_mut() {
             table.ensure_row_ids();
         }
+    }
+
+    pub(crate) fn has_normalized_row_ids(&self) -> bool {
+        self.tables.values().all(Table::has_normalized_row_ids)
     }
 }
 
@@ -499,5 +517,37 @@ impl DatabaseCatalog for ScopedDatabase<'_> {
 
     fn composite_indexes_iter(&self) -> Box<dyn Iterator<Item = &CompositeIndex> + '_> {
         self.base.composite_indexes_iter()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn table_reports_normalized_row_ids_without_mutation() {
+        let mut table = Table::new(Vec::new(), vec![Vec::new()], Vec::new());
+
+        assert!(table.has_normalized_row_ids());
+
+        table.next_row_id = 1;
+        assert!(!table.has_normalized_row_ids());
+
+        table.next_row_id = 2;
+        table.row_ids.clear();
+        assert!(!table.has_normalized_row_ids());
+    }
+
+    #[test]
+    fn database_reports_stale_row_ids_until_normalized() {
+        let mut db = Database::new();
+        let mut table = Table::new(Vec::new(), vec![Vec::new(), Vec::new()], Vec::new());
+        table.row_ids.pop();
+        db.tables.insert("items".to_string(), table);
+
+        assert!(!db.has_normalized_row_ids());
+
+        db.normalize_row_ids();
+        assert!(db.has_normalized_row_ids());
     }
 }
