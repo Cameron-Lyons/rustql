@@ -1034,4 +1034,15 @@ mod tests {
         assert_eq!(match_keyword("SubStr"), Token::Substring);
         assert_eq!(match_keyword("dateadd"), Token::DateAdd);
     }
+
+    #[test]
+    fn spans_quoted_identifier_with_unquoted_suffix() {
+        let tokens = tokenize_spanned("`A`.A").unwrap();
+
+        assert_eq!(tokens[0].token, Token::Identifier("A.A".to_string()));
+        assert_eq!(tokens[0].span.start.line, 1);
+        assert_eq!(tokens[0].span.start.column, 1);
+        assert_eq!(tokens[0].span.end.line, 1);
+        assert_eq!(tokens[0].span.end.column, 6);
+    }
 }
