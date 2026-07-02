@@ -23,6 +23,9 @@ impl<'a> QueryPlanner<'a> {
     ) -> TableStats {
         let row_count = table.rows.len();
         let mut column_stats = HashMap::new();
+        if !table.rows.is_empty() {
+            column_stats.reserve(table.columns.len());
+        }
 
         let has_index = db.indexes_iter().any(|idx| idx.table == table_name)
             || db
