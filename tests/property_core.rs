@@ -103,6 +103,48 @@ impl Drop for TempStoragePath {
     }
 }
 
+#[test]
+fn lexer_spans_cover_backtick_qualified_identifier() {
+    let input = "`A`.A";
+    let spanned = tokenize_spanned(input).expect("qualified identifier should tokenize");
+
+    assert_eq!(
+        spanned
+            .iter()
+            .map(|token| token.token.clone())
+            .collect::<Vec<_>>(),
+        vec![Token::Identifier("A.A".to_string()), Token::Eof]
+    );
+
+    let identifier = &spanned[0];
+    let start = byte_index_for_location(input, identifier.span.start)
+        .expect("identifier span start should map into input");
+    let end = byte_index_for_location(input, identifier.span.end)
+        .expect("identifier span end should map into input");
+    assert_eq!(&input[start..end], input);
+}
+
+#[test]
+fn lexer_spans_cover_double_quoted_qualified_identifier() {
+    let input = r#""A""B".A"#;
+    let spanned = tokenize_spanned(input).expect("qualified identifier should tokenize");
+
+    assert_eq!(
+        spanned
+            .iter()
+            .map(|token| token.token.clone())
+            .collect::<Vec<_>>(),
+        vec![Token::Identifier("A\"B.A".to_string()), Token::Eof]
+    );
+
+    let identifier = &spanned[0];
+    let start = byte_index_for_location(input, identifier.span.start)
+        .expect("identifier span start should map into input");
+    let end = byte_index_for_location(input, identifier.span.end)
+        .expect("identifier span end should map into input");
+    assert_eq!(&input[start..end], input);
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(96))]
 

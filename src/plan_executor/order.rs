@@ -51,10 +51,10 @@ impl<'a> PlanExecutor<'a> {
     ) -> Result<ExecutionResult, RustqlError> {
         let mut rows = input.rows;
 
-        if offset < rows.len() {
-            rows = rows.split_off(offset);
-        } else {
+        if offset >= rows.len() {
             rows.clear();
+        } else if offset > 0 {
+            rows.drain(..offset);
         }
 
         if rows.len() > limit {
