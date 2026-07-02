@@ -79,8 +79,7 @@ impl BTreeStorageEngine {
             .page_cache
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        cache.pages.remove(&page_id);
-        cache.access_order.retain(|&id| id != page_id);
+        cache.remove(page_id);
     }
 
     pub fn clear_cache(&self) {
@@ -101,10 +100,7 @@ impl BTreeStorageEngine {
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let page_ids: HashSet<u64> = page_ids.iter().copied().collect();
-        for page_id in &page_ids {
-            cache.pages.remove(page_id);
-        }
-        cache.access_order.retain(|id| !page_ids.contains(id));
+        cache.remove_many(&page_ids);
     }
 
     pub(super) fn save_locked(&self, db: &Database) -> Result<(), RustqlError> {
