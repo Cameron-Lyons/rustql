@@ -866,6 +866,6 @@ mod tests {
         let Statement::CreateTable(stmt) = statement else {
             panic!("expected CREATE TABLE");
         };
-        assert_eq!(stmt.columns[0].check.as_deref(), Some("( id + 1) > 0"));
+        assert_eq!(stmt.columns[0].check.as_deref(), Some("( \"id\" + 1) > 0"));
     }
 }
