@@ -73,7 +73,9 @@ impl WindowPartitionGroups {
     }
 
     fn into_groups(self) -> Vec<Vec<usize>> {
-        let mut groups: Vec<Vec<usize>> = self.non_numeric_groups.into_values().collect();
+        let mut groups =
+            Vec::with_capacity(self.non_numeric_groups.len() + self.numeric_groups.len());
+        groups.extend(self.non_numeric_groups.into_values());
         groups.extend(self.numeric_groups.into_iter().map(|(_, indices)| indices));
         groups
     }
