@@ -57,9 +57,18 @@ impl StorageEngine for JsonStorageEngine {
         let _guard = self.lock.write().map_err(|e| {
             RustqlError::StorageError(format!("Failed to acquire JSON storage write lock: {}", e))
         })?;
-        let mut db = db.clone();
-        db.normalize_row_ids();
-        let data = serde_json::to_string_pretty(&db).map_err(|e| {
+        let normalized;
+        let db = if db.has_normalized_row_ids() {
+            db
+        } else {
+            normalized = {
+                let mut db = db.clone();
+                db.normalize_row_ids();
+                db
+            };
+            &normalized
+        };
+        let data = serde_json::to_string_pretty(db).map_err(|e| {
             RustqlError::StorageError(format!("Failed to serialize database: {}", e))
         })?;
         atomic_write(&self.path, data.as_bytes())?;
