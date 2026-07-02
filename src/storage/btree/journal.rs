@@ -309,7 +309,10 @@ impl BTreeStorageEngine {
                     ))
                 })?;
                 if payload.is_empty() {
-                    return Ok(None);
+                    return Err(RustqlError::StorageError(format!(
+                        "Transaction journal '{}' is missing a payload",
+                        path.display()
+                    )));
                 }
                 match version {
                     LEGACY_JOURNAL_VERSION => {
@@ -534,5 +537,51 @@ impl BTreeStorageEngine {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_storage_path(test_name: &str) -> PathBuf {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be after unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "rustql_{test_name}_{}_{}.dat",
+            std::process::id(),
+            now
+        ))
+    }
+
+    fn remove_storage_artifacts(path: &Path) {
+        let _ = fs::remove_file(path);
+        let mut journal = path.as_os_str().to_os_string();
+        journal.push(".wal");
+        let _ = fs::remove_file(PathBuf::from(journal));
+    }
+
+    #[test]
+    fn read_journal_rejects_empty_payload() {
+        let path = temp_storage_path("btree_empty_journal_payload");
+        remove_storage_artifacts(&path);
+        let engine = BTreeStorageEngine::new(&path);
+
+        let mut data = Vec::with_capacity(FILE_HEADER_SIZE);
+        data.extend_from_slice(&JOURNAL_MAGIC);
+        data.extend_from_slice(&JOURNAL_VERSION.to_le_bytes());
+        data.extend_from_slice(&HEADER_RESERVED.to_le_bytes());
+        fs::write(engine.journal_path(), data).expect("failed to write header-only journal");
+
+        let error = match engine.read_journal_locked() {
+            Ok(_) => panic!("header-only journal should be rejected"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("missing a payload"));
+
+        remove_storage_artifacts(&path);
     }
 }
