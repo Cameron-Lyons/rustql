@@ -494,8 +494,7 @@ pub(super) fn validate_table_constraints_for_insert(
                 if col_indices.len() != pk_cols.len() {
                     continue;
                 }
-                let key: Vec<Value> = col_indices.iter().map(|&i| row[i].clone()).collect();
-                if key.iter().any(|v| matches!(v, Value::Null)) {
+                if col_indices.iter().any(|&i| matches!(row[i], Value::Null)) {
                     return Err(RustqlError::ConstraintViolation {
                         kind: crate::error::ConstraintKind::PrimaryKey,
                         message: format!(
@@ -510,11 +509,7 @@ pub(super) fn validate_table_constraints_for_insert(
                     {
                         continue;
                     }
-                    let existing_key: Vec<Value> = col_indices
-                        .iter()
-                        .map(|&i| existing_row[i].clone())
-                        .collect();
-                    if rows_equal_for_sql_identity(&existing_key, &key) {
+                    if rows_match_on_indices(existing_row, row, &col_indices) {
                         return Err(RustqlError::ConstraintViolation {
                             kind: crate::error::ConstraintKind::PrimaryKey,
                             message: format!(
@@ -535,8 +530,7 @@ pub(super) fn validate_table_constraints_for_insert(
                 if col_indices.len() != uq_cols.len() {
                     continue;
                 }
-                let key: Vec<Value> = col_indices.iter().map(|&i| row[i].clone()).collect();
-                if key.iter().any(|v| matches!(v, Value::Null)) {
+                if col_indices.iter().any(|&i| matches!(row[i], Value::Null)) {
                     continue;
                 }
                 for (row_idx, existing_row) in table.rows.iter().enumerate() {
@@ -545,11 +539,7 @@ pub(super) fn validate_table_constraints_for_insert(
                     {
                         continue;
                     }
-                    let existing_key: Vec<Value> = col_indices
-                        .iter()
-                        .map(|&i| existing_row[i].clone())
-                        .collect();
-                    if rows_equal_for_sql_identity(&existing_key, &key) {
+                    if rows_match_on_indices(existing_row, row, &col_indices) {
                         return Err(RustqlError::ConstraintViolation {
                             kind: crate::error::ConstraintKind::Unique,
                             message: format!(
@@ -563,6 +553,12 @@ pub(super) fn validate_table_constraints_for_insert(
         }
     }
     Ok(())
+}
+
+fn rows_match_on_indices(left: &[Value], right: &[Value], indices: &[usize]) -> bool {
+    indices
+        .iter()
+        .all(|&idx| values_equal_for_sql_identity(&left[idx], &right[idx]))
 }
 
 pub(super) fn validate_check_constraints(
