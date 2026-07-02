@@ -300,7 +300,14 @@ impl BTreeStorageEngine {
                             e
                         ))
                     })?;
-                let mut payload = Vec::new();
+                let payload_len = file
+                    .metadata()
+                    .ok()
+                    .and_then(|metadata| {
+                        usize::try_from(metadata.len().saturating_sub(FILE_HEADER_SIZE as u64)).ok()
+                    })
+                    .unwrap_or(0);
+                let mut payload = Vec::with_capacity(payload_len);
                 file.read_to_end(&mut payload).map_err(|e| {
                     RustqlError::StorageError(format!(
                         "Failed to read transaction journal '{}': {}",
