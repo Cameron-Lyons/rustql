@@ -68,11 +68,14 @@ fn main() -> ExitCode {
 }
 
 fn render_results(results: &[QueryResult]) -> String {
-    results
-        .iter()
-        .map(render_result)
-        .collect::<Vec<_>>()
-        .join("\n")
+    let mut output = String::new();
+    for (idx, result) in results.iter().enumerate() {
+        if idx > 0 {
+            output.push('\n');
+        }
+        output.push_str(&render_result(result));
+    }
+    output
 }
 
 fn render_result(result: &QueryResult) -> String {
@@ -144,4 +147,37 @@ fn render_rows(rows: &RowBatch) -> String {
 
 fn render_value(value: &Value) -> String {
     value.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rustql::{ColumnMeta, CommandResult, DataType};
+
+    #[test]
+    fn render_results_streams_results_with_single_separator() {
+        let results = vec![
+            QueryResult::Command(CommandResult {
+                tag: CommandTag::CreateTable,
+                affected: 0,
+            }),
+            QueryResult::Rows(RowBatch {
+                columns: vec![ColumnMeta {
+                    name: "id".to_string(),
+                    data_type: DataType::Integer,
+                    nullable: true,
+                }],
+                rows: vec![vec![Value::Integer(1)]],
+            }),
+            QueryResult::Command(CommandResult {
+                tag: CommandTag::Insert,
+                affected: 1,
+            }),
+        ];
+
+        assert_eq!(
+            render_results(&results),
+            "CREATE TABLE\nid\n----------------------------------------\n1\n\nINSERT 1"
+        );
+    }
 }
