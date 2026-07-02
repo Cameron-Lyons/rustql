@@ -54,9 +54,10 @@ pub fn evaluate_value_expression_with_db(
             BinaryOperator::Concat => {
                 let left_val = evaluate_value_expression_with_db(left, columns, row, db)?;
                 let right_val = evaluate_value_expression_with_db(right, columns, row, db)?;
-                let l = format_value(&left_val);
-                let r = format_value(&right_val);
-                Ok(Value::Text(format!("{}{}", l, r)))
+                let mut result = String::new();
+                append_formatted_value(&mut result, &left_val);
+                append_formatted_value(&mut result, &right_val);
+                Ok(Value::Text(result))
             }
             BinaryOperator::Escape => Err(RustqlError::Internal(
                 "LIKE ESCAPE marker must be evaluated by LIKE".to_string(),
