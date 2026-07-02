@@ -83,7 +83,7 @@ pub(crate) fn execute_merge(
             .map(|(i, r)| (i, r.clone()))
             .collect();
 
-        let mut matched_indices: Vec<usize> = Vec::new();
+        let mut matched_indices: Vec<usize> = Vec::with_capacity(target_rows_snapshot.len());
         for (row_idx, target_row) in &target_rows_snapshot {
             let combined_row = combined_merge_row(target_row, source_row);
             if evaluate_expression(
@@ -103,8 +103,7 @@ pub(crate) fn execute_merge(
                 MergeWhenClause::Matched { condition, action } if is_matched => {
                     for &row_idx in &matched_indices {
                         let target_row = target_rows_snapshot
-                            .iter()
-                            .find(|(i, _)| *i == row_idx)
+                            .get(row_idx)
                             .map(|(_, r)| r.clone())
                             .ok_or_else(|| {
                                 RustqlError::Internal(
