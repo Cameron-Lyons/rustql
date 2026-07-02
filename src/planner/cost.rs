@@ -54,7 +54,7 @@ impl<'a> QueryPlanner<'a> {
     }
 
     pub(super) fn estimate_index_scan_cost(&self, total_rows: usize, selected_rows: usize) -> f64 {
-        (total_rows as f64).ln() * INDEX_SCAN_SEEK_COST_MULTIPLIER
+        (total_rows.max(1) as f64).ln() * INDEX_SCAN_SEEK_COST_MULTIPLIER
             + selected_rows as f64 * INDEX_SCAN_ROW_COST
     }
 
