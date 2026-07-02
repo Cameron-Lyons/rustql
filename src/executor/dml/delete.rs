@@ -53,7 +53,11 @@ pub(crate) fn execute_delete(
             .get(&stmt.table)
             .ok_or_else(|| RustqlError::TableNotFound(stmt.table.clone()))?;
 
-        let mut rows: Vec<Vec<Value>> = Vec::new();
+        let mut rows: Vec<Vec<Value>> = Vec::with_capacity(
+            using_matches
+                .as_ref()
+                .map_or(table_ref.rows.len(), HashSet::len),
+        );
 
         if let Some(ref using_set) = using_matches {
             for idx in using_set {
@@ -139,7 +143,8 @@ pub(crate) fn execute_delete(
             .map(|(i, r)| (i, r.clone()))
             .collect();
 
-        let mut rows_to_delete_indices = Vec::new();
+        let mut rows_to_delete_indices =
+            Vec::with_capacity(candidate_indices.as_ref().map_or(rows.len(), HashSet::len));
 
         if using_matches.is_some() {
             if let Some(ref candidate_set) = candidate_indices {
@@ -184,7 +189,11 @@ pub(crate) fn execute_delete(
             .get(&stmt.table)
             .ok_or_else(|| RustqlError::TableNotFound(stmt.table.clone()))?;
 
-        let mut returning_rows: Vec<Vec<Value>> = Vec::new();
+        let mut returning_rows: Vec<Vec<Value>> = Vec::with_capacity(if stmt.returning.is_some() {
+            rows_to_delete_indices.len()
+        } else {
+            0
+        });
         if stmt.returning.is_some() {
             for &idx in &rows_to_delete_indices {
                 returning_rows.push(table.rows[idx].clone());
@@ -199,10 +208,13 @@ pub(crate) fn execute_delete(
             .tables
             .get(&stmt.table)
             .ok_or_else(|| RustqlError::TableNotFound(stmt.table.clone()))?;
-        rows_to_delete_indices
-            .iter()
-            .filter_map(|idx| table.row_id_at(*idx))
-            .collect::<Vec<_>>()
+        let mut row_ids = Vec::with_capacity(rows_to_delete_indices.len());
+        for idx in &rows_to_delete_indices {
+            if let Some(row_id) = table.row_id_at(*idx) {
+                row_ids.push(row_id);
+            }
+        }
+        row_ids
     };
     rows_to_delete_indices.reverse();
 
