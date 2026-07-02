@@ -48,6 +48,7 @@ pub(crate) fn execute_insert(
                 )));
             }
         }
+        reject_duplicate_insert_columns(specified_columns)?;
 
         stmt.values
             .iter()
@@ -278,4 +279,17 @@ pub(crate) fn execute_insert(
     } else {
         Ok(command_result(CommandTag::Insert, inserted_count as u64))
     }
+}
+
+fn reject_duplicate_insert_columns(columns: &[String]) -> Result<(), RustqlError> {
+    let mut seen = HashSet::with_capacity(columns.len());
+    for column in columns {
+        if !seen.insert(column.as_str()) {
+            return Err(RustqlError::ParseError(format!(
+                "INSERT column '{}' specified more than once",
+                column
+            )));
+        }
+    }
+    Ok(())
 }
