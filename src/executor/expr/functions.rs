@@ -69,7 +69,7 @@ pub(super) fn evaluate_scalar_function(
             Ok(Value::Text(result))
         }
         ScalarFunctionType::Abs => match evaluated_args.first() {
-            Some(Value::Integer(i)) => Ok(Value::Integer(i.abs())),
+            Some(Value::Integer(i)) => checked_i64_abs(*i, "ABS").map(Value::Integer),
             Some(Value::Float(f)) => Ok(Value::Float(f.abs())),
             Some(Value::Null) => Ok(Value::Null),
             _ => Err(RustqlError::TypeMismatch(
@@ -1030,15 +1030,9 @@ pub(super) fn evaluate_scalar_function(
             let a = evaluate_value_expression_with_db(&args[0], columns, row, db)?;
             let b = evaluate_value_expression_with_db(&args[1], columns, row, db)?;
             match (a, b) {
-                (Value::Integer(mut a), Value::Integer(mut b)) => {
-                    a = a.abs();
-                    b = b.abs();
-                    while b != 0 {
-                        let t = b;
-                        b = a % b;
-                        a = t;
-                    }
-                    Ok(Value::Integer(a))
+                (Value::Integer(a), Value::Integer(b)) => {
+                    checked_u64_to_i64(unsigned_gcd(a.unsigned_abs(), b.unsigned_abs()), "GCD")
+                        .map(Value::Integer)
                 }
                 _ => Ok(Value::Null),
             }
@@ -1048,18 +1042,18 @@ pub(super) fn evaluate_scalar_function(
             let b = evaluate_value_expression_with_db(&args[1], columns, row, db)?;
             match (a, b) {
                 (Value::Integer(a), Value::Integer(b)) => {
-                    if a == 0 && b == 0 {
+                    if a == 0 || b == 0 {
                         Ok(Value::Integer(0))
                     } else {
-                        let mut ga = a.abs();
-                        let mut gb = b.abs();
-                        let prod = ga * gb;
-                        while gb != 0 {
-                            let t = gb;
-                            gb = ga % gb;
-                            ga = t;
-                        }
-                        Ok(Value::Integer(prod / ga))
+                        let abs_a = a.unsigned_abs();
+                        let abs_b = b.unsigned_abs();
+                        let gcd = unsigned_gcd(abs_a, abs_b);
+                        let lcm = (abs_a / gcd).checked_mul(abs_b).ok_or_else(|| {
+                            RustqlError::TypeMismatch(
+                                "LCM result is outside the i64 range".to_string(),
+                            )
+                        })?;
+                        checked_u64_to_i64(lcm, "LCM").map(Value::Integer)
                     }
                 }
                 _ => Ok(Value::Null),
@@ -1161,4 +1155,25 @@ pub(super) fn evaluate_scalar_function(
             }
         }
     }
+}
+
+fn checked_i64_abs(value: i64, function: &str) -> Result<i64, RustqlError> {
+    value.checked_abs().ok_or_else(|| {
+        RustqlError::TypeMismatch(format!("{} result is outside the i64 range", function))
+    })
+}
+
+fn unsigned_gcd(mut a: u64, mut b: u64) -> u64 {
+    while b != 0 {
+        let t = b;
+        b = a % b;
+        a = t;
+    }
+    a
+}
+
+fn checked_u64_to_i64(value: u64, function: &str) -> Result<i64, RustqlError> {
+    i64::try_from(value).map_err(|_| {
+        RustqlError::TypeMismatch(format!("{} result is outside the i64 range", function))
+    })
 }

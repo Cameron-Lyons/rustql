@@ -877,6 +877,24 @@ fn test_scalar_gcd_zero() {
 }
 
 #[test]
+fn test_scalar_gcd_minimum_integer_with_unit() {
+    let _g = setup();
+    let result = execute_sql("SELECT GCD(-9223372036854775808, 1) AS val").unwrap();
+    assert!(
+        result.contains("1"),
+        "Expected gcd(i64::MIN,1)=1, got: {:?}",
+        result
+    );
+}
+
+#[test]
+fn test_scalar_gcd_rejects_unrepresentable_result() {
+    let _g = setup();
+    let error = execute_sql("SELECT GCD(-9223372036854775808, 0) AS val").unwrap_err();
+    assert!(error.contains("GCD result is outside the i64 range"));
+}
+
+#[test]
 fn test_scalar_lcm() {
     let _g = setup();
     let result = execute_sql("SELECT LCM(4, 6) AS val").unwrap();
@@ -896,6 +914,13 @@ fn test_scalar_lcm_zero() {
         "Expected lcm(0,0)=0, got: {:?}",
         result
     );
+}
+
+#[test]
+fn test_scalar_lcm_rejects_unrepresentable_result() {
+    let _g = setup();
+    let error = execute_sql("SELECT LCM(9223372036854775807, 2) AS val").unwrap_err();
+    assert!(error.contains("LCM result is outside the i64 range"));
 }
 
 #[test]
