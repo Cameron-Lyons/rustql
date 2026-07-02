@@ -116,7 +116,7 @@ impl<'a> PlanExecutor<'a> {
             .collect();
 
         let mut seen = SqlRowSet::new();
-        let mut rows = Vec::new();
+        let mut rows = Vec::with_capacity(input.rows.len());
 
         for row in input.rows {
             let key: Vec<Value> = distinct_on

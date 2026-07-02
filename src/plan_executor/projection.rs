@@ -98,9 +98,9 @@ impl<'a> PlanExecutor<'a> {
         };
 
         let scalar_outer_columns = scalar_outer_scope_columns(&result.columns, select_stmt);
-        let mut projected_rows = Vec::new();
+        let mut projected_rows = Vec::with_capacity(result.rows.len());
         for (row_idx, row) in result.rows.iter().enumerate() {
-            let mut projected_row = Vec::new();
+            let mut projected_row = Vec::with_capacity(column_specs.len());
             let mut aggregate_offset = result.columns.len().saturating_sub(aggregate_count);
             let mut window_offset = result.columns.len();
             for (_, col) in &column_specs {
@@ -165,7 +165,7 @@ impl<'a> PlanExecutor<'a> {
         input: ExecutionResult,
     ) -> Result<ExecutionResult, RustqlError> {
         let mut seen = SqlRowSet::new();
-        let mut unique_rows = Vec::new();
+        let mut unique_rows = Vec::with_capacity(input.rows.len());
 
         for row in input.rows {
             if seen.insert(row.clone()) {
