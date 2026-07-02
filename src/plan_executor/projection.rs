@@ -23,18 +23,20 @@ impl<'a> PlanExecutor<'a> {
             })
             .collect();
 
-        let column_specs: Vec<(String, Column)> =
+        let column_specs: Vec<(String, Column, Option<usize>)> =
             if matches!(select_stmt.columns.first(), Some(Column::All)) {
                 result
                     .columns
                     .iter()
-                    .map(|c| {
+                    .enumerate()
+                    .map(|(idx, c)| {
                         (
                             c.clone(),
                             Column::Named {
                                 name: c.clone(),
                                 alias: None,
                             },
+                            Some(idx),
                         )
                     })
                     .collect()
@@ -43,18 +45,25 @@ impl<'a> PlanExecutor<'a> {
                     .columns
                     .iter()
                     .map(|col| match col {
-                        Column::Named { name, alias } => {
-                            Ok((alias.clone().unwrap_or_else(|| name.clone()), col.clone()))
-                        }
+                        Column::Named { name, alias } => Ok((
+                            alias.clone().unwrap_or_else(|| name.clone()),
+                            col.clone(),
+                            Some(
+                                find_result_column_index(&result.columns, name)
+                                    .ok_or_else(|| RustqlError::ColumnNotFound(name.to_string()))?,
+                            ),
+                        )),
                         Column::Expression { alias, .. } => Ok((
                             alias.clone().unwrap_or_else(|| "<expression>".to_string()),
                             col.clone(),
+                            None,
                         )),
                         Column::Function(agg) => Ok((
                             crate::executor::aggregate::format_aggregate_header(agg),
                             col.clone(),
+                            None,
                         )),
-                        Column::Subquery(_) => Ok(("<subquery>".to_string(), col.clone())),
+                        Column::Subquery(_) => Ok(("<subquery>".to_string(), col.clone(), None)),
                         Column::All => Err(RustqlError::Internal(
                             "Wildcard projection must be expanded before plan projection"
                                 .to_string(),
@@ -78,13 +87,6 @@ impl<'a> PlanExecutor<'a> {
             )
         });
 
-        for (_, col) in &column_specs {
-            if let Column::Named { name, .. } = col {
-                find_result_column_index(&result.columns, name)
-                    .ok_or_else(|| RustqlError::ColumnNotFound(name.to_string()))?;
-            }
-        }
-
         let window_rows = if has_window_functions {
             let mut rows = result.rows.clone();
             crate::executor::aggregate::evaluate_window_functions(
@@ -98,12 +100,12 @@ impl<'a> PlanExecutor<'a> {
         };
 
         let scalar_outer_columns = scalar_outer_scope_columns(&result.columns, select_stmt);
-        let mut projected_rows = Vec::new();
+        let mut projected_rows = Vec::with_capacity(result.rows.len());
         for (row_idx, row) in result.rows.iter().enumerate() {
-            let mut projected_row = Vec::new();
+            let mut projected_row = Vec::with_capacity(column_specs.len());
             let mut aggregate_offset = result.columns.len().saturating_sub(aggregate_count);
             let mut window_offset = result.columns.len();
-            for (_, col) in &column_specs {
+            for (_, col, named_index) in &column_specs {
                 let val = match col {
                     Column::All => {
                         return Err(RustqlError::Internal(
@@ -112,8 +114,12 @@ impl<'a> PlanExecutor<'a> {
                         ));
                     }
                     Column::Named { name, .. } => {
-                        let idx = find_result_column_index(&result.columns, name)
-                            .ok_or_else(|| RustqlError::ColumnNotFound(name.to_string()))?;
+                        let idx = named_index.ok_or_else(|| {
+                            RustqlError::Internal(format!(
+                                "Projection column '{}' was not resolved before execution",
+                                name
+                            ))
+                        })?;
                         row.get(idx).cloned().unwrap_or(Value::Null)
                     }
                     Column::Expression { expr, .. } => match expr {
@@ -142,8 +148,10 @@ impl<'a> PlanExecutor<'a> {
             projected_rows.push(projected_row);
         }
 
-        let projected_columns: Vec<String> =
-            column_specs.iter().map(|(name, _)| name.clone()).collect();
+        let projected_columns: Vec<String> = column_specs
+            .iter()
+            .map(|(name, _, _)| name.clone())
+            .collect();
 
         Ok(ExecutionResult {
             columns: projected_columns,
