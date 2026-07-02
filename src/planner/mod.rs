@@ -4,9 +4,7 @@ use crate::database::{DatabaseCatalog, Table};
 use crate::error::RustqlError;
 use crate::executor::aggregate::format_aggregate_header;
 use crate::executor::ddl::{IndexUsage, find_index_usage};
-use crate::executor::expr::compare_values_same_type;
-use std::cmp::Ordering;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::HashSet;
 
 const DEFAULT_GENERATE_SERIES_ROWS: usize = 100;
 const DEFAULT_LATERAL_ROWS: usize = 10;
@@ -51,7 +49,7 @@ mod stats;
 
 pub use plan_node::PlanNode;
 #[allow(unused_imports)]
-pub use stats::{ColumnStats, TableStats};
+pub use stats::TableStats;
 
 pub struct QueryPlanner<'a> {
     db: &'a dyn DatabaseCatalog,
