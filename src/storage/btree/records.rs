@@ -77,6 +77,10 @@ mod tests {
             key.len(),
             ROW_KEY_PREFIX.len() + "users".len() + 1 + ROW_ID_KEY_WIDTH
         );
+        assert_eq!(
+            parse_row_storage_key(&key),
+            Some(("users", RowId(42), true))
+        );
     }
 
     #[test]
