@@ -36,7 +36,7 @@ pub(super) fn evaluate_scalar_function(
         },
         ScalarFunctionType::Substring => {
             let s = match evaluated_args.first() {
-                Some(Value::Text(s)) => s.clone(),
+                Some(Value::Text(s)) => s.as_str(),
                 Some(Value::Null) => return Ok(Value::Null),
                 _ => {
                     return Err(RustqlError::TypeMismatch(
@@ -52,20 +52,16 @@ pub(super) fn evaluate_scalar_function(
                     ));
                 }
             };
-            let chars: Vec<char> = s.chars().collect();
-            if start >= chars.len() {
-                return Ok(Value::Text(String::new()));
-            }
-            let len = match evaluated_args.get(2) {
-                Some(Value::Integer(l)) => *l as usize,
-                None => chars.len() - start,
+            let chars = s.chars().skip(start);
+            let result: String = match evaluated_args.get(2) {
+                Some(Value::Integer(l)) => chars.take(*l as usize).collect(),
+                None => chars.collect(),
                 _ => {
                     return Err(RustqlError::TypeMismatch(
                         "SUBSTRING length must be an integer".to_string(),
                     ));
                 }
             };
-            let result: String = chars.iter().skip(start).take(len).collect();
             Ok(Value::Text(result))
         }
         ScalarFunctionType::Abs => match evaluated_args.first() {
