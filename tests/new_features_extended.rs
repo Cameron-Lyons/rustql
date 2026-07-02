@@ -126,6 +126,14 @@ fn test_abs_function() {
 }
 
 #[test]
+fn test_abs_rejects_minimum_integer_overflow() {
+    let _guard = setup_test();
+
+    let error = execute_sql("SELECT ABS(-9223372036854775808)").unwrap_err();
+    assert!(error.contains("ABS result is outside the i64 range"));
+}
+
+#[test]
 fn test_round_function() {
     let _guard = setup_test();
     execute_sql("CREATE TABLE decimals (id INTEGER, val FLOAT)").unwrap();
