@@ -319,31 +319,7 @@ impl Parser {
 
             if *self.current_token() == Token::Check {
                 self.advance();
-                self.consume(Token::LeftParen)?;
-                let mut depth = 1;
-                let mut check_str = String::new();
-                while depth > 0 {
-                    let tok = self.advance();
-                    match tok {
-                        Token::LeftParen => {
-                            depth += 1;
-                            check_str.push('(');
-                        }
-                        Token::RightParen => {
-                            depth -= 1;
-                            if depth > 0 {
-                                check_str.push(')');
-                            }
-                        }
-                        _ => {
-                            if !check_str.is_empty() {
-                                check_str.push(' ');
-                            }
-                            check_str.push_str(&token_to_string(&tok));
-                        }
-                    }
-                }
-                check = Some(check_str);
+                check = Some(self.parse_parenthesized_sql("CHECK")?);
             }
 
             if *self.current_token() == Token::Autoincrement {
@@ -451,30 +427,7 @@ impl Parser {
                     false
                 };
                 self.consume(Token::As)?;
-                self.consume(Token::LeftParen)?;
-                let mut depth = 1;
-                let mut expr_sql = String::new();
-                while depth > 0 {
-                    let tok = self.advance();
-                    match tok {
-                        Token::LeftParen => {
-                            depth += 1;
-                            expr_sql.push('(');
-                        }
-                        Token::RightParen => {
-                            depth -= 1;
-                            if depth > 0 {
-                                expr_sql.push(')');
-                            }
-                        }
-                        _ => {
-                            if !expr_sql.is_empty() {
-                                expr_sql.push(' ');
-                            }
-                            expr_sql.push_str(&token_to_string(&tok));
-                        }
-                    }
-                }
+                let expr_sql = self.parse_parenthesized_sql("generated column")?;
                 if *self.current_token() == Token::Stored {
                     self.advance();
                 }
@@ -504,6 +457,40 @@ impl Parser {
         }
 
         Ok((columns, table_constraints))
+    }
+
+    fn parse_parenthesized_sql(&mut self, context: &str) -> Result<String, RustqlError> {
+        self.consume(Token::LeftParen)?;
+        let mut depth = 1;
+        let mut sql = String::new();
+        while depth > 0 {
+            let tok = self.advance();
+            match tok {
+                Token::Eof => {
+                    return Err(RustqlError::ParseError(format!(
+                        "Unterminated {} expression",
+                        context
+                    )));
+                }
+                Token::LeftParen => {
+                    depth += 1;
+                    sql.push('(');
+                }
+                Token::RightParen => {
+                    depth -= 1;
+                    if depth > 0 {
+                        sql.push(')');
+                    }
+                }
+                _ => {
+                    if !sql.is_empty() {
+                        sql.push(' ');
+                    }
+                    sql.push_str(&token_to_string(&tok));
+                }
+            }
+        }
+        Ok(sql)
     }
 
     pub(crate) fn parse_data_type(&mut self) -> Result<DataType, RustqlError> {
@@ -837,5 +824,48 @@ impl Parser {
             table,
             operation,
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lexer::tokenize;
+    use crate::parser::parse;
+
+    fn parse_sql(sql: &str) -> Result<Statement, RustqlError> {
+        parse(tokenize(sql).expect("SQL should lex"))
+    }
+
+    #[test]
+    fn create_table_rejects_unterminated_check_expression() {
+        let error = parse_sql("CREATE TABLE t (id INTEGER CHECK (id > 0")
+            .expect_err("unterminated CHECK expression should fail");
+
+        assert!(error.to_string().contains("Unterminated CHECK expression"));
+    }
+
+    #[test]
+    fn create_table_rejects_unterminated_generated_expression() {
+        let error =
+            parse_sql("CREATE TABLE t (id INTEGER, next_id INTEGER GENERATED ALWAYS AS (id + 1")
+                .expect_err("unterminated generated expression should fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("Unterminated generated column expression")
+        );
+    }
+
+    #[test]
+    fn create_table_preserves_nested_check_expression() {
+        let statement = parse_sql("CREATE TABLE t (id INTEGER CHECK ((id + 1) > 0))")
+            .expect("nested CHECK expression should parse");
+
+        let Statement::CreateTable(stmt) = statement else {
+            panic!("expected CREATE TABLE");
+        };
+        assert_eq!(stmt.columns[0].check.as_deref(), Some("( id + 1) > 0"));
     }
 }
