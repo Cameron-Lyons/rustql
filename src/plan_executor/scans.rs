@@ -125,19 +125,11 @@ impl<'a> PlanExecutor<'a> {
 
     fn all_row_ids_for_index(&self, index_name: &str) -> Result<HashSet<RowId>, RustqlError> {
         if let Some(index) = self.db.get_index(index_name) {
-            let mut row_ids = HashSet::new();
-            for rows in index.entries.values() {
-                row_ids.extend(rows.iter().copied());
-            }
-            return Ok(row_ids);
+            return Ok(collect_index_row_ids(&index.entries));
         }
 
         if let Some(index) = self.db.get_composite_index(index_name) {
-            let mut row_ids = HashSet::new();
-            for rows in index.entries.values() {
-                row_ids.extend(rows.iter().copied());
-            }
-            return Ok(row_ids);
+            return Ok(collect_index_row_ids(&index.entries));
         }
 
         Err(RustqlError::IndexNotFound {
@@ -368,6 +360,15 @@ impl<'a> PlanExecutor<'a> {
         }
         Ok(result)
     }
+}
+
+fn collect_index_row_ids<K: Ord>(entries: &BTreeMap<K, Vec<RowId>>) -> HashSet<RowId> {
+    let capacity = entries.values().map(Vec::len).sum();
+    let mut row_ids = HashSet::with_capacity(capacity);
+    for rows in entries.values() {
+        row_ids.extend(rows.iter().copied());
+    }
+    row_ids
 }
 
 struct ScopedTableDatabase<'a> {
