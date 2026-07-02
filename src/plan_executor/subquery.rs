@@ -114,7 +114,7 @@ fn subquery_needs_outer_scope(
 }
 
 fn subquery_expression_refs(subquery: &SelectStatement) -> Vec<&Expression> {
-    let mut expressions = Vec::new();
+    let mut expressions = Vec::with_capacity(subquery_expression_ref_capacity(subquery));
 
     for column in &subquery.columns {
         match column {
@@ -155,6 +155,42 @@ fn subquery_expression_refs(subquery: &SelectStatement) -> Vec<&Expression> {
     }
 
     expressions
+}
+
+fn subquery_expression_ref_capacity(subquery: &SelectStatement) -> usize {
+    let column_refs = subquery
+        .columns
+        .iter()
+        .map(|column| match column {
+            Column::Function(aggregate) => 1 + usize::from(aggregate.filter.is_some()),
+            Column::Expression { .. } => 1,
+            Column::All | Column::Named { .. } | Column::Subquery(_) => 0,
+        })
+        .sum::<usize>();
+
+    column_refs
+        + usize::from(subquery.where_clause.is_some())
+        + subquery
+            .group_by
+            .as_ref()
+            .map(|group_by| group_by.exprs().len())
+            .unwrap_or(0)
+        + usize::from(subquery.having.is_some())
+        + subquery
+            .distinct_on
+            .as_ref()
+            .map(|distinct_on| distinct_on.len())
+            .unwrap_or(0)
+        + subquery
+            .order_by
+            .as_ref()
+            .map(|order_by| order_by.len())
+            .unwrap_or(0)
+        + subquery
+            .joins
+            .iter()
+            .filter(|join| join.on.is_some())
+            .count()
 }
 
 fn expression_needs_outer_scope(
