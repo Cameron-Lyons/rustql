@@ -36,6 +36,20 @@ fn test_explain_index_scan() {
 }
 
 #[test]
+fn test_empty_index_scan_cost_is_finite() {
+    let _guard = setup_test();
+
+    execute_sql("CREATE TABLE t (id INTEGER, name TEXT)").unwrap();
+    execute_sql("CREATE INDEX idx_empty_id ON t (id)").unwrap();
+
+    let plan = execute_sql("EXPLAIN SELECT * FROM t WHERE id = 1").unwrap();
+    assert!(plan.contains("Index Scan using idx_empty_id"), "{plan:?}");
+    assert!(plan.contains("Cost: 0.00, Rows: 0"), "{plan:?}");
+    assert!(!plan.contains("inf"), "{plan:?}");
+    assert!(!plan.contains("NaN"), "{plan:?}");
+}
+
+#[test]
 fn test_index_scan_numeric_equality_uses_comparison_semantics() {
     let _guard = setup_test();
 
