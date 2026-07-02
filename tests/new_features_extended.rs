@@ -318,6 +318,34 @@ fn test_savepoint_rollback() {
 }
 
 #[test]
+fn test_savepoint_rollback_discards_later_savepoints() {
+    let _guard = setup_test();
+    execute_sql("CREATE TABLE sp_test3 (id INTEGER, name TEXT)").unwrap();
+    execute_sql("BEGIN TRANSACTION").unwrap();
+    execute_sql("INSERT INTO sp_test3 VALUES (1, 'Alice')").unwrap();
+    execute_sql("SAVEPOINT sp1").unwrap();
+    execute_sql("INSERT INTO sp_test3 VALUES (2, 'Bob')").unwrap();
+    execute_sql("SAVEPOINT sp2").unwrap();
+    execute_sql("INSERT INTO sp_test3 VALUES (3, 'Carol')").unwrap();
+
+    execute_sql("ROLLBACK TO SAVEPOINT sp1").unwrap();
+
+    let result = execute_sql("ROLLBACK TO SAVEPOINT sp2");
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("does not exist"));
+
+    execute_sql("INSERT INTO sp_test3 VALUES (4, 'Dana')").unwrap();
+    execute_sql("ROLLBACK TO SAVEPOINT sp1").unwrap();
+    execute_sql("COMMIT").unwrap();
+
+    let result = execute_sql("SELECT * FROM sp_test3").unwrap();
+    assert!(result.contains("Alice"));
+    assert!(!result.contains("Bob"));
+    assert!(!result.contains("Carol"));
+    assert!(!result.contains("Dana"));
+}
+
+#[test]
 fn test_cte_basic() {
     let _guard = setup_test();
     execute_sql("CREATE TABLE employees (id INTEGER, name TEXT, salary INTEGER)").unwrap();
