@@ -8,9 +8,14 @@ impl<'a> PlanExecutor<'a> {
         join_type: &JoinType,
         condition: &Expression,
     ) -> Result<ExecutionResult, RustqlError> {
-        let mut joined_rows = Vec::new();
+        let mut joined_rows = Vec::with_capacity(nested_loop_join_row_capacity(
+            left.rows.len(),
+            right.rows.len(),
+            join_type,
+        ));
         let joined_columns = joined_column_names(&left.columns, &right.columns);
-        let mut matched_right = vec![false; right.rows.len()];
+        let mut matched_right =
+            should_track_unmatched_right_rows(join_type).then(|| vec![false; right.rows.len()]);
         let combined_columns = (!matches!(join_type, JoinType::Cross))
             .then(|| combined_column_definitions(&left.columns, &right.columns));
 
@@ -33,7 +38,9 @@ impl<'a> PlanExecutor<'a> {
                 if include {
                     joined_rows.push(combined_row);
                     has_match = true;
-                    matched_right[right_idx] = true;
+                    if let Some(matched_right) = matched_right.as_mut() {
+                        matched_right[right_idx] = true;
+                    }
                 }
             }
 
@@ -42,7 +49,7 @@ impl<'a> PlanExecutor<'a> {
             }
         }
 
-        if matches!(join_type, JoinType::Right | JoinType::Full) {
+        if let Some(matched_right) = matched_right {
             for (right_idx, right_row) in right.rows.iter().enumerate() {
                 if !matched_right[right_idx] {
                     joined_rows.push(combine_row_with_left_nulls(left.columns.len(), right_row));
@@ -66,7 +73,8 @@ impl<'a> PlanExecutor<'a> {
         condition: &Expression,
     ) -> Result<ExecutionResult, RustqlError> {
         let outer_scope_columns = column_definitions_from_names(&left.columns);
-        let mut joined_rows = Vec::new();
+        let mut joined_rows =
+            Vec::with_capacity(lateral_join_row_capacity(left.rows.len(), join_type));
         let joined_columns = joined_column_names(&left.columns, right_columns);
         let temp_table_name = format!("__lateral_outer_{}", alias);
         let rewritten_subquery = lateral_subquery_with_outer_scope(subquery, &temp_table_name);
@@ -258,6 +266,34 @@ impl<'a> PlanExecutor<'a> {
             "Could not extract join keys from condition".to_string(),
         ))
     }
+}
+
+fn nested_loop_join_row_capacity(
+    left_row_count: usize,
+    right_row_count: usize,
+    join_type: &JoinType,
+) -> usize {
+    match join_type {
+        JoinType::Cross => left_row_count
+            .checked_mul(right_row_count)
+            .unwrap_or_else(|| left_row_count.max(right_row_count)),
+        JoinType::Left => left_row_count,
+        JoinType::Right => right_row_count,
+        JoinType::Full => left_row_count.max(right_row_count),
+        JoinType::Inner | JoinType::Natural => left_row_count.min(right_row_count),
+    }
+}
+
+fn lateral_join_row_capacity(left_row_count: usize, join_type: &JoinType) -> usize {
+    if matches!(join_type, JoinType::Left | JoinType::Full) {
+        left_row_count
+    } else {
+        0
+    }
+}
+
+fn should_track_unmatched_right_rows(join_type: &JoinType) -> bool {
+    matches!(join_type, JoinType::Right | JoinType::Full)
 }
 
 fn hash_join_column_index(columns: &[String], reference: &str) -> Option<usize> {
