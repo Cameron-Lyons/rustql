@@ -550,10 +550,10 @@ impl<'a> SpanCursor<'a> {
                     }
                 }
             }
-            return;
+        } else {
+            self.consume_identifier_part();
         }
 
-        self.consume_identifier_part();
         while self.peek() == Some('.')
             && self
                 .peek_next()
@@ -992,5 +992,24 @@ fn match_keyword(ident: &str) -> Token {
         "GCD" => Token::Gcd,
         "LCM" => Token::Lcm,
         _ => Token::Identifier(ident.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quoted_identifier_span_includes_dotted_suffix() {
+        let tokens = tokenize_spanned("\"A\".name").unwrap();
+
+        assert_eq!(tokens[0].token, Token::Identifier("A.name".to_string()));
+        assert_eq!(
+            tokens[0].span,
+            SourceSpan {
+                start: SourceLocation { line: 1, column: 1 },
+                end: SourceLocation { line: 1, column: 9 },
+            }
+        );
     }
 }
