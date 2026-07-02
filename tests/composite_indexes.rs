@@ -1,7 +1,7 @@
 mod common;
 use common::*;
-use rustql::database::{CompositeIndex, RowId};
 use rustql::Value;
+use rustql::database::{CompositeIndex, RowId};
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 
