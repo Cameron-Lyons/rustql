@@ -47,6 +47,29 @@ fn test_merge_when_matched_update() {
 }
 
 #[test]
+fn test_merge_update_rejects_duplicate_assignment_targets() {
+    let _g = setup();
+    execute_sql("CREATE TABLE merge_update_dups (id INTEGER, val INTEGER)").unwrap();
+    execute_sql("INSERT INTO merge_update_dups VALUES (1, 10)").unwrap();
+    execute_sql("CREATE TABLE merge_update_dup_source (id INTEGER, new_val INTEGER)").unwrap();
+    execute_sql("INSERT INTO merge_update_dup_source VALUES (1, 20)").unwrap();
+
+    let err = execute_sql(
+        "MERGE INTO merge_update_dups USING merge_update_dup_source
+         ON merge_update_dups.id = merge_update_dup_source.id
+         WHEN MATCHED THEN UPDATE SET val = new_val, val = 30",
+    )
+    .unwrap_err();
+    assert!(err.contains("Assignment target 'val' specified more than once"));
+
+    assert_rows(
+        "SELECT id, val FROM merge_update_dups",
+        &["id", "val"],
+        vec![vec![Value::Integer(1), Value::Integer(10)]],
+    );
+}
+
+#[test]
 fn test_merge_when_matched_update_set_default() {
     let _g = setup();
     execute_sql("CREATE TABLE merge_default (id INTEGER, label TEXT DEFAULT 'fallback', qty INTEGER DEFAULT 5)").unwrap();
