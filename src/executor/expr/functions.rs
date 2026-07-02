@@ -416,37 +416,33 @@ pub(super) fn evaluate_scalar_function(
             }
         }
         ScalarFunctionType::Greatest => {
-            let non_null: Vec<&Value> = evaluated_args
+            let mut non_null = evaluated_args
                 .iter()
-                .filter(|v| !matches!(v, Value::Null))
-                .collect();
-            if non_null.is_empty() {
-                Ok(Value::Null)
-            } else {
-                let mut max = non_null[0];
-                for v in &non_null[1..] {
-                    if (*v).cmp(max) == std::cmp::Ordering::Greater {
-                        max = *v;
+                .filter(|value| !matches!(value, Value::Null));
+            if let Some(mut max) = non_null.next() {
+                for value in non_null {
+                    if value.cmp(max) == std::cmp::Ordering::Greater {
+                        max = value;
                     }
                 }
                 Ok(max.clone())
+            } else {
+                Ok(Value::Null)
             }
         }
         ScalarFunctionType::Least => {
-            let non_null: Vec<&Value> = evaluated_args
+            let mut non_null = evaluated_args
                 .iter()
-                .filter(|v| !matches!(v, Value::Null))
-                .collect();
-            if non_null.is_empty() {
-                Ok(Value::Null)
-            } else {
-                let mut min = non_null[0];
-                for v in &non_null[1..] {
-                    if (*v).cmp(min) == std::cmp::Ordering::Less {
-                        min = *v;
+                .filter(|value| !matches!(value, Value::Null));
+            if let Some(mut min) = non_null.next() {
+                for value in non_null {
+                    if value.cmp(min) == std::cmp::Ordering::Less {
+                        min = value;
                     }
                 }
                 Ok(min.clone())
+            } else {
+                Ok(Value::Null)
             }
         }
         ScalarFunctionType::Lpad => {
