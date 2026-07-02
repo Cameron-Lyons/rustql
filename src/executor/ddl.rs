@@ -26,6 +26,7 @@ pub fn execute_create_table(
         }
         return Err(RustqlError::TableAlreadyExists(stmt.name.clone()));
     }
+    validate_create_table_definition(&stmt.columns, &stmt.constraints)?;
     db.tables.insert(
         stmt.name.clone(),
         Table::new(stmt.columns, Vec::new(), stmt.constraints),
@@ -94,6 +95,49 @@ fn execute_create_table_as_select(
     super::record_wal_entry(context, WalEntry::CreateTable { name: name.clone() });
     save_if_not_in_transaction(context, &db)?;
     Ok(command_result(CommandTag::CreateTable, row_count))
+}
+
+fn validate_create_table_definition(
+    columns: &[ColumnDefinition],
+    constraints: &[TableConstraint],
+) -> Result<(), RustqlError> {
+    let mut column_names = HashSet::with_capacity(columns.len());
+    for column in columns {
+        if !column_names.insert(column.name.as_str()) {
+            return Err(RustqlError::ColumnAlreadyExists {
+                name: column.name.clone(),
+            });
+        }
+    }
+
+    for constraint in constraints {
+        let constraint_columns = match constraint {
+            TableConstraint::PrimaryKey { columns, .. }
+            | TableConstraint::Unique { columns, .. } => columns,
+        };
+        validate_table_constraint_columns(constraint_columns, &column_names)?;
+    }
+
+    Ok(())
+}
+
+fn validate_table_constraint_columns(
+    constraint_columns: &[String],
+    table_columns: &HashSet<&str>,
+) -> Result<(), RustqlError> {
+    let mut seen = HashSet::with_capacity(constraint_columns.len());
+    for column in constraint_columns {
+        if !table_columns.contains(column.as_str()) {
+            return Err(RustqlError::ColumnNotFound(column.clone()));
+        }
+        if !seen.insert(column.as_str()) {
+            return Err(RustqlError::ParseError(format!(
+                "Constraint column '{}' specified more than once",
+                column
+            )));
+        }
+    }
+    Ok(())
 }
 
 pub fn execute_drop_table(
