@@ -204,6 +204,13 @@ impl<'a> Binder<'a> {
         column_aliases: &[String],
     ) -> Result<Vec<BoundColumnRef>, RustqlError> {
         let width = rows.first().map_or(0, Vec::len);
+        if column_aliases.len() > width {
+            return Err(RustqlError::TypeMismatch(format!(
+                "VALUES alias list has too many columns: expected at most {}, got {}",
+                width,
+                column_aliases.len()
+            )));
+        }
         for row in rows {
             if row.len() != width {
                 return Err(RustqlError::TypeMismatch(format!(

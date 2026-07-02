@@ -650,6 +650,21 @@ fn test_from_values_single_column() {
 }
 
 #[test]
+fn test_from_values_rejects_extra_column_aliases() {
+    let _g = setup();
+    let result = execute_sql("SELECT * FROM (VALUES (1, 'Alice')) AS t(id, name, extra)");
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("too many columns"));
+}
+
+#[test]
+fn test_from_values_allows_partial_column_aliases() {
+    let _g = setup();
+    let result = execute_sql("SELECT id, column2 FROM (VALUES (1, 'Alice')) AS t(id)").unwrap();
+    assert!(result.contains("Alice"), "got: {:?}", result);
+}
+
+#[test]
 fn test_partial_index() {
     let _g = setup();
     execute_sql("CREATE TABLE pidx_test (id INTEGER, status TEXT, val INTEGER)").unwrap();
