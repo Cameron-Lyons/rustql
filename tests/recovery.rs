@@ -1,6 +1,7 @@
 mod common;
 use common::*;
-use rustql::{Engine, EngineOptions, StorageMode};
+use rustql::ast::Value;
+use rustql::{Engine, EngineOptions, QueryResult, StorageMode};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -117,6 +118,49 @@ fn test_partial_index_filter_persists_across_reload() {
         with_filter.contains("Index Scan using idx_recovery_active"),
         "missing partial-index use after reload: {with_filter}"
     );
+    cleanup_storage_files(&path);
+}
+
+#[test]
+fn btree_storage_preserves_float_payload_bits_after_reload() {
+    let _guard = test_guard();
+    let path = unique_temp_path("db");
+    cleanup_storage_files(&path);
+    let value = f64::from_bits(0xbfa99999999999a0);
+
+    let engine = open_disk_engine(&path);
+    {
+        let mut session = engine.session();
+        session
+            .execute_one("CREATE TABLE recovery_float_bits (value FLOAT)")
+            .unwrap();
+        session
+            .execute_one("INSERT INTO recovery_float_bits VALUES (-0.050000000000000044)")
+            .unwrap();
+
+        let QueryResult::Rows(rows) = session
+            .execute_one("SELECT value FROM recovery_float_bits")
+            .unwrap()
+        else {
+            panic!("expected row result before reload");
+        };
+        assert_eq!(rows.rows, vec![vec![Value::Float(value)]]);
+    }
+    drop(engine);
+
+    let reloaded = open_disk_engine(&path);
+    let mut reloaded_session = reloaded.session();
+    let QueryResult::Rows(rows) = reloaded_session
+        .execute_one("SELECT value FROM recovery_float_bits")
+        .unwrap()
+    else {
+        panic!("expected row result after reload");
+    };
+
+    let Value::Float(actual) = rows.rows[0][0] else {
+        panic!("expected float value after reload, got: {:?}", rows.rows);
+    };
+    assert_eq!(actual.to_bits(), value.to_bits());
     cleanup_storage_files(&path);
 }
 
