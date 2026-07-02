@@ -57,14 +57,12 @@ pub(crate) fn execute_merge(
     };
     let _ = source_alias;
 
-    let mut combined_columns: Vec<ColumnDefinition> = target_columns
-        .iter()
-        .map(|c| {
-            let mut c = c.clone();
-            c.name = format!("{}.{}", stmt.target_table, c.name);
-            c
-        })
-        .collect();
+    let mut combined_columns = Vec::with_capacity(target_columns.len() + source_columns.len());
+    combined_columns.extend(target_columns.iter().map(|c| {
+        let mut c = c.clone();
+        c.name = format!("{}.{}", stmt.target_table, c.name);
+        c
+    }));
     combined_columns.extend(source_columns.iter().map(|c| {
         let mut c = c.clone();
         c.name = format!("{}.{}", source_name, c.name);
@@ -87,8 +85,7 @@ pub(crate) fn execute_merge(
 
         let mut matched_indices: Vec<usize> = Vec::new();
         for (row_idx, target_row) in &target_rows_snapshot {
-            let mut combined_row: Vec<Value> = target_row.clone();
-            combined_row.extend(source_row.clone());
+            let combined_row = combined_merge_row(target_row, source_row);
             if evaluate_expression(
                 Some(&*db),
                 &stmt.on_condition,
@@ -114,8 +111,7 @@ pub(crate) fn execute_merge(
                                     "Missing matched target row for merge".to_string(),
                                 )
                             })?;
-                        let mut combined_row: Vec<Value> = target_row.clone();
-                        combined_row.extend(source_row.clone());
+                        let combined_row = combined_merge_row(&target_row, source_row);
 
                         let passes_condition = if let Some(cond) = condition {
                             evaluate_expression(Some(&*db), cond, &combined_columns, &combined_row)?
@@ -245,10 +241,8 @@ pub(crate) fn execute_merge(
                     }
                 }
                 MergeWhenClause::NotMatched { condition, action } if !is_matched => {
-                    let dummy_target: Vec<Value> =
-                        target_columns.iter().map(|_| Value::Null).collect();
-                    let mut combined_row: Vec<Value> = dummy_target;
-                    combined_row.extend(source_row.clone());
+                    let combined_row =
+                        combined_merge_null_target_row(target_columns.len(), source_row);
 
                     let passes_condition = if let Some(cond) = condition {
                         evaluate_expression(Some(&*db), cond, &combined_columns, &combined_row)?
@@ -355,6 +349,20 @@ pub(crate) fn execute_merge(
     Ok(command_result(CommandTag::Merge, affected as u64))
 }
 
+fn combined_merge_row(target_row: &[Value], source_row: &[Value]) -> Vec<Value> {
+    let mut combined = Vec::with_capacity(target_row.len() + source_row.len());
+    combined.extend_from_slice(target_row);
+    combined.extend_from_slice(source_row);
+    combined
+}
+
+fn combined_merge_null_target_row(target_column_count: usize, source_row: &[Value]) -> Vec<Value> {
+    let mut combined = Vec::with_capacity(target_column_count + source_row.len());
+    combined.resize(target_column_count, Value::Null);
+    combined.extend_from_slice(source_row);
+    combined
+}
+
 fn apply_merge_auto_increment_values(
     db: &Database,
     table_name: &str,
@@ -380,6 +388,5 @@ fn apply_merge_auto_increment_values(
             row[col_idx] = Value::Integer(max_val + 1);
         }
     }
-
     Ok(())
 }
