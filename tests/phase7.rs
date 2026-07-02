@@ -223,6 +223,15 @@ fn test_fetch_first_rows_only() {
 }
 
 #[test]
+fn test_fetch_rejects_negative_count() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    reset_database();
+
+    let error = execute_sql("SELECT 1 FETCH FIRST -1 ROWS ONLY").unwrap_err();
+    assert!(error.contains("FETCH FIRST/NEXT count cannot be negative"));
+}
+
+#[test]
 fn test_fetch_with_ties() {
     let _lock = TEST_MUTEX.lock().unwrap();
     reset_database();
