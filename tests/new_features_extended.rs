@@ -156,6 +156,16 @@ fn test_substring_function() {
 }
 
 #[test]
+fn test_substring_counts_multibyte_characters() {
+    let _guard = setup_test();
+    execute_sql("CREATE TABLE words (id INTEGER, word TEXT)").unwrap();
+    execute_sql("INSERT INTO words VALUES (1, 'h\u{e9}llo')").unwrap();
+
+    let result = execute_sql("SELECT SUBSTRING(word, 2, 2) FROM words").unwrap();
+    assert!(result.contains("\u{e9}l"), "got: {result:?}");
+}
+
+#[test]
 fn test_cross_join() {
     let _guard = setup_test();
     execute_sql("CREATE TABLE colors (name TEXT)").unwrap();
