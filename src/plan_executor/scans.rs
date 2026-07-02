@@ -10,21 +10,7 @@ impl<'a> PlanExecutor<'a> {
     ) -> Result<ExecutionResult, RustqlError> {
         let empty_columns: Vec<ColumnDefinition> = Vec::new();
         let empty_row: Vec<Value> = Vec::new();
-        let output_columns: Vec<ColumnDefinition> = columns
-            .iter()
-            .map(|name| ColumnDefinition {
-                name: name.clone(),
-                data_type: DataType::Text,
-                nullable: true,
-                primary_key: false,
-                unique: false,
-                default_value: None,
-                foreign_key: None,
-                check: None,
-                auto_increment: false,
-                generated: None,
-            })
-            .collect();
+        let output_columns = column_definitions_from_names(columns);
 
         let mut rows = Vec::with_capacity(values.len());
         for value_row in values {
@@ -59,7 +45,7 @@ impl<'a> PlanExecutor<'a> {
             .get_table(table_name)
             .ok_or_else(|| RustqlError::TableNotFound(table_name.to_string()))?;
 
-        let mut rows = Vec::new();
+        let mut rows = Vec::with_capacity(table.rows.len());
 
         for row in &table.rows {
             let include = if let Some(filter_expr) = filter {
@@ -103,7 +89,7 @@ impl<'a> PlanExecutor<'a> {
             self.all_row_ids_for_index(index_name)?
         };
 
-        let mut rows = Vec::new();
+        let mut rows = Vec::with_capacity(row_ids.len());
         for row_id in row_ids {
             if let Some(row) = table.row_by_id(row_id) {
                 let include = if let Some(filter_expr) = filter {
@@ -125,7 +111,8 @@ impl<'a> PlanExecutor<'a> {
 
     fn all_row_ids_for_index(&self, index_name: &str) -> Result<HashSet<RowId>, RustqlError> {
         if let Some(index) = self.db.get_index(index_name) {
-            let mut row_ids = HashSet::new();
+            let row_count = index.entries.values().map(Vec::len).sum();
+            let mut row_ids = HashSet::with_capacity(row_count);
             for rows in index.entries.values() {
                 row_ids.extend(rows.iter().copied());
             }
@@ -133,7 +120,8 @@ impl<'a> PlanExecutor<'a> {
         }
 
         if let Some(index) = self.db.get_composite_index(index_name) {
-            let mut row_ids = HashSet::new();
+            let row_count = index.entries.values().map(Vec::len).sum();
+            let mut row_ids = HashSet::with_capacity(row_count);
             for rows in index.entries.values() {
                 row_ids.extend(rows.iter().copied());
             }
