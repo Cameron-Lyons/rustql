@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 80a2a7be015ef7bd1be9cabc510f576dbf20313ca7d98dce5a944fc40769a4fd # shrinks to db = [TableSpec { column_types: [Integer, Integer], rows: [[Null, Float(-0.9299999999999999)]], next_row_padding: 0 }]

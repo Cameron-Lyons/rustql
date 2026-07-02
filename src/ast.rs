@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de::VariantAccess};
 use std::{cmp::Ordering, fmt};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -592,7 +592,7 @@ pub enum UnaryOperator {
     Minus,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub enum Value {
     Null,
     Integer(i64),
@@ -602,6 +602,116 @@ pub enum Value {
     Date(String),
     Time(String),
     DateTime(String),
+}
+
+impl Serialize for Value {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            Value::Null => serializer.serialize_unit_variant("Value", 0, "Null"),
+            Value::Integer(value) => {
+                serializer.serialize_newtype_variant("Value", 1, "Integer", value)
+            }
+            Value::Float(value) => serializer.serialize_newtype_variant(
+                "Value",
+                2,
+                "Float",
+                &SerializedFloat {
+                    bits: value.to_bits(),
+                },
+            ),
+            Value::Text(value) => serializer.serialize_newtype_variant("Value", 3, "Text", value),
+            Value::Boolean(value) => {
+                serializer.serialize_newtype_variant("Value", 4, "Boolean", value)
+            }
+            Value::Date(value) => serializer.serialize_newtype_variant("Value", 5, "Date", value),
+            Value::Time(value) => serializer.serialize_newtype_variant("Value", 6, "Time", value),
+            Value::DateTime(value) => {
+                serializer.serialize_newtype_variant("Value", 7, "DateTime", value)
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Value {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_enum(
+            "Value",
+            &[
+                "Null", "Integer", "Float", "Text", "Boolean", "Date", "Time", "DateTime",
+            ],
+            ValueVisitor,
+        )
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct SerializedFloat {
+    bits: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum FloatPayload {
+    Bits { bits: u64 },
+    Number(f64),
+}
+
+impl FloatPayload {
+    fn into_value(self) -> Value {
+        match self {
+            FloatPayload::Bits { bits } => Value::Float(f64::from_bits(bits)),
+            FloatPayload::Number(value) => Value::Float(value),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(field_identifier)]
+enum ValueVariant {
+    Null,
+    Integer,
+    Float,
+    Text,
+    Boolean,
+    Date,
+    Time,
+    DateTime,
+}
+
+struct ValueVisitor;
+
+impl<'de> serde::de::Visitor<'de> for ValueVisitor {
+    type Value = Value;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a serialized SQL value")
+    }
+
+    fn visit_enum<A>(self, data: A) -> Result<Self::Value, A::Error>
+    where
+        A: serde::de::EnumAccess<'de>,
+    {
+        let (variant, payload) = data.variant::<ValueVariant>()?;
+        match variant {
+            ValueVariant::Null => {
+                payload.unit_variant()?;
+                Ok(Value::Null)
+            }
+            ValueVariant::Integer => Ok(Value::Integer(payload.newtype_variant()?)),
+            ValueVariant::Float => Ok(payload.newtype_variant::<FloatPayload>()?.into_value()),
+            ValueVariant::Text => Ok(Value::Text(payload.newtype_variant()?)),
+            ValueVariant::Boolean => Ok(Value::Boolean(payload.newtype_variant()?)),
+            ValueVariant::Date => Ok(Value::Date(payload.newtype_variant()?)),
+            ValueVariant::Time => Ok(Value::Time(payload.newtype_variant()?)),
+            ValueVariant::DateTime => Ok(Value::DateTime(payload.newtype_variant()?)),
+        }
+    }
 }
 
 impl Value {
@@ -681,5 +791,33 @@ fn compare_floats(left: f64, right: f64) -> Ordering {
         (false, true) => Ordering::Less,
         _ if left < right => Ordering::Less,
         _ => Ordering::Greater,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Value;
+
+    #[test]
+    fn value_json_preserves_float_bits() {
+        let original = Value::Float(-0.9299999999999999);
+        let serialized = serde_json::to_string(&original).expect("serialize value");
+        let decoded: Value = serde_json::from_str(&serialized).expect("deserialize value");
+
+        let (Value::Float(original), Value::Float(decoded)) = (original, decoded) else {
+            panic!("expected float values");
+        };
+        assert_eq!(original.to_bits(), decoded.to_bits());
+    }
+
+    #[test]
+    fn value_json_reads_legacy_float_number() {
+        let decoded: Value =
+            serde_json::from_str(r#"{"Float":-0.9299999999999999}"#).expect("deserialize value");
+
+        let Value::Float(decoded) = decoded else {
+            panic!("expected float value");
+        };
+        assert_eq!(decoded.to_bits(), (-0.93f64).to_bits());
     }
 }
