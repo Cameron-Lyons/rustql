@@ -93,11 +93,13 @@ impl<'a> AggregateGroupCollection<'a> {
     }
 
     fn into_groups(self) -> Vec<AggregateGroup<'a>> {
-        let mut groups: Vec<AggregateGroup<'a>> = self
-            .non_numeric_groups
-            .into_iter()
-            .map(|(key, rows)| AggregateGroup { key, rows })
-            .collect();
+        let mut groups =
+            Vec::with_capacity(self.non_numeric_groups.len() + self.numeric_groups.len());
+        groups.extend(
+            self.non_numeric_groups
+                .into_iter()
+                .map(|(key, rows)| AggregateGroup { key, rows }),
+        );
         groups.extend(self.numeric_groups);
         groups
     }
@@ -172,6 +174,7 @@ impl<'a> PlanExecutor<'a> {
         if let Some(grouping_sets) = grouping_sets {
             for set in grouping_sets {
                 let groups = self.build_aggregate_groups(&input, set, &column_defs);
+                result_rows.reserve(groups.len());
 
                 for group in groups {
                     let mut result_row = Vec::with_capacity(group_by.len() + aggregates.len());
@@ -217,11 +220,14 @@ impl<'a> PlanExecutor<'a> {
             }
         } else {
             let groups = self.build_aggregate_groups(&input, group_by, &column_defs);
+            result_rows.reserve(groups.len());
 
             for group in groups {
-                let mut result_row = group.key.clone();
+                let AggregateGroup { key, rows } = group;
+                let mut result_row = Vec::with_capacity(key.len() + aggregates.len());
+                result_row.extend(key);
                 let aggregate_values =
-                    self.compute_group_aggregate_values(aggregates, &group.rows, &column_defs)?;
+                    self.compute_group_aggregate_values(aggregates, &rows, &column_defs)?;
                 result_row.extend(aggregate_values.iter().cloned());
 
                 if let Some(having_expr) = having {
@@ -231,7 +237,7 @@ impl<'a> PlanExecutor<'a> {
                         input_columns: &column_defs,
                         selected_aggregates: aggregates,
                         aggregate_values: &aggregate_values,
-                        group_rows: &group.rows,
+                        group_rows: &rows,
                     };
                     let include = self.evaluate_having(having_expr, &having_context)?;
 
@@ -289,7 +295,8 @@ impl<'a> PlanExecutor<'a> {
                 .unwrap_or(idx);
         }
 
-        let mut prepared_inputs: Vec<Option<PreparedAggregateInput>> = Vec::new();
+        let mut prepared_inputs: Vec<Option<PreparedAggregateInput>> =
+            Vec::with_capacity(aggregates.len());
         prepared_inputs.resize_with(aggregates.len(), || None);
 
         let mut values = Vec::with_capacity(aggregates.len());
@@ -324,7 +331,7 @@ impl<'a> PlanExecutor<'a> {
         }
 
         let mut filtered_row_count = 0usize;
-        let mut values = Vec::new();
+        let mut values = Vec::with_capacity(if count_star { 0 } else { rows.len() });
         let mut seen = agg.distinct.then(AggregateDistinctTracker::new);
 
         for row in rows {
