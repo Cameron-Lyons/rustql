@@ -67,7 +67,9 @@ pub fn evaluate_value_expression_with_db(
             UnaryOperator::Minus => {
                 let val = evaluate_value_expression_with_db(expr, columns, row, db)?;
                 match val {
-                    Value::Integer(n) => Ok(Value::Integer(-n)),
+                    Value::Integer(n) => n.checked_neg().map(Value::Integer).ok_or_else(|| {
+                        RustqlError::TypeMismatch("Integer negation overflow".to_string())
+                    }),
                     Value::Float(f) => Ok(Value::Float(-f)),
                     _ => Err(RustqlError::Internal(
                         "Unary minus only supported for numeric types".to_string(),
