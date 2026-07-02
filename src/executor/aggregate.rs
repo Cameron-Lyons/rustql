@@ -134,7 +134,8 @@ fn compute_windowed_aggregate(
     let default_expr = Expression::Column("*".to_string());
     let expr = args.first().unwrap_or(&default_expr);
 
-    let mut values: Vec<Value> = Vec::new();
+    let frame_len = frame_end - frame_start + 1;
+    let mut values: Vec<Value> = Vec::with_capacity(frame_len);
     for &row_idx in &sorted_indices[frame_start..=frame_end] {
         let val = evaluate_value_expression(expr, columns, rows[row_idx]).unwrap_or(Value::Null);
         values.push(val);
