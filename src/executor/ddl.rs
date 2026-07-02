@@ -602,19 +602,27 @@ pub fn update_indexes_on_delete(
     table_name: &str,
     deleted_row_ids: &[RowId],
 ) -> Result<(), RustqlError> {
+    if deleted_row_ids.is_empty() {
+        return Ok(());
+    }
+
+    let deleted_row_ids: HashSet<RowId> = deleted_row_ids.iter().copied().collect();
+
     for index in db.indexes.values_mut() {
         if index.table == table_name {
-            for entry in index.entries.values_mut() {
+            index.entries.retain(|_, entry| {
                 entry.retain(|row_id| !deleted_row_ids.contains(row_id));
-            }
+                !entry.is_empty()
+            });
         }
     }
 
     for index in db.composite_indexes.values_mut() {
         if index.table == table_name {
-            for entry in index.entries.values_mut() {
+            index.entries.retain(|_, entry| {
                 entry.retain(|row_id| !deleted_row_ids.contains(row_id));
-            }
+                !entry.is_empty()
+            });
         }
     }
 
