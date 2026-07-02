@@ -203,19 +203,20 @@ pub(super) fn handle_foreign_keys_for_delete(
     columns: &[ColumnDefinition],
     row_to_delete: &[Value],
 ) -> Result<(), RustqlError> {
-    let mut index_actions = Vec::new();
+    let mut index_actions = Vec::with_capacity(db.tables.len().saturating_sub(1));
 
     for (other_table_name, other_table) in db.tables.iter_mut() {
         if other_table_name == table_name {
             continue;
         }
 
-        let foreign_keys: Vec<(usize, ForeignKeyConstraint)> = other_table
-            .columns
-            .iter()
-            .enumerate()
-            .filter_map(|(col_idx, col_def)| col_def.foreign_key.clone().map(|fk| (col_idx, fk)))
-            .collect();
+        let mut foreign_keys: Vec<(usize, ForeignKeyConstraint)> =
+            Vec::with_capacity(other_table.columns.len());
+        for (col_idx, col_def) in other_table.columns.iter().enumerate() {
+            if let Some(fk) = col_def.foreign_key.clone() {
+                foreign_keys.push((col_idx, fk));
+            }
+        }
 
         for (col_idx, fk) in foreign_keys {
             if fk.referenced_table == table_name {
@@ -326,19 +327,20 @@ pub(super) fn handle_foreign_keys_for_update(
     old_row: &[Value],
     new_row: &[Value],
 ) -> Result<(), RustqlError> {
-    let mut index_actions = Vec::new();
+    let mut index_actions = Vec::with_capacity(db.tables.len().saturating_sub(1));
 
     for (other_table_name, other_table) in db.tables.iter_mut() {
         if other_table_name == table_name {
             continue;
         }
 
-        let foreign_keys: Vec<(usize, ForeignKeyConstraint)> = other_table
-            .columns
-            .iter()
-            .enumerate()
-            .filter_map(|(col_idx, col_def)| col_def.foreign_key.clone().map(|fk| (col_idx, fk)))
-            .collect();
+        let mut foreign_keys: Vec<(usize, ForeignKeyConstraint)> =
+            Vec::with_capacity(other_table.columns.len());
+        for (col_idx, col_def) in other_table.columns.iter().enumerate() {
+            if let Some(fk) = col_def.foreign_key.clone() {
+                foreign_keys.push((col_idx, fk));
+            }
+        }
 
         for (col_idx, fk) in foreign_keys {
             if fk.referenced_table == table_name {
