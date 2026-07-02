@@ -177,6 +177,13 @@ impl Table {
         }
     }
 
+    fn update_row_id_positions_from(&mut self, start: usize) {
+        for position in start..self.row_ids.len() {
+            self.row_id_positions
+                .insert(self.row_ids[position], position);
+        }
+    }
+
     pub fn ensure_row_ids(&mut self) {
         if self.row_ids.len() != self.rows.len() {
             self.row_ids = (1..=self.rows.len() as u64).map(RowId).collect();
@@ -241,7 +248,7 @@ impl Table {
         if self.next_row_id <= row_id.0 {
             self.next_row_id = row_id.0 + 1;
         }
-        self.rebuild_row_id_positions();
+        self.update_row_id_positions_from(position);
     }
 
     pub fn remove_row_by_id(&mut self, row_id: RowId) -> Option<(usize, Vec<Value>)> {
@@ -249,7 +256,8 @@ impl Table {
         let position = self.position_of_row_id(row_id)?;
         self.row_ids.remove(position);
         let row = self.rows.remove(position);
-        self.rebuild_row_id_positions();
+        self.row_id_positions.remove(&row_id);
+        self.update_row_id_positions_from(position);
         Some((position, row))
     }
 
@@ -257,6 +265,51 @@ impl Table {
         let position = self.position_of_row_id(row_id)?;
         self.rows[position] = row;
         Some(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(value: i64) -> Vec<Value> {
+        vec![Value::Integer(value)]
+    }
+
+    #[test]
+    fn insert_row_at_updates_shifted_row_id_positions() {
+        let mut table = Table::with_rows_and_ids(
+            Vec::new(),
+            vec![row(10), row(30)],
+            vec![RowId(10), RowId(30)],
+            31,
+            Vec::new(),
+        );
+
+        table.insert_row_at(1, RowId(20), row(20));
+
+        assert_eq!(table.position_of_row_id(RowId(10)), Some(0));
+        assert_eq!(table.position_of_row_id(RowId(20)), Some(1));
+        assert_eq!(table.position_of_row_id(RowId(30)), Some(2));
+        assert_eq!(table.row_by_id(RowId(30)), Some(&row(30)));
+    }
+
+    #[test]
+    fn remove_row_by_id_updates_shifted_row_id_positions() {
+        let mut table = Table::with_rows_and_ids(
+            Vec::new(),
+            vec![row(10), row(20), row(30)],
+            vec![RowId(10), RowId(20), RowId(30)],
+            31,
+            Vec::new(),
+        );
+
+        assert_eq!(table.remove_row_by_id(RowId(20)), Some((1, row(20))));
+
+        assert_eq!(table.position_of_row_id(RowId(10)), Some(0));
+        assert_eq!(table.position_of_row_id(RowId(20)), None);
+        assert_eq!(table.position_of_row_id(RowId(30)), Some(1));
+        assert_eq!(table.row_by_id(RowId(30)), Some(&row(30)));
     }
 }
 
