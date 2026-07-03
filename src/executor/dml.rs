@@ -71,6 +71,13 @@ struct DmlJoinedSource {
     rows: Vec<Vec<Value>>,
 }
 
+enum ReturningValueSpec<'a> {
+    All,
+    Named { idx: usize },
+    Expression { expr: &'a Expression },
+    Null,
+}
+
 fn build_joined_dml_source(
     db: &Database,
     table: &str,
@@ -220,7 +227,8 @@ fn format_returning(
     columns: &[ColumnDefinition],
     rows: &[Vec<Value>],
 ) -> Result<QueryResult, RustqlError> {
-    let mut headers: Vec<String> = Vec::new();
+    let output_count = returning_output_count(returning, columns.len());
+    let mut headers: Vec<String> = Vec::with_capacity(output_count);
     for col in returning {
         match col {
             Column::All => {
@@ -240,36 +248,28 @@ fn format_returning(
         }
     }
 
-    let mut projected_rows = Vec::new();
+    let mut projected_rows = Vec::with_capacity(rows.len());
+    if rows.is_empty() {
+        return Ok(rows_result(SelectResult {
+            headers,
+            rows: projected_rows,
+        }));
+    }
+
+    let value_specs = returning_value_specs(returning, columns)?;
 
     for row in rows {
-        let mut projected: Vec<Value> = Vec::new();
-        for col in returning {
-            match col {
-                Column::All => {
-                    for v in row {
-                        projected.push(v.clone());
-                    }
+        let mut projected: Vec<Value> = Vec::with_capacity(output_count);
+        for spec in &value_specs {
+            match spec {
+                ReturningValueSpec::All => {
+                    projected.extend_from_slice(row);
                 }
-                Column::Named { name, .. } => {
-                    let col_name = if name.contains('.') {
-                        name.split('.').next_back().unwrap_or(name)
-                    } else {
-                        name.as_str()
-                    };
-                    let idx = columns
-                        .iter()
-                        .position(|c| c.name == col_name)
-                        .ok_or_else(|| RustqlError::ColumnNotFound(name.clone()))?;
-                    projected.push(row[idx].clone());
+                ReturningValueSpec::Named { idx } => projected.push(row[*idx].clone()),
+                ReturningValueSpec::Expression { expr } => {
+                    projected.push(evaluate_value_expression(expr, columns, row)?);
                 }
-                Column::Expression { expr, .. } => {
-                    let val = evaluate_value_expression(expr, columns, row)?;
-                    projected.push(val);
-                }
-                _ => {
-                    projected.push(Value::Null);
-                }
+                ReturningValueSpec::Null => projected.push(Value::Null),
             }
         }
         projected_rows.push(projected);
@@ -279,4 +279,50 @@ fn format_returning(
         headers,
         rows: projected_rows,
     }))
+}
+
+fn returning_output_count(returning: &[Column], column_count: usize) -> usize {
+    returning
+        .iter()
+        .map(|col| {
+            if matches!(col, Column::All) {
+                column_count
+            } else {
+                1
+            }
+        })
+        .sum()
+}
+
+fn returning_value_specs<'a>(
+    returning: &'a [Column],
+    columns: &[ColumnDefinition],
+) -> Result<Vec<ReturningValueSpec<'a>>, RustqlError> {
+    let mut specs = Vec::with_capacity(returning.len());
+    for col in returning {
+        match col {
+            Column::All => specs.push(ReturningValueSpec::All),
+            Column::Named { name, .. } => {
+                let idx = returning_column_index(columns, name)?;
+                specs.push(ReturningValueSpec::Named { idx });
+            }
+            Column::Expression { expr, .. } => {
+                specs.push(ReturningValueSpec::Expression { expr });
+            }
+            _ => specs.push(ReturningValueSpec::Null),
+        }
+    }
+    Ok(specs)
+}
+
+fn returning_column_index(columns: &[ColumnDefinition], name: &str) -> Result<usize, RustqlError> {
+    let col_name = if name.contains('.') {
+        name.split('.').next_back().unwrap_or(name)
+    } else {
+        name
+    };
+    columns
+        .iter()
+        .position(|c| c.name == col_name)
+        .ok_or_else(|| RustqlError::ColumnNotFound(name.to_string()))
 }
