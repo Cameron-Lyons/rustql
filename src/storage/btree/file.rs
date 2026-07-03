@@ -373,7 +373,7 @@ impl BTreeFile {
 
 impl BTreeFile {
     pub(super) fn read_page(&mut self, page_id: u64) -> Result<BTreePage, RustqlError> {
-        let offset = FILE_HEADER_SIZE as u64 + page_id * BTREE_PAGE_SIZE as u64;
+        let offset = page_offset(page_id)?;
 
         self.file.seek(SeekFrom::Start(offset)).map_err(|e| {
             RustqlError::StorageError(format!("Failed to seek to BTree page: {}", e))
@@ -388,7 +388,7 @@ impl BTreeFile {
     }
 
     pub(super) fn write_page(&mut self, page: &BTreePage) -> Result<(), RustqlError> {
-        let offset = FILE_HEADER_SIZE as u64 + page.header.page_id * BTREE_PAGE_SIZE as u64;
+        let offset = page_offset(page.header.page_id)?;
 
         let buf = page.to_bytes()?;
 
@@ -685,6 +685,18 @@ impl BTreeFile {
     }
 }
 
+fn page_offset(page_id: u64) -> Result<u64, RustqlError> {
+    page_id
+        .checked_mul(BTREE_PAGE_SIZE as u64)
+        .and_then(|offset| offset.checked_add(FILE_HEADER_SIZE as u64))
+        .ok_or_else(|| {
+            RustqlError::StorageError(format!(
+                "BTree page {} offset exceeds addressable file size",
+                page_id
+            ))
+        })
+}
+
 fn scan_pages_in_order_entries<F>(
     mut read_page: F,
     start_key: Option<&Value>,
@@ -754,5 +766,21 @@ where
         PageKind::Meta => Err(RustqlError::StorageError(
             "Cannot scan entries from meta page".to_string(),
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn page_offset_rejects_overflowing_page_id() {
+        let max_fitting_page_id = (u64::MAX - FILE_HEADER_SIZE as u64) / BTREE_PAGE_SIZE as u64;
+
+        assert_eq!(
+            page_offset(max_fitting_page_id).expect("max fitting page should have an offset"),
+            FILE_HEADER_SIZE as u64 + max_fitting_page_id * BTREE_PAGE_SIZE as u64
+        );
+        assert!(page_offset(max_fitting_page_id + 1).is_err());
     }
 }

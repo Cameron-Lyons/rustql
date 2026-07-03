@@ -57,12 +57,89 @@ impl StorageEngine for JsonStorageEngine {
         let _guard = self.lock.write().map_err(|e| {
             RustqlError::StorageError(format!("Failed to acquire JSON storage write lock: {}", e))
         })?;
-        let mut db = db.clone();
-        db.normalize_row_ids();
-        let data = serde_json::to_string_pretty(&db).map_err(|e| {
+        let normalized;
+        let db = if db.has_normalized_row_ids() {
+            db
+        } else {
+            normalized = {
+                let mut db = db.clone();
+                db.normalize_row_ids();
+                db
+            };
+            &normalized
+        };
+        let data = serde_json::to_string_pretty(db).map_err(|e| {
             RustqlError::StorageError(format!("Failed to serialize database: {}", e))
         })?;
         atomic_write(&self.path, data.as_bytes())?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ast::{ColumnDefinition, DataType, Value};
+    use crate::database::{RowId, Table};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn test_table() -> Table {
+        Table::new(
+            vec![ColumnDefinition {
+                name: "id".to_string(),
+                data_type: DataType::Integer,
+                nullable: true,
+                primary_key: false,
+                unique: false,
+                default_value: None,
+                foreign_key: None,
+                check: None,
+                auto_increment: false,
+                generated: None,
+            }],
+            vec![vec![Value::Integer(10)], vec![Value::Integer(20)]],
+            Vec::new(),
+        )
+    }
+
+    fn test_database(table: Table) -> Database {
+        let mut db = Database::new();
+        db.tables.insert("items".to_string(), table);
+        db
+    }
+
+    fn unique_temp_path(name: &str) -> PathBuf {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default();
+        std::env::temp_dir().join(format!(
+            "rustql_json_{}_{}_{}.json",
+            name,
+            std::process::id(),
+            timestamp
+        ))
+    }
+
+    #[test]
+    fn save_serializes_normalized_legacy_row_metadata() {
+        let mut table = test_table();
+        table.row_ids.clear();
+        table.next_row_id = 0;
+        let db = test_database(table);
+
+        let path = unique_temp_path("legacy_rows");
+        let _ = fs::remove_file(&path);
+
+        let storage = JsonStorageEngine::new(path.clone());
+        storage.save(&db).unwrap();
+
+        let saved_json = fs::read_to_string(&path).unwrap();
+        let saved: Database = serde_json::from_str(&saved_json).unwrap();
+        let table = saved.tables.get("items").unwrap();
+        assert_eq!(table.row_ids, vec![RowId(1), RowId(2)]);
+        assert_eq!(table.next_row_id, 3);
+
+        fs::remove_file(path).unwrap();
     }
 }
