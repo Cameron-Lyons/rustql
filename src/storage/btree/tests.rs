@@ -540,6 +540,60 @@ fn btree_cache_lru_eviction() {
 }
 
 #[test]
+fn btree_cached_page_hit_skips_reader() {
+    let temp_path = std::env::temp_dir().join("rustql_btree_cache_hit_reader_test.dat");
+    remove_storage_artifacts(&temp_path);
+
+    let engine = BTreeStorageEngine::new(&temp_path);
+    {
+        let mut cache = engine.page_cache.write().expect("cache write lock");
+        cache.insert(7, BTreePage::new(7, PageKind::Leaf));
+    }
+
+    let mut reader_calls = 0;
+    let page = engine
+        .read_page_cached_with(7, || {
+            reader_calls += 1;
+            Ok(BTreePage::new(7, PageKind::Leaf))
+        })
+        .expect("cached page should load");
+
+    assert_eq!(page.header.page_id, 7);
+    assert_eq!(reader_calls, 0);
+
+    remove_storage_artifacts(&temp_path);
+}
+
+#[test]
+fn btree_cached_page_miss_reads_once_and_caches_page() {
+    let temp_path = std::env::temp_dir().join("rustql_btree_cache_miss_reader_test.dat");
+    remove_storage_artifacts(&temp_path);
+
+    let engine = BTreeStorageEngine::new(&temp_path);
+    let mut reader_calls = 0;
+    let page = engine
+        .read_page_cached_with(11, || {
+            reader_calls += 1;
+            Ok(BTreePage::new(11, PageKind::Leaf))
+        })
+        .expect("missing page should load through reader");
+
+    assert_eq!(page.header.page_id, 11);
+    assert_eq!(reader_calls, 1);
+    assert_eq!(engine.cache_stats(), (0, 1, 1));
+    assert!(
+        engine
+            .page_cache
+            .read()
+            .expect("cache read lock")
+            .pages
+            .contains_key(&11)
+    );
+
+    remove_storage_artifacts(&temp_path);
+}
+
+#[test]
 fn btree_storage_rejects_invalid_header() {
     let temp_path = std::env::temp_dir().join("rustql_btree_invalid_header.dat");
     remove_storage_artifacts(&temp_path);

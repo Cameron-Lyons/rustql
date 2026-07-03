@@ -45,7 +45,10 @@ impl BTreeStorageEngine {
         }
     }
 
-    pub(super) fn read_page_cached(&self, page_id: u64) -> Result<BTreePage, RustqlError> {
+    fn read_page_cached_with<F>(&self, page_id: u64, read_page: F) -> Result<BTreePage, RustqlError>
+    where
+        F: FnOnce() -> Result<BTreePage, RustqlError>,
+    {
         {
             let mut cache = self.page_cache.write().map_err(|e| {
                 RustqlError::StorageError(format!("Failed to acquire cache write lock: {}", e))
@@ -55,8 +58,7 @@ impl BTreeStorageEngine {
             }
         }
 
-        let mut file = BTreeFile::open(&self.data_path)?;
-        let page = file.read_page(page_id)?;
+        let page = read_page()?;
         {
             let mut cache = self.page_cache.write().map_err(|e| {
                 RustqlError::StorageError(format!("Failed to acquire cache write lock: {}", e))
@@ -131,7 +133,10 @@ impl StorageEngine for BTreeStorageEngine {
             RustqlError::StorageError(format!("Failed to acquire BTree storage write lock: {}", e))
         })?;
         self.recover_if_needed_locked()?;
-        let mut cached_file = CachedBTreeFile { engine: self };
+        let mut cached_file = CachedBTreeFile {
+            engine: self,
+            file: None,
+        };
         let mut db = cached_file.read_database_via_pages()?;
         db.normalize_row_ids();
         Ok(db)

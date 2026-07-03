@@ -18,11 +18,21 @@ use std::path::Path;
 
 pub(super) struct CachedBTreeFile<'a> {
     pub(super) engine: &'a BTreeStorageEngine,
+    pub(super) file: Option<BTreeFile>,
 }
 
 impl<'a> CachedBTreeFile<'a> {
-    pub(super) fn read_page(&self, page_id: u64) -> Result<BTreePage, RustqlError> {
-        self.engine.read_page_cached(page_id)
+    pub(super) fn read_page(&mut self, page_id: u64) -> Result<BTreePage, RustqlError> {
+        let data_path = self.engine.data_path.clone();
+        let file = &mut self.file;
+        self.engine.read_page_cached_with(page_id, || {
+            if file.is_none() {
+                *file = Some(BTreeFile::open_read(&data_path)?);
+            }
+            file.as_mut()
+                .expect("cached B-tree file should be initialized")
+                .read_page(page_id)
+        })
     }
 
     pub(super) fn read_database_via_pages(&mut self) -> Result<Database, RustqlError> {
@@ -64,7 +74,7 @@ impl<'a> CachedBTreeFile<'a> {
         self.load_database_from_rows(root_page_id)
     }
 
-    fn load_database_from_rows(&self, root_page_id: u64) -> Result<Database, RustqlError> {
+    fn load_database_from_rows(&mut self, root_page_id: u64) -> Result<Database, RustqlError> {
         let mut db = Database::new();
         let mut pending_rows: HashMap<String, Vec<(RowId, Vec<Value>)>> = HashMap::new();
 
@@ -150,7 +160,7 @@ impl<'a> CachedBTreeFile<'a> {
     }
 
     fn read_data_from_entry<T>(
-        &self,
+        &mut self,
         entry: &BTreeEntry,
         label: impl Into<String>,
     ) -> Result<T, RustqlError>
@@ -167,7 +177,7 @@ impl<'a> CachedBTreeFile<'a> {
     }
 
     fn read_data_from_pointer<T>(
-        &self,
+        &mut self,
         pointer: u64,
         label: impl Into<String>,
     ) -> Result<T, RustqlError>
@@ -192,7 +202,7 @@ impl<'a> CachedBTreeFile<'a> {
     }
 
     fn range_scan_entries(
-        &self,
+        &mut self,
         start_key: Option<&Value>,
         end_key: Option<&Value>,
         root_page_id: u64,
@@ -214,12 +224,23 @@ impl BTreeFile {
     pub(super) const MAGIC: [u8; 8] = *b"RSTQLBT\0";
     pub(super) const VERSION: u32 = 3;
 
+    #[cfg(test)]
     pub(super) fn open(path: &Path) -> Result<Self, RustqlError> {
         let file = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .truncate(false)
+            .open(path)
+            .map_err(|e| {
+                RustqlError::StorageError(format!("Failed to open BTree storage file: {}", e))
+            })?;
+        Ok(BTreeFile { file })
+    }
+
+    pub(super) fn open_read(path: &Path) -> Result<Self, RustqlError> {
+        let file = std::fs::OpenOptions::new()
+            .read(true)
             .open(path)
             .map_err(|e| {
                 RustqlError::StorageError(format!("Failed to open BTree storage file: {}", e))
