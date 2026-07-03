@@ -2,6 +2,7 @@ use crate::ast::*;
 use crate::database::DatabaseCatalog;
 use crate::error::RustqlError;
 use crate::executor::aggregate::format_aggregate_header;
+use std::collections::HashSet;
 
 #[path = "binder/aggregates.rs"]
 mod aggregates;
@@ -1593,7 +1594,14 @@ impl<'a> Binder<'a> {
         target_columns: &[ColumnDefinition],
         scope: &NameScope,
     ) -> Result<(), RustqlError> {
+        let mut seen = HashSet::with_capacity(assignments.len());
         for assignment in assignments {
+            if !seen.insert(assignment.column.as_str()) {
+                return Err(RustqlError::ParseError(format!(
+                    "Assignment target '{}' specified more than once",
+                    assignment.column
+                )));
+            }
             if !target_columns
                 .iter()
                 .any(|column| column.name == assignment.column)
