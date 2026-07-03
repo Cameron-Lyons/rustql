@@ -308,7 +308,7 @@ impl<'a> PlanExecutor<'a> {
             let scoped_db = ScopedTableDatabase::new(self.db, cte.to_string(), working_table);
             let recursive_result = execute_planned_select(&scoped_db, recursive_select)?;
 
-            let mut new_rows = Vec::new();
+            let mut new_rows = Vec::with_capacity(recursive_result.rows.len());
             for row in recursive_result.rows {
                 if let Some(ref mut seen_set) = seen {
                     if seen_set.insert(row.clone()) {
@@ -324,7 +324,8 @@ impl<'a> PlanExecutor<'a> {
                 break;
             }
 
-            all_rows.extend(new_rows.clone());
+            all_rows.reserve(new_rows.len());
+            all_rows.extend(new_rows.iter().cloned());
             working_rows = new_rows;
         }
 
