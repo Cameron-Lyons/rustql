@@ -116,6 +116,37 @@ fn test_select_aliases() {
 }
 
 #[test]
+fn test_repeated_projection_columns_and_expressions() {
+    let _guard = setup_test();
+    execute_sql("CREATE TABLE projection_users (id INTEGER, name TEXT, age INTEGER)").unwrap();
+    execute_sql("INSERT INTO projection_users VALUES (1, 'Alice', 25), (2, 'Bob', 30)").unwrap();
+
+    let rows = query_rows(
+        "SELECT name, name AS repeated_name, age + 1 AS next_age
+         FROM projection_users
+         ORDER BY id",
+    )
+    .unwrap();
+
+    rows.assert_columns(&["name", "repeated_name", "next_age"]);
+    assert_eq!(
+        rows.rows,
+        vec![
+            vec![
+                Value::Text("Alice".to_string()),
+                Value::Text("Alice".to_string()),
+                Value::Integer(26),
+            ],
+            vec![
+                Value::Text("Bob".to_string()),
+                Value::Text("Bob".to_string()),
+                Value::Integer(31),
+            ],
+        ]
+    );
+}
+
+#[test]
 fn test_where_clause() {
     let _guard = setup_test();
     execute_sql("CREATE TABLE users (id INTEGER, name TEXT, age INTEGER)").unwrap();
