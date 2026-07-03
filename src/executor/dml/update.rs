@@ -140,7 +140,8 @@ fn collect_update_from_rows(
     )?;
 
     let target_columns = target_table.columns.clone();
-    let mut combined_columns = qualify_columns(&target_columns, &stmt.table);
+    let mut combined_columns = Vec::with_capacity(target_columns.len() + source.columns.len());
+    combined_columns.extend(qualify_columns(&target_columns, &stmt.table));
     combined_columns.extend(source.columns.clone());
 
     let target_rows: Vec<(usize, crate::database::RowId, Vec<Value>)> = target_table
@@ -153,8 +154,7 @@ fn collect_update_from_rows(
     for (row_idx, row_id, target_row) in target_rows {
         let mut matched_row: Option<Vec<Value>> = None;
         for source_row in &source.rows {
-            let mut combined_row = target_row.clone();
-            combined_row.extend(source_row.clone());
+            let combined_row = combined_update_from_row(&target_row, source_row);
             let matches = if let Some(ref where_expr) = stmt.where_clause {
                 evaluate_expression(Some(db), where_expr, &combined_columns, &combined_row)?
             } else {
@@ -180,6 +180,13 @@ fn collect_update_from_rows(
     }
 
     Ok(rows_to_update)
+}
+
+fn combined_update_from_row(target_row: &[Value], source_row: &[Value]) -> Vec<Value> {
+    let mut combined = Vec::with_capacity(target_row.len() + source_row.len());
+    combined.extend_from_slice(target_row);
+    combined.extend_from_slice(source_row);
+    combined
 }
 
 fn apply_update_assignments(
