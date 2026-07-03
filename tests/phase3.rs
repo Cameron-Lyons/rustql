@@ -183,6 +183,26 @@ fn test_insert_on_conflict_do_update() {
 }
 
 #[test]
+fn test_insert_on_conflict_rejects_duplicate_assignment_targets() {
+    let _guard = setup_test();
+    execute_sql("CREATE TABLE upsert_dups (id INTEGER PRIMARY KEY, score INTEGER)").unwrap();
+    execute_sql("INSERT INTO upsert_dups VALUES (1, 80)").unwrap();
+
+    let err = execute_sql(
+        "INSERT INTO upsert_dups VALUES (1, 95)
+         ON CONFLICT (id) DO UPDATE SET score = 95, score = 100",
+    )
+    .unwrap_err();
+    assert!(err.contains("Assignment target 'score' specified more than once"));
+
+    assert_rows(
+        "SELECT id, score FROM upsert_dups",
+        &["id", "score"],
+        vec![vec![Value::Integer(1), Value::Integer(80)]],
+    );
+}
+
+#[test]
 fn test_insert_on_conflict_no_conflict() {
     let _guard = setup_test();
     execute_sql("CREATE TABLE upsert3 (id INTEGER PRIMARY KEY, name TEXT)").unwrap();
