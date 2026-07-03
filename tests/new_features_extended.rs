@@ -107,11 +107,17 @@ fn test_lower_function() {
 fn test_length_function() {
     let _guard = setup_test();
     execute_sql("CREATE TABLE words (id INTEGER, word TEXT)").unwrap();
-    execute_sql("INSERT INTO words VALUES (1, 'hello'), (2, 'ab')").unwrap();
+    execute_sql("INSERT INTO words VALUES (1, 'hello'), (2, 'ab'), (3, 'h\u{e9}llo')").unwrap();
 
-    let result = execute_sql("SELECT LENGTH(word) FROM words").unwrap();
-    assert!(result.contains("5"));
-    assert!(result.contains("2"));
+    let rows = query_rows("SELECT id, LENGTH(word) FROM words ORDER BY id").unwrap();
+    assert_eq!(
+        rows.rows,
+        vec![
+            vec![Value::Integer(1), Value::Integer(5)],
+            vec![Value::Integer(2), Value::Integer(2)],
+            vec![Value::Integer(3), Value::Integer(5)],
+        ]
+    );
 }
 
 #[test]
@@ -123,6 +129,14 @@ fn test_abs_function() {
     let result = execute_sql("SELECT ABS(val) FROM nums").unwrap();
     assert!(result.contains("5"));
     assert!(result.contains("3"));
+}
+
+#[test]
+fn test_abs_rejects_minimum_integer_overflow() {
+    let _guard = setup_test();
+
+    let error = execute_sql("SELECT ABS(-9223372036854775808)").unwrap_err();
+    assert!(error.contains("ABS result is outside the i64 range"));
 }
 
 #[test]
@@ -153,6 +167,16 @@ fn test_substring_function() {
 
     let result = execute_sql("SELECT SUBSTRING(word, 1, 5) FROM words").unwrap();
     assert!(result.contains("hello"));
+}
+
+#[test]
+fn test_substring_counts_multibyte_characters() {
+    let _guard = setup_test();
+    execute_sql("CREATE TABLE words (id INTEGER, word TEXT)").unwrap();
+    execute_sql("INSERT INTO words VALUES (1, 'h\u{e9}llo')").unwrap();
+
+    let result = execute_sql("SELECT SUBSTRING(word, 2, 2) FROM words").unwrap();
+    assert!(result.contains("\u{e9}l"), "got: {result:?}");
 }
 
 #[test]
@@ -279,6 +303,49 @@ fn test_auto_increment() {
 }
 
 #[test]
+fn test_auto_increment_multi_row_insert_advances_per_row() {
+    let _guard = setup_test();
+    execute_sql("CREATE TABLE auto_items (id INTEGER PRIMARY KEY AUTO_INCREMENT, name TEXT)")
+        .unwrap();
+
+    execute_sql("INSERT INTO auto_items (name) VALUES ('first'), ('second'), ('third')").unwrap();
+
+    assert_rows(
+        "SELECT id, name FROM auto_items ORDER BY id",
+        &["id", "name"],
+        vec![
+            vec![Value::Integer(1), Value::Text("first".to_string())],
+            vec![Value::Integer(2), Value::Text("second".to_string())],
+            vec![Value::Integer(3), Value::Text("third".to_string())],
+        ],
+    );
+}
+
+#[test]
+fn test_auto_increment_multi_row_insert_tracks_explicit_values() {
+    let _guard = setup_test();
+    execute_sql("CREATE TABLE auto_mixed (id INTEGER PRIMARY KEY AUTO_INCREMENT, name TEXT)")
+        .unwrap();
+
+    execute_sql(
+        "INSERT INTO auto_mixed (id, name)
+         VALUES (10, 'manual'), (NULL, 'generated'), (5, 'low'), (NULL, 'after')",
+    )
+    .unwrap();
+
+    assert_rows(
+        "SELECT id, name FROM auto_mixed ORDER BY id",
+        &["id", "name"],
+        vec![
+            vec![Value::Integer(5), Value::Text("low".to_string())],
+            vec![Value::Integer(10), Value::Text("manual".to_string())],
+            vec![Value::Integer(11), Value::Text("generated".to_string())],
+            vec![Value::Integer(12), Value::Text("after".to_string())],
+        ],
+    );
+}
+
+#[test]
 fn test_savepoint_and_release() {
     let _guard = setup_test();
     execute_sql("CREATE TABLE sp_test (id INTEGER, name TEXT)").unwrap();
@@ -315,6 +382,34 @@ fn test_savepoint_rollback() {
     let result = execute_sql("SELECT * FROM sp_test2").unwrap();
     assert!(result.contains("Alice"));
     assert!(!result.contains("Bob"));
+}
+
+#[test]
+fn test_savepoint_rollback_discards_later_savepoints() {
+    let _guard = setup_test();
+    execute_sql("CREATE TABLE sp_test3 (id INTEGER, name TEXT)").unwrap();
+    execute_sql("BEGIN TRANSACTION").unwrap();
+    execute_sql("INSERT INTO sp_test3 VALUES (1, 'Alice')").unwrap();
+    execute_sql("SAVEPOINT sp1").unwrap();
+    execute_sql("INSERT INTO sp_test3 VALUES (2, 'Bob')").unwrap();
+    execute_sql("SAVEPOINT sp2").unwrap();
+    execute_sql("INSERT INTO sp_test3 VALUES (3, 'Carol')").unwrap();
+
+    execute_sql("ROLLBACK TO SAVEPOINT sp1").unwrap();
+
+    let result = execute_sql("ROLLBACK TO SAVEPOINT sp2");
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("does not exist"));
+
+    execute_sql("INSERT INTO sp_test3 VALUES (4, 'Dana')").unwrap();
+    execute_sql("ROLLBACK TO SAVEPOINT sp1").unwrap();
+    execute_sql("COMMIT").unwrap();
+
+    let result = execute_sql("SELECT * FROM sp_test3").unwrap();
+    assert!(result.contains("Alice"));
+    assert!(!result.contains("Bob"));
+    assert!(!result.contains("Carol"));
+    assert!(!result.contains("Dana"));
 }
 
 #[test]

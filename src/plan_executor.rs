@@ -3,9 +3,8 @@ use crate::database::{DatabaseCatalog, RowId, ScopedDatabase};
 use crate::error::RustqlError;
 use crate::executor::aggregate::{DEFAULT_PERCENTILE_FRACTION, format_aggregate_header};
 use crate::executor::expr::{
-    SqlRowMultiset, SqlRowSet, compare_order_values, compare_values_for_sort,
-    compare_values_same_type, evaluate_expression, evaluate_value_expression_with_db,
-    row_has_finite_numeric_value, rows_equal_for_sql_identity,
+    SqlRowMultiset, SqlRowSet, compare_order_values, compare_values_same_type, evaluate_expression,
+    evaluate_value_expression_with_db, row_has_finite_numeric_value, rows_equal_for_sql_identity,
 };
 use crate::planner::{self, PlanNode};
 use std::cmp::Ordering;

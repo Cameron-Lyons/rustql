@@ -4,9 +4,7 @@ use crate::database::{DatabaseCatalog, Table};
 use crate::error::RustqlError;
 use crate::executor::aggregate::format_aggregate_header;
 use crate::executor::ddl::{IndexUsage, find_index_usage};
-use crate::executor::expr::compare_values_same_type;
-use std::cmp::Ordering;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::HashSet;
 
 const DEFAULT_GENERATE_SERIES_ROWS: usize = 100;
 const DEFAULT_LATERAL_ROWS: usize = 10;
@@ -51,7 +49,7 @@ mod stats;
 
 pub use plan_node::PlanNode;
 #[allow(unused_imports)]
-pub use stats::{ColumnStats, TableStats};
+pub use stats::TableStats;
 
 pub struct QueryPlanner<'a> {
     db: &'a dyn DatabaseCatalog,
@@ -97,7 +95,7 @@ impl<'a> QueryPlanner<'a> {
         }
 
         if stmt.from.is_empty() && stmt.from_function.is_none() {
-            return Ok(self.plan_constant_select(stmt));
+            return self.plan_constant_select(stmt);
         }
 
         let db = self.db;
@@ -208,7 +206,8 @@ impl<'a> QueryPlanner<'a> {
         let planned_order_by = stmt
             .order_by
             .as_ref()
-            .map(|order_by| self.resolve_order_by_aliases(stmt, order_by));
+            .map(|order_by| self.resolve_order_by_aliases(stmt, order_by))
+            .transpose()?;
 
         if let Some(ref order_by) = planned_order_by {
             plan = self.plan_sort(plan, order_by.clone());
