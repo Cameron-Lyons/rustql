@@ -125,18 +125,25 @@ fn apply_joined_dml_source_join(
         .ok_or_else(|| RustqlError::TableNotFound(join.table.clone()))?;
     let right_label = join.table_alias.as_deref().unwrap_or(&join.table);
     let right_columns = qualify_columns(&right_table.columns, right_label);
-    let right_rows = right_table.rows.clone();
+    let right_rows = &right_table.rows;
 
-    let mut joined_columns = left.columns.clone();
-    joined_columns.extend(right_columns.clone());
+    let DmlJoinedSource {
+        columns: left_columns,
+        rows: left_rows,
+    } = left;
+    let left_column_count = left_columns.len();
+    let right_column_count = right_columns.len();
 
-    let mut joined_rows = Vec::new();
+    let mut joined_columns = Vec::with_capacity(left_column_count + right_column_count);
+    joined_columns.extend(left_columns);
+    joined_columns.extend(right_columns);
+
+    let mut joined_rows = Vec::with_capacity(left_rows.len().max(right_rows.len()));
     let mut matched_right = vec![false; right_rows.len()];
-    for left_row in &left.rows {
+    for left_row in &left_rows {
         let mut has_match = false;
         for (right_idx, right_row) in right_rows.iter().enumerate() {
-            let mut joined_row = left_row.clone();
-            joined_row.extend(right_row.clone());
+            let joined_row = combined_dml_source_join_row(left_row, right_row);
 
             if evaluate_expression(Some(db), on_expr, &joined_columns, &joined_row)? {
                 joined_rows.push(joined_row);
@@ -146,18 +153,20 @@ fn apply_joined_dml_source_join(
         }
 
         if matches!(join.join_type, JoinType::Left | JoinType::Full) && !has_match {
-            let mut joined_row = left_row.clone();
-            joined_row.extend(std::iter::repeat_n(Value::Null, right_columns.len()));
-            joined_rows.push(joined_row);
+            joined_rows.push(dml_source_join_row_with_right_nulls(
+                left_row,
+                right_column_count,
+            ));
         }
     }
 
     if matches!(join.join_type, JoinType::Right | JoinType::Full) {
         for (right_idx, right_row) in right_rows.iter().enumerate() {
             if !matched_right[right_idx] {
-                let mut joined_row = vec![Value::Null; left.columns.len()];
-                joined_row.extend(right_row.clone());
-                joined_rows.push(joined_row);
+                joined_rows.push(dml_source_join_row_with_left_nulls(
+                    left_column_count,
+                    right_row,
+                ));
             }
         }
     }
@@ -166,6 +175,33 @@ fn apply_joined_dml_source_join(
         columns: joined_columns,
         rows: joined_rows,
     })
+}
+
+fn combined_dml_source_join_row(left_row: &[Value], right_row: &[Value]) -> Vec<Value> {
+    let mut combined = Vec::with_capacity(left_row.len() + right_row.len());
+    combined.extend_from_slice(left_row);
+    combined.extend_from_slice(right_row);
+    combined
+}
+
+fn dml_source_join_row_with_right_nulls(
+    left_row: &[Value],
+    right_column_count: usize,
+) -> Vec<Value> {
+    let mut combined = Vec::with_capacity(left_row.len() + right_column_count);
+    combined.extend_from_slice(left_row);
+    combined.resize(left_row.len() + right_column_count, Value::Null);
+    combined
+}
+
+fn dml_source_join_row_with_left_nulls(
+    left_column_count: usize,
+    right_row: &[Value],
+) -> Vec<Value> {
+    let mut combined = Vec::with_capacity(left_column_count + right_row.len());
+    combined.resize(left_column_count, Value::Null);
+    combined.extend_from_slice(right_row);
+    combined
 }
 
 fn qualify_columns(columns: &[ColumnDefinition], relation: &str) -> Vec<ColumnDefinition> {
