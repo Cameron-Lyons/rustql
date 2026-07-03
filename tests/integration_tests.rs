@@ -275,6 +275,22 @@ fn test_order_by_ordinal() {
 }
 
 #[test]
+fn test_order_by_rejects_invalid_ordinal() {
+    let _guard = setup_test();
+    execute_sql("CREATE TABLE users (id INTEGER, name TEXT, age INTEGER)").unwrap();
+    execute_sql("INSERT INTO users VALUES (1, 'Alice', 30)").unwrap();
+
+    let zero_error = execute_sql("SELECT name, age FROM users ORDER BY 0").unwrap_err();
+    assert!(zero_error.contains("ORDER BY position 0 is not in select list"));
+
+    let out_of_range_error = execute_sql("SELECT name, age FROM users ORDER BY 3").unwrap_err();
+    assert!(out_of_range_error.contains("ORDER BY position 3 is not in select list"));
+
+    let wildcard_error = execute_sql("SELECT * FROM users ORDER BY 4").unwrap_err();
+    assert!(wildcard_error.contains("ORDER BY position 4 is not in select list"));
+}
+
+#[test]
 fn test_order_by_expression() {
     let _guard = setup_test();
     execute_sql("CREATE TABLE sales (id INTEGER, price INTEGER, quantity INTEGER)").unwrap();
@@ -345,6 +361,19 @@ fn test_limit_offset() {
         + result.matches("Bob").count()
         + result.matches("Charlie").count();
     assert_eq!(name_count, 2);
+}
+
+#[test]
+fn test_limit_offset_reject_negative_counts() {
+    let _guard = setup_test();
+    execute_sql("CREATE TABLE users (id INTEGER, name TEXT)").unwrap();
+    execute_sql("INSERT INTO users VALUES (1, 'Alice')").unwrap();
+
+    let limit_error = execute_sql("SELECT name FROM users LIMIT -1").unwrap_err();
+    assert!(limit_error.contains("LIMIT count cannot be negative"));
+
+    let offset_error = execute_sql("SELECT name FROM users OFFSET -1").unwrap_err();
+    assert!(offset_error.contains("OFFSET count cannot be negative"));
 }
 
 #[test]
