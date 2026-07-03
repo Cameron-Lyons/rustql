@@ -71,6 +71,25 @@ fn test_composite_unique_allows_null_keys() {
 }
 
 #[test]
+fn test_composite_unique_update_excludes_current_row() {
+    let _guard = setup_test();
+    execute_sql(
+        "CREATE TABLE schedule (room TEXT, time_slot TEXT, course TEXT, UNIQUE (room, time_slot))",
+    )
+    .unwrap();
+    execute_sql("INSERT INTO schedule VALUES ('101', '9AM', 'Math')").unwrap();
+    execute_sql("INSERT INTO schedule VALUES ('102', '10AM', 'Science')").unwrap();
+
+    assert!(execute_sql("UPDATE schedule SET course = 'Algebra' WHERE room = '101'").is_ok());
+    assert!(
+        execute_sql(
+            "UPDATE schedule SET room = '102', time_slot = '10AM' WHERE course = 'Algebra'"
+        )
+        .is_err()
+    );
+}
+
+#[test]
 fn test_named_constraint() {
     let _guard = setup_test();
     let result = execute_sql(
