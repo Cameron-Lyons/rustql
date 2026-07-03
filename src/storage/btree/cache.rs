@@ -26,8 +26,7 @@ impl PageCache {
         };
 
         self.hits += 1;
-        self.access_order.retain(|&id| id != page_id);
-        self.access_order.push_back(page_id);
+        self.mark_recent(page_id);
         Some(page)
     }
 
@@ -43,6 +42,14 @@ impl PageCache {
                     self.pages.remove(&oldest_id);
                 }
             }
+        }
+
+        self.mark_recent(page_id);
+    }
+
+    fn mark_recent(&mut self, page_id: u64) {
+        if self.access_order.back().copied() == Some(page_id) {
+            return;
         }
 
         self.access_order.retain(|&id| id != page_id);
@@ -81,6 +88,22 @@ mod tests {
     }
 
     #[test]
+    fn get_cloned_keeps_current_most_recent_page_in_place() {
+        let mut cache = PageCache::new();
+        cache.insert(1, BTreePage::new(1, PageKind::Leaf));
+        cache.insert(2, BTreePage::new(2, PageKind::Leaf));
+
+        let page = cache.get_cloned(2).expect("page should be cached");
+
+        assert_eq!(page.header.page_id, 2);
+        assert_eq!(cache.stats(), (1, 0, 2));
+        assert_eq!(
+            cache.access_order.iter().copied().collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+    }
+
+    #[test]
     fn get_cloned_tracks_misses_without_changing_cache_contents() {
         let mut cache = PageCache::new();
         cache.insert(1, BTreePage::new(1, PageKind::Leaf));
@@ -109,6 +132,23 @@ mod tests {
         assert_eq!(
             cache.access_order.iter().copied().collect::<Vec<_>>(),
             vec![2, 1]
+        );
+    }
+
+    #[test]
+    fn insert_keeps_current_most_recent_replacement_in_place() {
+        let mut cache = PageCache::new();
+        cache.insert(1, BTreePage::new(1, PageKind::Leaf));
+        cache.insert(2, BTreePage::new(2, PageKind::Leaf));
+
+        cache.insert(2, BTreePage::new(2, PageKind::Internal));
+
+        let page = cache.pages.get(&2).expect("replacement should be cached");
+        assert_eq!(page.header.kind, PageKind::Internal);
+        assert_eq!(cache.stats(), (0, 0, 2));
+        assert_eq!(
+            cache.access_order.iter().copied().collect::<Vec<_>>(),
+            vec![1, 2]
         );
     }
 
