@@ -44,19 +44,8 @@ impl<'a> PlanExecutor<'a> {
                 combined
             }
             SetOperation::IntersectAll => {
-                let mut right_counts = SqlRowMultiset::new();
-                for row in right.rows {
-                    right_counts.add(row);
-                }
-
-                let mut left_counts = SqlRowMultiset::new();
-                let mut left_order = Vec::new();
-                for row in left.rows {
-                    if left_counts.add(row.clone()) {
-                        left_order.push(row.clone());
-                    }
-                }
-
+                let right_counts = row_counts(right.rows);
+                let (left_counts, left_order) = ordered_row_counts(left.rows);
                 let mut combined = Vec::new();
                 for row in left_order {
                     let left_count = left_counts.count(&row);
@@ -82,19 +71,8 @@ impl<'a> PlanExecutor<'a> {
                 combined
             }
             SetOperation::ExceptAll => {
-                let mut right_counts = SqlRowMultiset::new();
-                for row in right.rows {
-                    right_counts.add(row);
-                }
-
-                let mut left_counts = SqlRowMultiset::new();
-                let mut left_order = Vec::new();
-                for row in left.rows {
-                    if left_counts.add(row.clone()) {
-                        left_order.push(row.clone());
-                    }
-                }
-
+                let right_counts = row_counts(right.rows);
+                let (left_counts, left_order) = ordered_row_counts(left.rows);
                 let mut combined = Vec::new();
                 for row in left_order {
                     let left_count = left_counts.count(&row);
@@ -112,4 +90,25 @@ impl<'a> PlanExecutor<'a> {
             rows,
         })
     }
+}
+
+fn row_counts(rows: Vec<Vec<Value>>) -> SqlRowMultiset {
+    let mut counts = SqlRowMultiset::new();
+    for row in rows {
+        counts.add(row);
+    }
+    counts
+}
+
+fn ordered_row_counts(rows: Vec<Vec<Value>>) -> (SqlRowMultiset, Vec<Vec<Value>>) {
+    let mut counts = SqlRowMultiset::new();
+    let mut order = Vec::new();
+
+    for row in rows {
+        if counts.add(row.clone()) {
+            order.push(row);
+        }
+    }
+
+    (counts, order)
 }
