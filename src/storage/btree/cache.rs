@@ -1,6 +1,6 @@
 use super::MAX_CACHE_SIZE;
 use super::page::BTreePage;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 pub(super) struct PageCache {
     pub(super) pages: HashMap<u64, BTreePage>,
@@ -54,6 +54,30 @@ impl PageCache {
 
         self.access_order.retain(|&id| id != page_id);
         self.access_order.push_back(page_id);
+    }
+
+    pub(super) fn remove(&mut self, page_id: u64) -> bool {
+        if self.pages.remove(&page_id).is_none() {
+            return false;
+        }
+
+        if self.access_order.back().copied() == Some(page_id) {
+            self.access_order.pop_back();
+        } else {
+            self.access_order.retain(|&id| id != page_id);
+        }
+        true
+    }
+
+    pub(super) fn remove_many(&mut self, page_ids: &HashSet<u64>) {
+        let mut removed_any = false;
+        for page_id in page_ids {
+            removed_any |= self.pages.remove(page_id).is_some();
+        }
+
+        if removed_any {
+            self.access_order.retain(|id| !page_ids.contains(id));
+        }
     }
 
     pub(super) fn clear(&mut self) {
@@ -169,6 +193,55 @@ mod tests {
         assert!(!cache.pages.contains_key(&1));
         assert!(cache.pages.contains_key(&(MAX_CACHE_SIZE as u64)));
         assert_eq!(cache.stats(), (1, 0, MAX_CACHE_SIZE));
+    }
+
+    #[test]
+    fn remove_missing_page_leaves_cache_unchanged() {
+        let mut cache = PageCache::new();
+        cache.insert(1, BTreePage::new(1, PageKind::Leaf));
+
+        assert!(!cache.remove(2));
+
+        assert_eq!(cache.stats(), (0, 0, 1));
+        assert_eq!(
+            cache.access_order.iter().copied().collect::<Vec<_>>(),
+            vec![1]
+        );
+    }
+
+    #[test]
+    fn remove_current_most_recent_page_pops_from_order() {
+        let mut cache = PageCache::new();
+        cache.insert(1, BTreePage::new(1, PageKind::Leaf));
+        cache.insert(2, BTreePage::new(2, PageKind::Leaf));
+
+        assert!(cache.remove(2));
+
+        assert!(!cache.pages.contains_key(&2));
+        assert_eq!(cache.stats(), (0, 0, 1));
+        assert_eq!(
+            cache.access_order.iter().copied().collect::<Vec<_>>(),
+            vec![1]
+        );
+    }
+
+    #[test]
+    fn remove_many_drops_only_cached_pages() {
+        let mut cache = PageCache::new();
+        cache.insert(1, BTreePage::new(1, PageKind::Leaf));
+        cache.insert(2, BTreePage::new(2, PageKind::Leaf));
+        cache.insert(3, BTreePage::new(3, PageKind::Leaf));
+
+        cache.remove_many(&HashSet::from([1, 3, 9]));
+
+        assert!(!cache.pages.contains_key(&1));
+        assert!(cache.pages.contains_key(&2));
+        assert!(!cache.pages.contains_key(&3));
+        assert_eq!(cache.stats(), (0, 0, 1));
+        assert_eq!(
+            cache.access_order.iter().copied().collect::<Vec<_>>(),
+            vec![2]
+        );
     }
 
     #[test]
