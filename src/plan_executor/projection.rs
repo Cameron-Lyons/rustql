@@ -188,7 +188,7 @@ impl<'a> PlanExecutor<'a> {
         input: ExecutionResult,
     ) -> Result<ExecutionResult, RustqlError> {
         let mut seen = SqlRowSet::new();
-        let mut unique_rows = Vec::new();
+        let mut unique_rows = Vec::with_capacity(input.rows.len());
 
         for row in input.rows {
             if seen.insert(row.clone()) {
