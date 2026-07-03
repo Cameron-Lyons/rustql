@@ -540,16 +540,7 @@ impl<'a> SpanCursor<'a> {
 
     fn consume_identifier_token(&mut self) {
         if let Some(delimiter @ ('`' | '"')) = self.peek() {
-            self.bump();
-            while let Some(ch) = self.bump() {
-                if ch == delimiter {
-                    if self.peek() == Some(delimiter) {
-                        self.bump();
-                    } else {
-                        break;
-                    }
-                }
-            }
+            self.consume_quoted_identifier_part(delimiter);
         } else {
             self.consume_identifier_part();
         }
@@ -561,6 +552,19 @@ impl<'a> SpanCursor<'a> {
         {
             self.bump();
             self.consume_identifier_part();
+        }
+    }
+
+    fn consume_quoted_identifier_part(&mut self, delimiter: char) {
+        self.bump();
+        while let Some(ch) = self.bump() {
+            if ch == delimiter {
+                if self.peek() == Some(delimiter) {
+                    self.bump();
+                } else {
+                    break;
+                }
+            }
         }
     }
 
@@ -768,7 +772,22 @@ fn read_string(
 }
 
 fn match_keyword(ident: &str) -> Token {
-    match ident.to_uppercase().as_str() {
+    if let Some(token) = match_uppercase_keyword(ident) {
+        return token;
+    }
+
+    if ident.bytes().any(|byte| byte.is_ascii_lowercase()) {
+        let uppercase = ident.to_ascii_uppercase();
+        if let Some(token) = match_uppercase_keyword(&uppercase) {
+            return token;
+        }
+    }
+
+    Token::Identifier(ident.to_string())
+}
+
+fn match_uppercase_keyword(ident: &str) -> Option<Token> {
+    Some(match ident {
         "SELECT" => Token::Select,
         "EXISTS" => Token::Exists,
         "DISTINCT" => Token::Distinct,
@@ -991,13 +1010,41 @@ fn match_keyword(ident: &str) -> Token {
         "CBRT" => Token::Cbrt,
         "GCD" => Token::Gcd,
         "LCM" => Token::Lcm,
-        _ => Token::Identifier(ident.to_string()),
-    }
+        _ => return None,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keyword_matching_keeps_uppercase_fast_path() {
+        assert_eq!(match_keyword("SELECT"), Token::Select);
+        assert_eq!(match_keyword("GENERATE_SERIES"), Token::GenerateSeries);
+        assert_eq!(
+            match_keyword("USER_ID"),
+            Token::Identifier("USER_ID".to_string())
+        );
+    }
+
+    #[test]
+    fn keyword_matching_remains_case_insensitive() {
+        assert_eq!(match_keyword("select"), Token::Select);
+        assert_eq!(match_keyword("SubStr"), Token::Substring);
+        assert_eq!(match_keyword("dateadd"), Token::DateAdd);
+    }
+
+    #[test]
+    fn spans_quoted_identifier_with_unquoted_suffix() {
+        let tokens = tokenize_spanned("`A`.A").unwrap();
+
+        assert_eq!(tokens[0].token, Token::Identifier("A.A".to_string()));
+        assert_eq!(tokens[0].span.start.line, 1);
+        assert_eq!(tokens[0].span.start.column, 1);
+        assert_eq!(tokens[0].span.end.line, 1);
+        assert_eq!(tokens[0].span.end.column, 6);
+    }
 
     #[test]
     fn quoted_identifier_span_includes_dotted_suffix() {
