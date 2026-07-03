@@ -27,12 +27,11 @@ impl<'a> CachedBTreeFile<'a> {
         let data_path = &engine.data_path;
         let file = &mut self.file;
         engine.read_page_cached_with(page_id, || {
-            if file.is_none() {
-                *file = Some(BTreeFile::open_read(data_path)?);
-            }
-            file.as_mut()
-                .expect("cached B-tree file should be initialized")
-                .read_page(page_id)
+            let file = match file {
+                Some(file) => file,
+                None => file.insert(BTreeFile::open_read(data_path)?),
+            };
+            file.read_page(page_id)
         })
     }
 
