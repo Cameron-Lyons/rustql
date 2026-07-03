@@ -1,41 +1,65 @@
 use super::*;
 
+enum ProjectionSpec<'a> {
+    Named {
+        output_name: String,
+        source_index: usize,
+    },
+    Expression {
+        output_name: String,
+        expr: &'a Expression,
+    },
+    Window {
+        output_name: String,
+        source_index: usize,
+    },
+    Function {
+        output_name: String,
+        source_index: usize,
+    },
+    Subquery {
+        output_name: String,
+        subquery: &'a SelectStatement,
+    },
+}
+
+impl ProjectionSpec<'_> {
+    fn output_name(&self) -> &str {
+        match self {
+            ProjectionSpec::Named { output_name, .. }
+            | ProjectionSpec::Expression { output_name, .. }
+            | ProjectionSpec::Window { output_name, .. }
+            | ProjectionSpec::Function { output_name, .. }
+            | ProjectionSpec::Subquery { output_name, .. } => output_name,
+        }
+    }
+}
+
 impl<'a> PlanExecutor<'a> {
     pub(super) fn apply_projection(
         &self,
         result: &ExecutionResult,
         select_stmt: &SelectStatement,
     ) -> Result<ExecutionResult, RustqlError> {
-        let column_defs: Vec<ColumnDefinition> = result
+        let column_defs = column_definitions_from_names(&result.columns);
+        let aggregate_count = select_stmt
             .columns
             .iter()
-            .map(|name| ColumnDefinition {
-                name: name.clone(),
-                data_type: DataType::Text,
-                nullable: true,
-                primary_key: false,
-                unique: false,
-                default_value: None,
-                foreign_key: None,
-                check: None,
-                auto_increment: false,
-                generated: None,
-            })
-            .collect();
+            .filter(|col| matches!(col, Column::Function(_)))
+            .count();
+        let aggregate_base = result.columns.len().saturating_sub(aggregate_count);
+        let mut aggregate_offset = 0usize;
+        let mut window_offset = 0usize;
 
-        let column_specs: Vec<(String, Column)> =
+        let projection_specs: Vec<ProjectionSpec<'_>> =
             if matches!(select_stmt.columns.first(), Some(Column::All)) {
                 result
                     .columns
                     .iter()
-                    .map(|c| {
-                        (
-                            c.clone(),
-                            Column::Named {
-                                name: c.clone(),
-                                alias: None,
-                            },
-                        )
+                    .enumerate()
+                    .map(|(source_index, output_name)| ProjectionSpec::Named {
+                        output_name: output_name.clone(),
+                        source_index,
                     })
                     .collect()
             } else {
@@ -44,17 +68,41 @@ impl<'a> PlanExecutor<'a> {
                     .iter()
                     .map(|col| match col {
                         Column::Named { name, alias } => {
-                            Ok((alias.clone().unwrap_or_else(|| name.clone()), col.clone()))
+                            let source_index = find_result_column_index(&result.columns, name)
+                                .ok_or_else(|| RustqlError::ColumnNotFound(name.to_string()))?;
+                            Ok(ProjectionSpec::Named {
+                                output_name: alias.clone().unwrap_or_else(|| name.clone()),
+                                source_index,
+                            })
                         }
-                        Column::Expression { alias, .. } => Ok((
-                            alias.clone().unwrap_or_else(|| "<expression>".to_string()),
-                            col.clone(),
-                        )),
-                        Column::Function(agg) => Ok((
-                            crate::executor::aggregate::format_aggregate_header(agg),
-                            col.clone(),
-                        )),
-                        Column::Subquery(_) => Ok(("<subquery>".to_string(), col.clone())),
+                        Column::Expression { expr, alias } => {
+                            let output_name =
+                                alias.clone().unwrap_or_else(|| "<expression>".to_string());
+                            if matches!(expr, Expression::WindowFunction { .. }) {
+                                let source_index = result.columns.len() + window_offset;
+                                window_offset += 1;
+                                Ok(ProjectionSpec::Window {
+                                    output_name,
+                                    source_index,
+                                })
+                            } else {
+                                Ok(ProjectionSpec::Expression { output_name, expr })
+                            }
+                        }
+                        Column::Function(agg) => {
+                            let source_index = aggregate_base + aggregate_offset;
+                            aggregate_offset += 1;
+                            Ok(ProjectionSpec::Function {
+                                output_name: crate::executor::aggregate::format_aggregate_header(
+                                    agg,
+                                ),
+                                source_index,
+                            })
+                        }
+                        Column::Subquery(subquery) => Ok(ProjectionSpec::Subquery {
+                            output_name: "<subquery>".to_string(),
+                            subquery,
+                        }),
                         Column::All => Err(RustqlError::Internal(
                             "Wildcard projection must be expanded before plan projection"
                                 .to_string(),
@@ -63,27 +111,12 @@ impl<'a> PlanExecutor<'a> {
                     .collect::<Result<Vec<_>, RustqlError>>()?
             };
 
-        let aggregate_count = select_stmt
-            .columns
+        let has_window_functions = projection_specs
             .iter()
-            .filter(|col| matches!(col, Column::Function(_)))
-            .count();
-        let has_window_functions = select_stmt.columns.iter().any(|column| {
-            matches!(
-                column,
-                Column::Expression {
-                    expr: Expression::WindowFunction { .. },
-                    ..
-                }
-            )
-        });
-
-        for (_, col) in &column_specs {
-            if let Column::Named { name, .. } = col {
-                find_result_column_index(&result.columns, name)
-                    .ok_or_else(|| RustqlError::ColumnNotFound(name.to_string()))?;
-            }
-        }
+            .any(|spec| matches!(spec, ProjectionSpec::Window { .. }));
+        let has_scalar_subqueries = projection_specs
+            .iter()
+            .any(|spec| matches!(spec, ProjectionSpec::Subquery { .. }));
 
         let window_rows = if has_window_functions {
             let mut rows = result.rows.clone();
@@ -97,43 +130,31 @@ impl<'a> PlanExecutor<'a> {
             None
         };
 
-        let scalar_outer_columns = scalar_outer_scope_columns(&result.columns, select_stmt);
-        let mut projected_rows = Vec::new();
+        let scalar_outer_columns = if has_scalar_subqueries {
+            scalar_outer_scope_columns(&result.columns, select_stmt)
+        } else {
+            Vec::new()
+        };
+
+        let mut projected_rows = Vec::with_capacity(result.rows.len());
         for (row_idx, row) in result.rows.iter().enumerate() {
-            let mut projected_row = Vec::new();
-            let mut aggregate_offset = result.columns.len().saturating_sub(aggregate_count);
-            let mut window_offset = result.columns.len();
-            for (_, col) in &column_specs {
-                let val = match col {
-                    Column::All => {
-                        return Err(RustqlError::Internal(
-                            "Wildcard projection must be expanded before plan projection"
-                                .to_string(),
-                        ));
+            let mut projected_row = Vec::with_capacity(projection_specs.len());
+            for spec in &projection_specs {
+                let val = match spec {
+                    ProjectionSpec::Named { source_index, .. }
+                    | ProjectionSpec::Function { source_index, .. } => {
+                        row.get(*source_index).cloned().unwrap_or(Value::Null)
                     }
-                    Column::Named { name, .. } => {
-                        let idx = find_result_column_index(&result.columns, name)
-                            .ok_or_else(|| RustqlError::ColumnNotFound(name.to_string()))?;
-                        row.get(idx).cloned().unwrap_or(Value::Null)
+                    ProjectionSpec::Window { source_index, .. } => window_rows
+                        .as_ref()
+                        .and_then(|rows| rows.get(row_idx))
+                        .and_then(|window_row| window_row.get(*source_index))
+                        .cloned()
+                        .unwrap_or(Value::Null),
+                    ProjectionSpec::Expression { expr, .. } => {
+                        self.evaluate_value_expression(expr, &column_defs, row)?
                     }
-                    Column::Expression { expr, .. } => match expr {
-                        Expression::WindowFunction { .. } => window_rows
-                            .as_ref()
-                            .and_then(|rows| rows.get(row_idx))
-                            .and_then(|window_row| window_row.get(window_offset))
-                            .cloned()
-                            .inspect(|_| {
-                                window_offset += 1;
-                            })
-                            .unwrap_or(Value::Null),
-                        _ => self.evaluate_value_expression(expr, &column_defs, row)?,
-                    },
-                    Column::Function(_) => {
-                        let value = row.get(aggregate_offset).cloned().unwrap_or(Value::Null);
-                        aggregate_offset += 1;
-                        value
-                    }
-                    Column::Subquery(subquery) => {
+                    ProjectionSpec::Subquery { subquery, .. } => {
                         self.evaluate_scalar_subquery(subquery, &scalar_outer_columns, row)?
                     }
                 };
@@ -142,8 +163,10 @@ impl<'a> PlanExecutor<'a> {
             projected_rows.push(projected_row);
         }
 
-        let projected_columns: Vec<String> =
-            column_specs.iter().map(|(name, _)| name.clone()).collect();
+        let projected_columns: Vec<String> = projection_specs
+            .iter()
+            .map(|spec| spec.output_name().to_string())
+            .collect();
 
         Ok(ExecutionResult {
             columns: projected_columns,
