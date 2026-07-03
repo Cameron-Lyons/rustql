@@ -21,11 +21,15 @@ pub(super) fn normalize_datetime(s: &str) -> Option<String> {
 }
 
 pub(super) fn datetime_date_part(s: &str) -> Option<String> {
-    normalize_datetime(s).map(|dt| dt[..10].to_string())
+    let (date_part, time_part) = s.split_once(' ')?;
+    parse_canonical_time(time_part)?;
+    normalize_date(date_part)
 }
 
 pub(super) fn datetime_time_part(s: &str) -> Option<String> {
-    normalize_datetime(s).map(|dt| dt[11..].to_string())
+    let (date_part, time_part) = s.split_once(' ')?;
+    parse_canonical_date(date_part)?;
+    normalize_time(time_part)
 }
 
 pub(super) fn parse_date_components(s: &str) -> Option<(i64, i64, i64)> {
@@ -130,4 +134,27 @@ pub(super) fn days_to_ymd(days: i64) -> (i64, i64, i64) {
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = if m <= 2 { y + 1 } else { y };
     (y, m, d)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{datetime_date_part, datetime_time_part};
+
+    #[test]
+    fn datetime_part_helpers_extract_valid_parts() {
+        assert_eq!(
+            datetime_date_part("2024-02-29 08:09:10").as_deref(),
+            Some("2024-02-29")
+        );
+        assert_eq!(
+            datetime_time_part("2024-02-29 08:09:10").as_deref(),
+            Some("08:09:10")
+        );
+    }
+
+    #[test]
+    fn datetime_part_helpers_validate_other_part() {
+        assert_eq!(datetime_date_part("2024-02-29 25:09:10"), None);
+        assert_eq!(datetime_time_part("2024-02-30 08:09:10"), None);
+    }
 }
