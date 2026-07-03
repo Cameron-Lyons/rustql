@@ -158,7 +158,8 @@ impl<'a> PlanExecutor<'a> {
             }
         }
 
-        let mut joined_rows = Vec::new();
+        let mut joined_rows =
+            Vec::with_capacity(hash_join_row_capacity(build.rows.len(), probe.rows.len()));
         let joined_columns = joined_column_names(&left.columns, &right.columns);
         let combined_columns = combined_column_definitions(&left.columns, &right.columns);
         let match_context = HashJoinMatchContext {
@@ -290,6 +291,10 @@ fn lateral_join_row_capacity(left_row_count: usize, join_type: &JoinType) -> usi
     } else {
         0
     }
+}
+
+fn hash_join_row_capacity(build_row_count: usize, probe_row_count: usize) -> usize {
+    build_row_count.min(probe_row_count)
 }
 
 fn should_track_unmatched_right_rows(join_type: &JoinType) -> bool {
