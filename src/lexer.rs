@@ -1045,4 +1045,18 @@ mod tests {
         assert_eq!(tokens[0].span.end.line, 1);
         assert_eq!(tokens[0].span.end.column, 6);
     }
+
+    #[test]
+    fn quoted_identifier_span_includes_dotted_suffix() {
+        let tokens = tokenize_spanned("\"A\".name").unwrap();
+
+        assert_eq!(tokens[0].token, Token::Identifier("A.name".to_string()));
+        assert_eq!(
+            tokens[0].span,
+            SourceSpan {
+                start: SourceLocation { line: 1, column: 1 },
+                end: SourceLocation { line: 1, column: 9 },
+            }
+        );
+    }
 }
