@@ -27,6 +27,14 @@ fn test_minimum_integer_literal_is_supported() {
 }
 
 #[test]
+fn test_minimum_integer_unary_negation_reports_overflow() {
+    let _guard = setup_test();
+
+    let error = execute_sql("SELECT -(-9223372036854775808)").unwrap_err();
+    assert!(error.contains("Integer negation overflow"));
+}
+
+#[test]
 fn test_three_table_join() {
     let _guard = setup_test();
 

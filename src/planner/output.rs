@@ -57,55 +57,51 @@ impl<'a> QueryPlanner<'a> {
     ) -> Result<Vec<ColumnDefinition>, RustqlError> {
         let source_columns = self.infer_select_source_columns(stmt)?;
 
-        if matches!(stmt.columns.first(), Some(Column::All)) {
-            return Ok(source_columns);
+        let mut output_columns = Vec::new();
+        for column in &stmt.columns {
+            if matches!(column, Column::All) {
+                output_columns.extend(source_columns.iter().cloned());
+                continue;
+            }
+
+            let name = match column {
+                Column::Named { name, alias } => alias.clone().unwrap_or_else(|| name.clone()),
+                Column::Expression { alias, .. } => {
+                    alias.clone().unwrap_or_else(|| "<expression>".to_string())
+                }
+                Column::Function(agg) => format_aggregate_header(agg),
+                Column::Subquery(_) => "<subquery>".to_string(),
+                Column::All => unreachable!("wildcard projection handled before inference"),
+            };
+
+            let data_type = match column {
+                Column::Named { name, .. } => source_columns
+                    .iter()
+                    .find(|column| {
+                        column.name == *name
+                            || self.unqualified_column_name(&column.name)
+                                == self.unqualified_column_name(name)
+                    })
+                    .map(|column| column.data_type.clone())
+                    .unwrap_or(DataType::Text),
+                _ => DataType::Text,
+            };
+
+            output_columns.push(ColumnDefinition {
+                name,
+                data_type,
+                nullable: true,
+                primary_key: false,
+                unique: false,
+                default_value: None,
+                foreign_key: None,
+                check: None,
+                auto_increment: false,
+                generated: None,
+            });
         }
 
-        stmt.columns
-            .iter()
-            .map(|column| {
-                let name = match column {
-                    Column::Named { name, alias } => alias.clone().unwrap_or_else(|| name.clone()),
-                    Column::Expression { alias, .. } => {
-                        alias.clone().unwrap_or_else(|| "<expression>".to_string())
-                    }
-                    Column::Function(agg) => format_aggregate_header(agg),
-                    Column::Subquery(_) => "<subquery>".to_string(),
-                    Column::All => {
-                        return Err(RustqlError::Internal(
-                            "Wildcard projection must be expanded before output inference"
-                                .to_string(),
-                        ));
-                    }
-                };
-
-                let data_type = match column {
-                    Column::Named { name, .. } => source_columns
-                        .iter()
-                        .find(|column| {
-                            column.name == *name
-                                || self.unqualified_column_name(&column.name)
-                                    == self.unqualified_column_name(name)
-                        })
-                        .map(|column| column.data_type.clone())
-                        .unwrap_or(DataType::Text),
-                    _ => DataType::Text,
-                };
-
-                Ok(ColumnDefinition {
-                    name,
-                    data_type,
-                    nullable: true,
-                    primary_key: false,
-                    unique: false,
-                    default_value: None,
-                    foreign_key: None,
-                    check: None,
-                    auto_increment: false,
-                    generated: None,
-                })
-            })
-            .collect()
+        Ok(output_columns)
     }
 
     pub(super) fn infer_select_source_columns(
@@ -226,5 +222,118 @@ impl<'a> QueryPlanner<'a> {
                 "View definition is not a SELECT statement".to_string(),
             )),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::database::{Database, Table};
+
+    fn column(name: &str, data_type: DataType) -> ColumnDefinition {
+        ColumnDefinition {
+            name: name.to_string(),
+            data_type,
+            nullable: true,
+            primary_key: false,
+            unique: false,
+            default_value: None,
+            foreign_key: None,
+            check: None,
+            auto_increment: false,
+            generated: None,
+        }
+    }
+
+    fn select_from_users(columns: Vec<Column>) -> SelectStatement {
+        SelectStatement {
+            columns,
+            from: "users".to_string(),
+            from_alias: None,
+            from_subquery: None,
+            from_values: None,
+            from_function: None,
+            joins: Vec::new(),
+            where_clause: None,
+            group_by: None,
+            having: None,
+            order_by: None,
+            limit: None,
+            offset: None,
+            fetch: None,
+            distinct: false,
+            distinct_on: None,
+            ctes: Vec::new(),
+            set_op: None,
+            window_definitions: Vec::new(),
+        }
+    }
+
+    fn users_database() -> Database {
+        let mut db = Database::new();
+        db.tables.insert(
+            "users".to_string(),
+            Table::new(
+                vec![
+                    column("id", DataType::Integer),
+                    column("name", DataType::Text),
+                ],
+                Vec::new(),
+                Vec::new(),
+            ),
+        );
+        db
+    }
+
+    #[test]
+    fn output_inference_expands_leading_wildcard_and_later_projection() {
+        let db = users_database();
+        let planner = QueryPlanner::new(&db);
+        let stmt = select_from_users(vec![
+            Column::All,
+            Column::Named {
+                name: "id".to_string(),
+                alias: Some("user_id".to_string()),
+            },
+        ]);
+
+        let columns = planner
+            .infer_select_output_columns(&stmt)
+            .expect("output inference should succeed");
+
+        assert_eq!(
+            columns
+                .iter()
+                .map(|column| column.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["id", "name", "user_id"]
+        );
+        assert_eq!(columns[2].data_type, DataType::Integer);
+    }
+
+    #[test]
+    fn output_inference_expands_trailing_wildcard() {
+        let db = users_database();
+        let planner = QueryPlanner::new(&db);
+        let stmt = select_from_users(vec![
+            Column::Named {
+                name: "name".to_string(),
+                alias: Some("display_name".to_string()),
+            },
+            Column::All,
+        ]);
+
+        let columns = planner
+            .infer_select_output_columns(&stmt)
+            .expect("output inference should succeed");
+
+        assert_eq!(
+            columns
+                .iter()
+                .map(|column| column.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["display_name", "id", "name"]
+        );
+        assert_eq!(columns[0].data_type, DataType::Text);
     }
 }
