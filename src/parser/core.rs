@@ -2,10 +2,9 @@ use super::*;
 
 impl Parser {
     pub(super) fn new(tokens: Vec<Token>) -> Self {
-        let spans = vec![None; tokens.len()];
         Parser {
             tokens,
-            spans,
+            spans: None,
             current: 0,
         }
     }
@@ -17,7 +16,7 @@ impl Parser {
             .unzip();
         Parser {
             tokens,
-            spans,
+            spans: Some(spans),
             current: 0,
         }
     }
@@ -27,7 +26,9 @@ impl Parser {
     }
 
     pub(super) fn current_span(&self) -> Option<SourceSpan> {
-        self.spans.get(self.current).copied().flatten()
+        self.spans
+            .as_ref()
+            .and_then(|spans| spans.get(self.current).copied().flatten())
     }
 
     pub(super) fn with_current_location(&self, err: RustqlError) -> RustqlError {

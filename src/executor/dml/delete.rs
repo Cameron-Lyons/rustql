@@ -1,4 +1,7 @@
 use super::*;
+use crate::database::RowId;
+
+type PendingDelete = (usize, RowId, Vec<Value>);
 
 pub(crate) fn execute_delete(
     context: &ExecutionContext,
@@ -6,205 +9,27 @@ pub(crate) fn execute_delete(
 ) -> Result<QueryResult, RustqlError> {
     let mut db = get_database_write(context);
 
-    let using_matches: Option<HashSet<usize>> = if let Some(ref using) = stmt.using {
-        let main_table = db
-            .tables
-            .get(&stmt.table)
-            .ok_or_else(|| RustqlError::TableNotFound(stmt.table.clone()))?;
-        let using_source = build_joined_dml_source(
-            &db,
-            &using.table,
-            using.alias.as_deref(),
-            &using.joins,
-            "DELETE USING",
-        )?;
+    let using_matches = collect_delete_using_matches(&db, &stmt)?;
+    let (columns, mut rows_to_delete) = collect_delete_rows(&db, &stmt, using_matches.as_ref())?;
 
-        let main_columns = main_table.columns.clone();
-        let mut combined_columns =
-            Vec::with_capacity(main_columns.len() + using_source.columns.len());
-        combined_columns.extend(qualify_columns(&main_columns, &stmt.table));
-        combined_columns.extend(using_source.columns.clone());
-
-        let mut matching_indices: HashSet<usize> = HashSet::with_capacity(main_table.rows.len());
-        for (main_idx, main_row) in main_table.rows.iter().enumerate() {
-            for using_row in &using_source.rows {
-                let combined_row = combined_delete_using_row(main_row, using_row);
-
-                let matches = if let Some(ref where_expr) = stmt.where_clause {
-                    evaluate_expression(Some(&*db), where_expr, &combined_columns, &combined_row)?
-                } else {
-                    true
-                };
-
-                if matches {
-                    matching_indices.insert(main_idx);
-                    break;
-                }
-            }
-        }
-        Some(matching_indices)
-    } else {
-        None
-    };
-
-    let (columns, rows_to_delete) = {
-        let table_ref = db
-            .tables
-            .get(&stmt.table)
-            .ok_or_else(|| RustqlError::TableNotFound(stmt.table.clone()))?;
-
-        let mut rows: Vec<Vec<Value>> = Vec::new();
-
-        if let Some(ref using_set) = using_matches {
-            for idx in using_set {
-                if let Some(row) = table_ref.rows.get(*idx) {
-                    rows.push(row.clone());
-                }
-            }
-        } else {
-            let candidate_indices: Option<HashSet<crate::database::RowId>> =
-                if let Some(ref where_expr) = stmt.where_clause {
-                    if let Some(index_usage) = ddl::find_index_usage(&db, &stmt.table, where_expr) {
-                        Some(ddl::get_indexed_rows(&db, table_ref, &index_usage)?)
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                };
-
-            if let Some(ref where_expr) = stmt.where_clause {
-                let rows_to_check: Vec<(usize, crate::database::RowId, &Vec<Value>)> =
-                    if let Some(ref candidate_set) = candidate_indices {
-                        table_ref
-                            .iter_rows_with_ids()
-                            .enumerate()
-                            .filter(|(_, (row_id, _))| candidate_set.contains(row_id))
-                            .map(|(idx, (row_id, row))| (idx, row_id, row))
-                            .collect()
-                    } else {
-                        table_ref
-                            .iter_rows_with_ids()
-                            .enumerate()
-                            .map(|(idx, (row_id, row))| (idx, row_id, row))
-                            .collect()
-                    };
-
-                for (_, _, row) in rows_to_check {
-                    if evaluate_expression(Some(&*db), where_expr, &table_ref.columns, row)? {
-                        rows.push(row.clone());
-                    }
-                }
-            } else {
-                rows = table_ref.rows.clone();
-            }
-        }
-
-        (table_ref.columns.clone(), rows)
-    };
-
-    for row_to_delete in &rows_to_delete {
+    for (_, _, row_to_delete) in &rows_to_delete {
         handle_foreign_keys_for_delete(context, &mut db, &stmt.table, &columns, row_to_delete)?;
     }
 
-    let mut rows_to_delete_indices = {
-        let table_ref = db
-            .tables
-            .get(&stmt.table)
-            .ok_or_else(|| RustqlError::TableNotFound(stmt.table.clone()))?;
-
-        let candidate_indices: Option<HashSet<crate::database::RowId>> = if using_matches.is_some()
-        {
-            using_matches.clone().map(|positions| {
-                positions
-                    .into_iter()
-                    .filter_map(|position| table_ref.row_id_at(position))
-                    .collect()
-            })
-        } else if let Some(ref where_expr) = stmt.where_clause {
-            if let Some(index_usage) = ddl::find_index_usage(&db, &stmt.table, where_expr) {
-                Some(ddl::get_indexed_rows(&db, table_ref, &index_usage)?)
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
-        let columns = table_ref.columns.clone();
-        let rows: Vec<(usize, Vec<Value>)> = table_ref
-            .rows
+    let returning_rows: Vec<Vec<Value>> = if stmt.returning.is_some() {
+        rows_to_delete
             .iter()
-            .enumerate()
-            .map(|(i, r)| (i, r.clone()))
-            .collect();
-
-        let mut rows_to_delete_indices = Vec::new();
-
-        if using_matches.is_some() {
-            if let Some(ref candidate_set) = candidate_indices {
-                for row_id in candidate_set {
-                    if let Some(idx) = table_ref.position_of_row_id(*row_id) {
-                        rows_to_delete_indices.push(idx);
-                    }
-                }
-            }
-        } else if let Some(ref where_expr) = stmt.where_clause {
-            let rows_to_check: Vec<(usize, &Vec<Value>)> =
-                if let Some(ref candidate_set) = candidate_indices {
-                    rows.iter()
-                        .filter(|(idx, _)| {
-                            table_ref
-                                .row_id_at(*idx)
-                                .map(|row_id| candidate_set.contains(&row_id))
-                                .unwrap_or(false)
-                        })
-                        .map(|(i, r)| (*i, r))
-                        .collect()
-                } else {
-                    rows.iter().map(|(i, r)| (*i, r)).collect()
-                };
-
-            for (idx, row) in rows_to_check {
-                if evaluate_expression(Some(&*db), where_expr, &columns, row)? {
-                    rows_to_delete_indices.push(idx);
-                }
-            }
-        } else {
-            rows_to_delete_indices = (0..rows.len()).collect();
-        }
-
-        rows_to_delete_indices.sort();
-        rows_to_delete_indices
+            .map(|(_, _, row)| row.clone())
+            .collect()
+    } else {
+        Vec::new()
     };
-
-    let returning_rows = {
-        let table = db
-            .tables
-            .get(&stmt.table)
-            .ok_or_else(|| RustqlError::TableNotFound(stmt.table.clone()))?;
-
-        let mut returning_rows: Vec<Vec<Value>> = Vec::new();
-        if stmt.returning.is_some() {
-            for &idx in &rows_to_delete_indices {
-                returning_rows.push(table.rows[idx].clone());
-            }
-        }
-        returning_rows
-    };
-
-    let deleted_count = rows_to_delete_indices.len();
-    let deleted_row_ids = {
-        let table = db
-            .tables
-            .get(&stmt.table)
-            .ok_or_else(|| RustqlError::TableNotFound(stmt.table.clone()))?;
-        rows_to_delete_indices
-            .iter()
-            .filter_map(|idx| table.row_id_at(*idx))
-            .collect::<Vec<_>>()
-    };
-    rows_to_delete_indices.reverse();
+    let deleted_count = rows_to_delete.len();
+    let deleted_row_ids: Vec<RowId> = rows_to_delete
+        .iter()
+        .map(|(_, row_id, _)| *row_id)
+        .collect();
+    rows_to_delete.sort_by(|(left_idx, _, _), (right_idx, _, _)| right_idx.cmp(left_idx));
 
     {
         let table = db
@@ -212,21 +37,19 @@ pub(crate) fn execute_delete(
             .get_mut(&stmt.table)
             .ok_or_else(|| RustqlError::TableNotFound(stmt.table.clone()))?;
 
-        for idx in &rows_to_delete_indices {
-            let row_id = table.row_id_at(*idx).ok_or_else(|| {
-                RustqlError::Internal("Missing row id for deleted row".to_string())
-            })?;
-            let old_row = table.rows[*idx].clone();
+        for (position, row_id, old_row) in &rows_to_delete {
             record_wal_entry(
                 context,
                 WalEntry::DeleteRow {
                     table: stmt.table.clone(),
-                    row_id,
-                    position: *idx,
+                    row_id: *row_id,
+                    position: *position,
                     old_row: old_row.clone(),
                 },
             );
-            let _ = table.remove_row_by_id(row_id);
+            table.remove_row_by_id(*row_id).ok_or_else(|| {
+                RustqlError::Internal("Missing row id for deleted row".to_string())
+            })?;
         }
     }
     ddl::update_indexes_on_delete(&mut db, &stmt.table, &deleted_row_ids)?;
@@ -245,4 +68,105 @@ fn combined_delete_using_row(main_row: &[Value], using_row: &[Value]) -> Vec<Val
     combined.extend_from_slice(main_row);
     combined.extend_from_slice(using_row);
     combined
+}
+
+fn collect_delete_using_matches(
+    db: &Database,
+    stmt: &DeleteStatement,
+) -> Result<Option<HashSet<usize>>, RustqlError> {
+    let Some(ref using) = stmt.using else {
+        return Ok(None);
+    };
+
+    let main_table = db
+        .tables
+        .get(&stmt.table)
+        .ok_or_else(|| RustqlError::TableNotFound(stmt.table.clone()))?;
+    let using_source = build_joined_dml_source(
+        db,
+        &using.table,
+        using.alias.as_deref(),
+        &using.joins,
+        "DELETE USING",
+    )?;
+
+    let main_columns = main_table.columns.clone();
+    let mut combined_columns = qualify_columns(&main_columns, &stmt.table);
+    combined_columns.extend(using_source.columns.clone());
+
+    let mut matching_indices: HashSet<usize> = HashSet::with_capacity(main_table.rows.len());
+    for (main_idx, main_row) in main_table.rows.iter().enumerate() {
+        for using_row in &using_source.rows {
+            let combined_row = combined_delete_using_row(main_row, using_row);
+
+            let matches = if let Some(ref where_expr) = stmt.where_clause {
+                evaluate_expression(Some(db), where_expr, &combined_columns, &combined_row)?
+            } else {
+                true
+            };
+
+            if matches {
+                matching_indices.insert(main_idx);
+                break;
+            }
+        }
+    }
+
+    Ok(Some(matching_indices))
+}
+
+fn collect_delete_rows(
+    db: &Database,
+    stmt: &DeleteStatement,
+    using_matches: Option<&HashSet<usize>>,
+) -> Result<(Vec<ColumnDefinition>, Vec<PendingDelete>), RustqlError> {
+    let table = db
+        .tables
+        .get(&stmt.table)
+        .ok_or_else(|| RustqlError::TableNotFound(stmt.table.clone()))?;
+    let columns = table.columns.clone();
+
+    if let Some(using_set) = using_matches {
+        let mut rows_to_delete = Vec::with_capacity(using_set.len());
+        for position in using_set {
+            let row_id = table.row_id_at(*position).ok_or_else(|| {
+                RustqlError::Internal("Missing row id for DELETE USING row".to_string())
+            })?;
+            let row = table.rows.get(*position).ok_or_else(|| {
+                RustqlError::Internal("Missing row for DELETE USING row".to_string())
+            })?;
+            rows_to_delete.push((*position, row_id, row.clone()));
+        }
+        rows_to_delete.sort_by_key(|(position, _, _)| *position);
+        return Ok((columns, rows_to_delete));
+    }
+
+    let candidate_row_ids: Option<HashSet<RowId>> = if let Some(ref where_expr) = stmt.where_clause
+        && let Some(index_usage) = ddl::find_index_usage(db, &stmt.table, where_expr)
+    {
+        Some(ddl::get_indexed_rows(db, table, &index_usage)?)
+    } else {
+        None
+    };
+
+    let mut rows_to_delete = Vec::new();
+    for (position, (row_id, row)) in table.iter_rows_with_ids().enumerate() {
+        if let Some(ref candidate_set) = candidate_row_ids
+            && !candidate_set.contains(&row_id)
+        {
+            continue;
+        }
+
+        let should_delete = if let Some(ref where_expr) = stmt.where_clause {
+            evaluate_expression(Some(db), where_expr, &columns, row)?
+        } else {
+            true
+        };
+
+        if should_delete {
+            rows_to_delete.push((position, row_id, row.clone()));
+        }
+    }
+
+    Ok((columns, rows_to_delete))
 }

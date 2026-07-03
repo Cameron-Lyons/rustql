@@ -49,19 +49,8 @@ impl<'a> PlanExecutor<'a> {
                 combined
             }
             SetOperation::IntersectAll => {
-                let mut right_counts = SqlRowMultiset::with_capacity(right_row_count);
-                for row in right.rows {
-                    right_counts.add(row);
-                }
-
-                let mut left_counts = SqlRowMultiset::with_capacity(left_row_count);
-                let mut left_order = Vec::with_capacity(left_row_count);
-                for row in left.rows {
-                    if left_counts.add(row.clone()) {
-                        left_order.push(row.clone());
-                    }
-                }
-
+                let right_counts = row_counts(right.rows);
+                let (left_counts, left_order) = ordered_row_counts(left.rows);
                 let mut combined = Vec::with_capacity(left_row_count.min(right_row_count));
                 for row in left_order {
                     let left_count = left_counts.count(&row);
@@ -87,19 +76,8 @@ impl<'a> PlanExecutor<'a> {
                 combined
             }
             SetOperation::ExceptAll => {
-                let mut right_counts = SqlRowMultiset::with_capacity(right_row_count);
-                for row in right.rows {
-                    right_counts.add(row);
-                }
-
-                let mut left_counts = SqlRowMultiset::with_capacity(left_row_count);
-                let mut left_order = Vec::with_capacity(left_row_count);
-                for row in left.rows {
-                    if left_counts.add(row.clone()) {
-                        left_order.push(row.clone());
-                    }
-                }
-
+                let right_counts = row_counts(right.rows);
+                let (left_counts, left_order) = ordered_row_counts(left.rows);
                 let mut combined = Vec::with_capacity(left_row_count);
                 for row in left_order {
                     let left_count = left_counts.count(&row);
@@ -117,4 +95,25 @@ impl<'a> PlanExecutor<'a> {
             rows,
         })
     }
+}
+
+fn row_counts(rows: Vec<Vec<Value>>) -> SqlRowMultiset {
+    let mut counts = SqlRowMultiset::with_capacity(rows.len());
+    for row in rows {
+        counts.add(row);
+    }
+    counts
+}
+
+fn ordered_row_counts(rows: Vec<Vec<Value>>) -> (SqlRowMultiset, Vec<Vec<Value>>) {
+    let mut counts = SqlRowMultiset::with_capacity(rows.len());
+    let mut order = Vec::with_capacity(rows.len());
+
+    for row in rows {
+        if counts.add(row.clone()) {
+            order.push(row);
+        }
+    }
+
+    (counts, order)
 }
