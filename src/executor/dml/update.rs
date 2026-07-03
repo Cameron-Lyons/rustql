@@ -21,7 +21,7 @@ pub(crate) fn execute_update(
         .ok_or_else(|| RustqlError::TableNotFound(stmt.table.clone()))?
         .columns
         .clone();
-    let mut update_info = Vec::new();
+    let mut update_info = Vec::with_capacity(updated_count);
     {
         let table = db
             .tables
@@ -51,7 +51,11 @@ pub(crate) fn execute_update(
             updated_row,
         )?;
     }
-    let mut returning_rows: Vec<Vec<Value>> = Vec::new();
+    let mut returning_rows: Vec<Vec<Value>> = Vec::with_capacity(if stmt.returning.is_some() {
+        updated_count
+    } else {
+        0
+    });
     for (row_id, old_row, updated_row) in update_info {
         if stmt.returning.is_some() {
             returning_rows.push(updated_row.clone());
@@ -93,16 +97,26 @@ fn collect_simple_update_rows(
         .get(&stmt.table)
         .ok_or_else(|| RustqlError::TableNotFound(stmt.table.clone()))?;
 
-    let mut rows_to_update: Vec<(usize, crate::database::RowId, Vec<Value>)> = Vec::new();
+    let rows_to_check: Vec<(usize, crate::database::RowId, &Vec<Value>)> =
+        if let Some(ref candidate_set) = candidate_indices {
+            table_ref
+                .iter_rows_with_ids()
+                .enumerate()
+                .filter(|(_, (row_id, _))| candidate_set.contains(row_id))
+                .map(|(idx, (row_id, row))| (idx, row_id, row))
+                .collect()
+        } else {
+            table_ref
+                .iter_rows_with_ids()
+                .enumerate()
+                .map(|(idx, (row_id, row))| (idx, row_id, row))
+                .collect()
+        };
 
-    for (row_idx, (row_id, row)) in table_ref.iter_rows_with_ids().enumerate() {
-        if candidate_indices
-            .as_ref()
-            .is_some_and(|candidate_set| !candidate_set.contains(&row_id))
-        {
-            continue;
-        }
+    let mut rows_to_update: Vec<(usize, crate::database::RowId, Vec<Value>)> =
+        Vec::with_capacity(rows_to_check.len());
 
+    for (row_idx, row_id, row) in rows_to_check {
         let should_update = if let Some(ref where_expr) = stmt.where_clause {
             evaluate_expression(Some(db), where_expr, &table_ref.columns, row)?
         } else {
@@ -150,7 +164,7 @@ fn collect_update_from_rows(
         .map(|(idx, (row_id, row))| (idx, row_id, row.clone()))
         .collect();
 
-    let mut rows_to_update = Vec::new();
+    let mut rows_to_update = Vec::with_capacity(target_rows.len());
     for (row_idx, row_id, target_row) in target_rows {
         let mut matched_row: Option<Vec<Value>> = None;
         for source_row in &source.rows {
