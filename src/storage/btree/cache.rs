@@ -32,21 +32,21 @@ impl PageCache {
     }
 
     pub(super) fn insert(&mut self, page_id: u64, page: BTreePage) {
-        if self.pages.contains_key(&page_id) {
-            self.pages.insert(page_id, page);
-            self.access_order.retain(|&id| id != page_id);
-            self.access_order.push_back(page_id);
-        } else {
-            while self.pages.len() >= MAX_CACHE_SIZE {
-                if let Some(oldest_id) = self.access_order.pop_front() {
-                    self.pages.remove(&oldest_id);
-                } else {
+        let replaced_existing = self.pages.insert(page_id, page).is_some();
+
+        if !replaced_existing {
+            while self.pages.len() > MAX_CACHE_SIZE {
+                let Some(oldest_id) = self.access_order.pop_front() else {
                     break;
+                };
+                if oldest_id != page_id {
+                    self.pages.remove(&oldest_id);
                 }
             }
-            self.pages.insert(page_id, page);
-            self.access_order.push_back(page_id);
         }
+
+        self.access_order.retain(|&id| id != page_id);
+        self.access_order.push_back(page_id);
     }
 
     pub(super) fn clear(&mut self) {
@@ -92,6 +92,43 @@ mod tests {
             cache.access_order.iter().copied().collect::<Vec<_>>(),
             vec![1]
         );
+    }
+
+    #[test]
+    fn insert_replaces_cached_page_and_refreshes_recency() {
+        let mut cache = PageCache::new();
+        cache.insert(1, BTreePage::new(1, PageKind::Leaf));
+        cache.insert(2, BTreePage::new(2, PageKind::Leaf));
+        cache.insert(1, BTreePage::new(1, PageKind::Internal));
+
+        let page = cache.get_cloned(1).expect("replacement should be cached");
+
+        assert_eq!(page.header.page_id, 1);
+        assert_eq!(page.header.kind, PageKind::Internal);
+        assert_eq!(cache.stats(), (1, 0, 2));
+        assert_eq!(
+            cache.access_order.iter().copied().collect::<Vec<_>>(),
+            vec![2, 1]
+        );
+    }
+
+    #[test]
+    fn insert_evicts_oldest_page_after_new_write() {
+        let mut cache = PageCache::new();
+        for page_id in 0..MAX_CACHE_SIZE as u64 {
+            cache.insert(page_id, BTreePage::new(page_id, PageKind::Leaf));
+        }
+
+        cache.get_cloned(0).expect("page should be cached");
+        cache.insert(
+            MAX_CACHE_SIZE as u64,
+            BTreePage::new(MAX_CACHE_SIZE as u64, PageKind::Leaf),
+        );
+
+        assert!(cache.pages.contains_key(&0));
+        assert!(!cache.pages.contains_key(&1));
+        assert!(cache.pages.contains_key(&(MAX_CACHE_SIZE as u64)));
+        assert_eq!(cache.stats(), (1, 0, MAX_CACHE_SIZE));
     }
 
     #[test]
