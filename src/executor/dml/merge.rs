@@ -196,7 +196,7 @@ pub(crate) fn execute_merge(
                                     &mut db,
                                     &stmt.target_table,
                                     &target_columns,
-                                    &target_row,
+                                    target_row,
                                 )?;
                                 let table =
                                     db.tables.get_mut(&stmt.target_table).ok_or_else(|| {
