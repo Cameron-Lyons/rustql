@@ -70,18 +70,7 @@ impl Clone for ExecutionResult {
 pub(super) fn column_definitions_from_names(columns: &[String]) -> Vec<ColumnDefinition> {
     columns
         .iter()
-        .map(|name| ColumnDefinition {
-            name: name.clone(),
-            data_type: DataType::Text,
-            nullable: true,
-            primary_key: false,
-            unique: false,
-            default_value: None,
-            foreign_key: None,
-            check: None,
-            auto_increment: false,
-            generated: None,
-        })
+        .map(|name| synthetic_column_definition(name))
         .collect()
 }
 
@@ -180,9 +169,25 @@ pub(super) fn combined_column_definitions(
     left: &[String],
     right: &[String],
 ) -> Vec<ColumnDefinition> {
-    let mut combined = column_definitions_from_names(left);
-    combined.extend(column_definitions_from_names(right));
+    let mut combined = Vec::with_capacity(left.len() + right.len());
+    combined.extend(left.iter().map(|name| synthetic_column_definition(name)));
+    combined.extend(right.iter().map(|name| synthetic_column_definition(name)));
     combined
+}
+
+fn synthetic_column_definition(name: &str) -> ColumnDefinition {
+    ColumnDefinition {
+        name: name.to_string(),
+        data_type: DataType::Text,
+        nullable: true,
+        primary_key: false,
+        unique: false,
+        default_value: None,
+        foreign_key: None,
+        check: None,
+        auto_increment: false,
+        generated: None,
+    }
 }
 
 pub(super) fn combine_rows(left: &[Value], right: &[Value]) -> Vec<Value> {
