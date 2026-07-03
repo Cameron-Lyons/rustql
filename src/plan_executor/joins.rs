@@ -10,7 +10,8 @@ impl<'a> PlanExecutor<'a> {
     ) -> Result<ExecutionResult, RustqlError> {
         let mut joined_rows = Vec::new();
         let joined_columns = joined_column_names(&left.columns, &right.columns);
-        let mut matched_right = vec![false; right.rows.len()];
+        let mut matched_right = matches!(join_type, JoinType::Right | JoinType::Full)
+            .then(|| vec![false; right.rows.len()]);
         let combined_columns = (!matches!(join_type, JoinType::Cross))
             .then(|| combined_column_definitions(&left.columns, &right.columns));
 
@@ -33,7 +34,9 @@ impl<'a> PlanExecutor<'a> {
                 if include {
                     joined_rows.push(combined_row);
                     has_match = true;
-                    matched_right[right_idx] = true;
+                    if let Some(matched_right) = matched_right.as_mut() {
+                        matched_right[right_idx] = true;
+                    }
                 }
             }
 
@@ -42,7 +45,7 @@ impl<'a> PlanExecutor<'a> {
             }
         }
 
-        if matches!(join_type, JoinType::Right | JoinType::Full) {
+        if let Some(matched_right) = matched_right {
             for (right_idx, right_row) in right.rows.iter().enumerate() {
                 if !matched_right[right_idx] {
                     joined_rows.push(combine_row_with_left_nulls(left.columns.len(), right_row));

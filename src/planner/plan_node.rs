@@ -367,16 +367,9 @@ impl PlanNode {
                 cost,
                 rows,
             } => {
-                let distinct_strs: Vec<String> = distinct_on
-                    .iter()
-                    .map(|expr| format!("{:?}", expr))
-                    .collect();
-                writeln!(
-                    f,
-                    "{}Distinct On ({})",
-                    indent_str,
-                    distinct_strs.join(", ")
-                )?;
+                write!(f, "{}Distinct On (", indent_str)?;
+                write_debug_expr_list(f, distinct_on)?;
+                writeln!(f, ")")?;
                 writeln!(f, "{}  Cost: {:.2}, Rows: {}", indent_str, cost, rows)?;
                 input.fmt_with_indent(f, indent + 1)
             }
@@ -412,37 +405,13 @@ impl PlanNode {
                 rows,
             } => {
                 if let Some(sets) = grouping_sets {
-                    let grouping_set_strs: Vec<String> = sets
-                        .iter()
-                        .map(|set| {
-                            if set.is_empty() {
-                                "()".to_string()
-                            } else {
-                                format!(
-                                    "({})",
-                                    set.iter()
-                                        .map(|expr| format!("{:?}", expr))
-                                        .collect::<Vec<_>>()
-                                        .join(", ")
-                                )
-                            }
-                        })
-                        .collect();
-                    writeln!(
-                        f,
-                        "{}Aggregate (Grouping Sets: {})",
-                        indent_str,
-                        grouping_set_strs.join(", ")
-                    )?;
+                    write!(f, "{}Aggregate (Grouping Sets: ", indent_str)?;
+                    write_grouping_sets(f, sets)?;
+                    writeln!(f, ")")?;
                 } else {
-                    let group_by_strs: Vec<String> =
-                        group_by.iter().map(|e| format!("{:?}", e)).collect();
-                    writeln!(
-                        f,
-                        "{}Aggregate (Group By: {})",
-                        indent_str,
-                        group_by_strs.join(", ")
-                    )?;
+                    write!(f, "{}Aggregate (Group By: ", indent_str)?;
+                    write_debug_expr_list(f, group_by)?;
+                    writeln!(f, ")")?;
                 }
                 writeln!(f, "{}  Cost: {:.2}, Rows: {}", indent_str, cost, rows)?;
                 input.fmt_with_indent(f, indent + 1)
@@ -469,5 +438,76 @@ impl PlanNode {
                 right.fmt_with_indent(f, indent + 1)
             }
         }
+    }
+}
+
+fn write_debug_expr_list(f: &mut fmt::Formatter<'_>, exprs: &[Expression]) -> fmt::Result {
+    for (idx, expr) in exprs.iter().enumerate() {
+        if idx > 0 {
+            write!(f, ", ")?;
+        }
+        write!(f, "{:?}", expr)?;
+    }
+    Ok(())
+}
+
+fn write_grouping_sets(f: &mut fmt::Formatter<'_>, sets: &[Vec<Expression>]) -> fmt::Result {
+    for (idx, set) in sets.iter().enumerate() {
+        if idx > 0 {
+            write!(f, ", ")?;
+        }
+        write!(f, "(")?;
+        write_debug_expr_list(f, set)?;
+        write!(f, ")")?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn one_row_input() -> Box<PlanNode> {
+        Box::new(PlanNode::OneRow { cost: 1.0, rows: 1 })
+    }
+
+    #[test]
+    fn distinct_on_display_streams_expression_list() {
+        let plan = PlanNode::DistinctOn {
+            input: one_row_input(),
+            distinct_on: vec![Expression::Column("category".to_string())],
+            cost: 2.0,
+            rows: 1,
+        };
+
+        let rendered = plan.to_string();
+
+        assert!(rendered.starts_with("Distinct On (Column(\"category\"))\n"));
+    }
+
+    #[test]
+    fn grouping_sets_display_streams_nested_expression_lists() {
+        let plan = PlanNode::Aggregate {
+            input: one_row_input(),
+            group_by: Vec::new(),
+            grouping_sets: Some(vec![
+                vec![
+                    Expression::Column("region".to_string()),
+                    Expression::Column("product".to_string()),
+                ],
+                vec![Expression::Column("region".to_string())],
+                Vec::new(),
+            ]),
+            aggregates: Vec::new(),
+            having: None,
+            cost: 3.0,
+            rows: 1,
+        };
+
+        let rendered = plan.to_string();
+
+        assert!(rendered.starts_with(
+            "Aggregate (Grouping Sets: (Column(\"region\"), Column(\"product\")), (Column(\"region\")), ())\n"
+        ));
     }
 }

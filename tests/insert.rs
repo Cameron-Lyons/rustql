@@ -120,6 +120,27 @@ fn insert_column_list_values_accept_expressions() {
 }
 
 #[test]
+fn insert_rejects_duplicate_column_list_targets() {
+    reset_database();
+    execute_sql("CREATE TABLE dup_insert (id INTEGER, label TEXT DEFAULT 'unset')").unwrap();
+
+    let values_error = execute_sql("INSERT INTO dup_insert (id, id) VALUES (1, 2)").unwrap_err();
+    assert!(values_error.contains("INSERT column 'id' specified more than once"));
+    assert_rows("SELECT id, label FROM dup_insert", &["id", "label"], vec![]);
+
+    execute_sql("CREATE TABLE dup_insert_source (id INTEGER, replacement INTEGER)").unwrap();
+    execute_sql("INSERT INTO dup_insert_source VALUES (1, 2)").unwrap();
+
+    let select_error = execute_sql(
+        "INSERT INTO dup_insert (id, id)
+         SELECT id, replacement FROM dup_insert_source",
+    )
+    .unwrap_err();
+    assert!(select_error.contains("INSERT column 'id' specified more than once"));
+    assert_rows("SELECT id, label FROM dup_insert", &["id", "label"], vec![]);
+}
+
+#[test]
 fn insert_values_accept_scalar_subqueries() {
     reset_database();
     execute_sql("CREATE TABLE insert_expr_source (value INTEGER)").unwrap();
