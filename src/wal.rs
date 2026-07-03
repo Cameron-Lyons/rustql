@@ -86,7 +86,14 @@ pub enum WalEntry {
 #[derive(Debug, Default)]
 pub struct WalLog {
     entries: Vec<WalEntry>,
-    savepoints: HashMap<String, usize>,
+    savepoints: HashMap<String, SavepointMarker>,
+    next_savepoint_sequence: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SavepointMarker {
+    position: usize,
+    sequence: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -111,7 +118,12 @@ impl WalLog {
     }
 
     pub fn savepoint(&mut self, name: &str) {
-        self.savepoints.insert(name.to_string(), self.entries.len());
+        let marker = SavepointMarker {
+            position: self.entries.len(),
+            sequence: self.next_savepoint_sequence,
+        };
+        self.next_savepoint_sequence += 1;
+        self.savepoints.insert(name.to_string(), marker);
     }
 
     pub fn release_savepoint(&mut self, name: &str) -> Result<(), RustqlError> {
@@ -126,10 +138,13 @@ impl WalLog {
         name: &str,
         db: &mut Database,
     ) -> Result<(), RustqlError> {
-        let position = self.savepoints.get(name).copied().ok_or_else(|| {
+        let marker = self.savepoints.get(name).copied().ok_or_else(|| {
             RustqlError::TransactionError(format!("Savepoint '{}' does not exist", name))
         })?;
-        self.rollback_to_position(position, db)
+        self.rollback_to_position(marker.position, db)?;
+        self.savepoints
+            .retain(|_, savepoint| savepoint.sequence <= marker.sequence);
+        Ok(())
     }
 
     pub fn rollback_to_position(
@@ -142,8 +157,7 @@ impl WalLog {
                 "Statement savepoint is no longer valid".to_string(),
             ));
         }
-        let entries_to_rollback: Vec<WalEntry> = self.entries.drain(position..).collect();
-        for entry in entries_to_rollback.into_iter().rev() {
+        for entry in self.entries.drain(position..).rev() {
             rollback_single_entry(entry, db);
         }
         rebuild_all_indexes(db)?;
@@ -246,14 +260,9 @@ impl WalLog {
                     old_name,
                     new_name,
                 } => {
-                    if let Some(t) = db.tables.get_mut(&table) {
-                        for col in &mut t.columns {
-                            if col.name == new_name {
-                                col.name = old_name;
-                                break;
-                            }
-                        }
-                    }
+                    crate::executor::ddl::rename_column_schema_references(
+                        db, &table, &new_name, &old_name,
+                    );
                 }
                 WalEntry::TruncateTable {
                     name,
@@ -305,6 +314,75 @@ impl WalLog {
 
         rebuild_all_indexes(db)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ast::DataType;
+
+    fn integer_column(name: &str) -> ColumnDefinition {
+        ColumnDefinition {
+            name: name.to_string(),
+            data_type: DataType::Integer,
+            nullable: true,
+            primary_key: false,
+            unique: false,
+            default_value: None,
+            foreign_key: None,
+            check: None,
+            auto_increment: false,
+            generated: None,
+        }
+    }
+
+    #[test]
+    fn rollback_to_position_drains_suffix_in_reverse() {
+        let mut db = Database::new();
+        db.tables.insert(
+            "items".to_string(),
+            Table::with_rows_and_ids(
+                vec![integer_column("id")],
+                vec![vec![Value::Integer(1)], vec![Value::Integer(2)]],
+                vec![RowId(1), RowId(2)],
+                3,
+                Vec::new(),
+            ),
+        );
+
+        let mut log = WalLog::new();
+        log.record(WalEntry::UpdateRow {
+            table: "items".to_string(),
+            row_id: RowId(1),
+            old_row: vec![Value::Integer(0)],
+        });
+        let position = log.entries.len();
+
+        let table = db.tables.get_mut("items").unwrap();
+        table
+            .set_row_by_id(RowId(2), vec![Value::Integer(20)])
+            .unwrap();
+        log.record(WalEntry::UpdateRow {
+            table: "items".to_string(),
+            row_id: RowId(2),
+            old_row: vec![Value::Integer(2)],
+        });
+
+        let (deleted_position, deleted_row) = table.remove_row_by_id(RowId(1)).unwrap();
+        log.record(WalEntry::DeleteRow {
+            table: "items".to_string(),
+            row_id: RowId(1),
+            position: deleted_position,
+            old_row: deleted_row,
+        });
+
+        log.rollback_to_position(position, &mut db).unwrap();
+
+        let table = db.tables.get("items").unwrap();
+        assert_eq!(log.entries.len(), position);
+        assert_eq!(table.row_by_id(RowId(1)), Some(&vec![Value::Integer(1)]));
+        assert_eq!(table.row_by_id(RowId(2)), Some(&vec![Value::Integer(2)]));
     }
 }
 
@@ -403,14 +481,7 @@ fn rollback_single_entry(entry: WalEntry, db: &mut Database) {
             old_name,
             new_name,
         } => {
-            if let Some(t) = db.tables.get_mut(&table) {
-                for col in &mut t.columns {
-                    if col.name == new_name {
-                        col.name = old_name;
-                        break;
-                    }
-                }
-            }
+            crate::executor::ddl::rename_column_schema_references(db, &table, &new_name, &old_name);
         }
         WalEntry::TruncateTable {
             name,

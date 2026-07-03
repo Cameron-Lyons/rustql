@@ -223,6 +223,15 @@ fn test_fetch_first_rows_only() {
 }
 
 #[test]
+fn test_fetch_rejects_negative_count() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    reset_database();
+
+    let error = execute_sql("SELECT 1 FETCH FIRST -1 ROWS ONLY").unwrap_err();
+    assert!(error.contains("FETCH FIRST/NEXT count cannot be negative"));
+}
+
+#[test]
 fn test_fetch_with_ties() {
     let _lock = TEST_MUTEX.lock().unwrap();
     reset_database();
@@ -291,6 +300,37 @@ fn test_fetch_with_ties_respects_nulls_last() {
 
     rows.assert_columns(&["id"]);
     assert_eq!(rows.rows, vec![vec![Value::Integer(3)]]);
+}
+
+#[test]
+fn test_fetch_with_ties_on_order_expression() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    reset_database();
+
+    execute_sql("CREATE TABLE fetch_ties_expr (id INTEGER, score INTEGER, penalty INTEGER)")
+        .unwrap();
+    execute_sql("INSERT INTO fetch_ties_expr VALUES (1, 100, 0)").unwrap();
+    execute_sql("INSERT INTO fetch_ties_expr VALUES (2, 95, 5)").unwrap();
+    execute_sql("INSERT INTO fetch_ties_expr VALUES (3, 92, 2)").unwrap();
+    execute_sql("INSERT INTO fetch_ties_expr VALUES (4, 80, 0)").unwrap();
+
+    let result = execute_sql(
+        "SELECT id FROM fetch_ties_expr ORDER BY score - penalty DESC FETCH FIRST 2 ROWS WITH TIES",
+    )
+    .unwrap();
+    let lines: Vec<String> = result.lines().collect();
+    let data_lines: Vec<String> = lines
+        .iter()
+        .skip(2)
+        .filter(|line| !line.is_empty())
+        .cloned()
+        .collect();
+
+    assert_eq!(data_lines.len(), 3, "Expected expression ties: {result:?}");
+    assert!(result.contains("1"), "{result:?}");
+    assert!(result.contains("2"), "{result:?}");
+    assert!(result.contains("3"), "{result:?}");
+    assert!(!result.contains("4"), "{result:?}");
 }
 
 #[test]

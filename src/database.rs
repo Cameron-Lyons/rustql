@@ -144,13 +144,14 @@ impl Table {
         next_row_id: u64,
         constraints: Vec<TableConstraint>,
     ) -> Self {
+        let row_count = rows.len();
         let mut table = Self {
             columns,
             rows,
             row_ids,
             next_row_id,
             constraints,
-            row_id_positions: HashMap::new(),
+            row_id_positions: HashMap::with_capacity(row_count),
         };
         table.ensure_row_ids();
         table
@@ -172,8 +173,16 @@ impl Table {
 
     fn rebuild_row_id_positions(&mut self) {
         self.row_id_positions.clear();
+        self.row_id_positions.reserve(self.row_ids.len());
         for (position, row_id) in self.row_ids.iter().copied().enumerate() {
             self.row_id_positions.insert(row_id, position);
+        }
+    }
+
+    fn update_row_id_positions_from(&mut self, start: usize) {
+        for position in start..self.row_ids.len() {
+            self.row_id_positions
+                .insert(self.row_ids[position], position);
         }
     }
 
@@ -195,6 +204,20 @@ impl Table {
             self.next_row_id = default_next_row_id();
         }
         self.rebuild_row_id_positions();
+    }
+
+    fn has_normalized_row_ids(&self) -> bool {
+        if self.row_ids.len() != self.rows.len() || self.next_row_id == 0 {
+            return false;
+        }
+
+        let max_existing = self
+            .row_ids
+            .iter()
+            .map(|row_id| row_id.0)
+            .max()
+            .unwrap_or(0);
+        self.next_row_id > max_existing
     }
 
     pub fn iter_rows_with_ids(&self) -> impl Iterator<Item = (RowId, &Vec<Value>)> {
@@ -241,7 +264,7 @@ impl Table {
         if self.next_row_id <= row_id.0 {
             self.next_row_id = row_id.0 + 1;
         }
-        self.rebuild_row_id_positions();
+        self.update_row_id_positions_from(position);
     }
 
     pub fn remove_row_by_id(&mut self, row_id: RowId) -> Option<(usize, Vec<Value>)> {
@@ -249,7 +272,8 @@ impl Table {
         let position = self.position_of_row_id(row_id)?;
         self.row_ids.remove(position);
         let row = self.rows.remove(position);
-        self.rebuild_row_id_positions();
+        self.row_id_positions.remove(&row_id);
+        self.update_row_id_positions_from(position);
         Some((position, row))
     }
 
@@ -257,6 +281,104 @@ impl Table {
         let position = self.position_of_row_id(row_id)?;
         self.rows[position] = row;
         Some(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(value: i64) -> Vec<Value> {
+        vec![Value::Integer(value)]
+    }
+
+    #[test]
+    fn insert_row_at_updates_shifted_row_id_positions() {
+        let mut table = Table::with_rows_and_ids(
+            Vec::new(),
+            vec![row(10), row(30)],
+            vec![RowId(10), RowId(30)],
+            31,
+            Vec::new(),
+        );
+
+        table.insert_row_at(1, RowId(20), row(20));
+
+        assert_eq!(table.position_of_row_id(RowId(10)), Some(0));
+        assert_eq!(table.position_of_row_id(RowId(20)), Some(1));
+        assert_eq!(table.position_of_row_id(RowId(30)), Some(2));
+        assert_eq!(table.row_by_id(RowId(30)), Some(&row(30)));
+    }
+
+    #[test]
+    fn remove_row_by_id_updates_shifted_row_id_positions() {
+        let mut table = Table::with_rows_and_ids(
+            Vec::new(),
+            vec![row(10), row(20), row(30)],
+            vec![RowId(10), RowId(20), RowId(30)],
+            31,
+            Vec::new(),
+        );
+
+        assert_eq!(table.remove_row_by_id(RowId(20)), Some((1, row(20))));
+
+        assert_eq!(table.position_of_row_id(RowId(10)), Some(0));
+        assert_eq!(table.position_of_row_id(RowId(20)), None);
+        assert_eq!(table.position_of_row_id(RowId(30)), Some(1));
+        assert_eq!(table.row_by_id(RowId(30)), Some(&row(30)));
+    }
+
+    #[test]
+    fn table_row_id_positions_remain_reserved_after_rebuilds() {
+        let mut table = Table::with_rows_and_ids(
+            Vec::new(),
+            vec![row(10), row(30)],
+            vec![RowId(10), RowId(30)],
+            31,
+            Vec::new(),
+        );
+
+        table.insert_row_at(1, RowId(20), row(20));
+
+        assert_eq!(table.position_of_row_id(RowId(10)), Some(0));
+        assert_eq!(table.position_of_row_id(RowId(20)), Some(1));
+        assert_eq!(table.position_of_row_id(RowId(30)), Some(2));
+        assert!(table.row_id_positions.capacity() >= table.row_ids.len());
+
+        let (position, removed_row) = table.remove_row_by_id(RowId(20)).unwrap();
+
+        assert_eq!(position, 1);
+        assert_eq!(removed_row, row(20));
+        assert_eq!(table.position_of_row_id(RowId(10)), Some(0));
+        assert_eq!(table.position_of_row_id(RowId(30)), Some(1));
+        assert!(table.row_id_positions.capacity() >= table.row_ids.len());
+    }
+
+    #[test]
+    fn table_reports_normalized_row_ids_without_mutation() {
+        let mut table = Table::new(Vec::new(), vec![Vec::new()], Vec::new());
+
+        assert!(table.has_normalized_row_ids());
+
+        table.next_row_id = 1;
+        assert!(!table.has_normalized_row_ids());
+
+        table.next_row_id = 2;
+        table.row_ids.clear();
+        assert!(!table.has_normalized_row_ids());
+    }
+
+    #[test]
+    fn database_reports_stale_row_ids_until_normalized() {
+        let mut db = Database::new();
+        let mut table = Table::new(Vec::new(), vec![Vec::new(), Vec::new()], Vec::new());
+        table.row_ids.pop();
+        db.tables.insert("items".to_string(), table);
+
+        assert!(!db.has_normalized_row_ids());
+
+        db.normalize_row_ids();
+        assert!(db.has_normalized_row_ids());
     }
 }
 
@@ -302,7 +424,8 @@ mod optional_filter_expression {
 
 mod composite_index_entries {
     use super::*;
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use serde::ser::SerializeSeq;
+    use serde::{Deserialize, Deserializer, Serializer};
 
     pub fn serialize<S>(
         entries: &BTreeMap<Vec<Value>, Vec<RowId>>,
@@ -311,11 +434,11 @@ mod composite_index_entries {
     where
         S: Serializer,
     {
-        let converted: Vec<(Vec<Value>, Vec<RowId>)> = entries
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-        converted.serialize(serializer)
+        let mut seq = serializer.serialize_seq(Some(entries.len()))?;
+        for (key, row_ids) in entries {
+            seq.serialize_element(&(key, row_ids))?;
+        }
+        seq.end()
     }
 
     pub fn deserialize<'de, D>(
@@ -338,6 +461,10 @@ impl Database {
         for table in self.tables.values_mut() {
             table.ensure_row_ids();
         }
+    }
+
+    pub(crate) fn has_normalized_row_ids(&self) -> bool {
+        self.tables.values().all(Table::has_normalized_row_ids)
     }
 }
 
