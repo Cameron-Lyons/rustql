@@ -158,6 +158,23 @@ fn test_update_set_default() {
 }
 
 #[test]
+fn test_update_rejects_duplicate_assignment_targets() {
+    let _guard = setup_test();
+
+    execute_sql("CREATE TABLE update_dups (id INTEGER, qty INTEGER)").unwrap();
+    execute_sql("INSERT INTO update_dups VALUES (1, 10)").unwrap();
+
+    let err = execute_sql("UPDATE update_dups SET qty = 20, qty = 30 WHERE id = 1").unwrap_err();
+    assert!(err.contains("Assignment target 'qty' specified more than once"));
+
+    assert_rows(
+        "SELECT id, qty FROM update_dups",
+        &["id", "qty"],
+        vec![vec![Value::Integer(1), Value::Integer(10)]],
+    );
+}
+
+#[test]
 fn test_update_from_uses_source_rows() {
     let _guard = setup_test();
 

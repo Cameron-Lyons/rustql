@@ -1,6 +1,8 @@
 mod common;
 use common::*;
-use rustql::ast::Value;
+use rustql::Value;
+use rustql::database::{CompositeIndex, RowId};
+use std::collections::BTreeMap;
 use std::sync::Mutex;
 
 static TEST_MUTEX: Mutex<()> = Mutex::new(());
@@ -157,4 +159,92 @@ fn test_composite_index_tracks_insert_update_and_delete() {
     execute_sql("DELETE FROM lifecycle_idx WHERE a = 3 AND b = 4").unwrap();
     let deleted = execute_sql("SELECT payload FROM lifecycle_idx WHERE a = 3 AND b = 4").unwrap();
     assert!(!deleted.contains("new"), "{deleted:?}");
+}
+
+#[test]
+fn test_bulk_delete_prunes_simple_and_composite_index_entries() {
+    let _guard = setup_test();
+    execute_sql("CREATE TABLE bulk_idx (a INTEGER, b INTEGER, payload TEXT)").unwrap();
+    execute_sql(
+        "INSERT INTO bulk_idx VALUES
+            (1, 10, 'delete-one'),
+            (2, 20, 'delete-two'),
+            (3, 30, 'keep'),
+            (1, 11, 'delete-three')",
+    )
+    .unwrap();
+    execute_sql("CREATE INDEX idx_bulk_a ON bulk_idx (a)").unwrap();
+    execute_sql("CREATE INDEX idx_bulk_ab ON bulk_idx (a, b)").unwrap();
+
+    assert_command_sql(
+        "DELETE FROM bulk_idx WHERE a IN (1, 2)",
+        CommandTag::Delete,
+        3,
+    );
+
+    assert_rows(
+        "SELECT payload FROM bulk_idx WHERE a = 3 AND b = 30",
+        &["payload"],
+        vec![vec![Value::Text("keep".to_string())]],
+    );
+
+    let db = snapshot_database().unwrap();
+    let simple_index = db.indexes.get("idx_bulk_a").unwrap();
+    let simple_row_ids = simple_index
+        .entries
+        .values()
+        .flatten()
+        .copied()
+        .collect::<Vec<_>>();
+    assert_eq!(simple_row_ids, vec![RowId(3)]);
+    assert!(!simple_index.entries.contains_key(&Value::Integer(1)));
+    assert!(!simple_index.entries.contains_key(&Value::Integer(2)));
+
+    let composite_index = db.composite_indexes.get("idx_bulk_ab").unwrap();
+    let composite_row_ids = composite_index
+        .entries
+        .values()
+        .flatten()
+        .copied()
+        .collect::<Vec<_>>();
+    assert_eq!(composite_row_ids, vec![RowId(3)]);
+    assert!(
+        !composite_index
+            .entries
+            .contains_key(&vec![Value::Integer(1), Value::Integer(10)])
+    );
+    assert!(
+        !composite_index
+            .entries
+            .contains_key(&vec![Value::Integer(2), Value::Integer(20)])
+    );
+}
+
+#[test]
+fn test_composite_index_serialization_round_trips_entries() {
+    let mut entries = BTreeMap::new();
+    entries.insert(
+        vec![Value::Integer(1), Value::Text("2024-01-01".to_string())],
+        vec![RowId(7), RowId(9)],
+    );
+
+    let index = CompositeIndex {
+        name: "idx_orders_customer_date".to_string(),
+        table: "orders".to_string(),
+        columns: vec!["customer_id".to_string(), "order_date".to_string()],
+        entries: entries.clone(),
+        filter_expr: None,
+    };
+
+    let encoded = serde_json::to_value(&index).expect("composite index should serialize");
+    assert!(
+        encoded
+            .get("entries")
+            .and_then(|entries| entries.as_array())
+            .is_some_and(|entries| entries.len() == 1)
+    );
+
+    let decoded: CompositeIndex =
+        serde_json::from_value(encoded).expect("composite index should deserialize");
+    assert_eq!(decoded.entries, entries);
 }

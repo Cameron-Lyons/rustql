@@ -1,6 +1,38 @@
 use super::date::{days_to_ymd, parse_date_components, ymd_to_days};
 use super::*;
 
+fn string_function_length(name: &str, value: Option<&Value>) -> Result<usize, RustqlError> {
+    match value {
+        Some(Value::Integer(i)) if *i >= 0 => Ok(*i as usize),
+        Some(Value::Integer(_)) => Err(RustqlError::TypeMismatch(format!(
+            "{name} length cannot be negative"
+        ))),
+        _ => Err(RustqlError::TypeMismatch(format!(
+            "{name} requires an integer second argument"
+        ))),
+    }
+}
+
+fn string_function_pad<'a>(name: &str, value: Option<&'a Value>) -> Result<&'a str, RustqlError> {
+    let pad = match value {
+        Some(Value::Text(pad)) => pad.as_str(),
+        None => " ",
+        _ => {
+            return Err(RustqlError::TypeMismatch(format!(
+                "{name} pad argument must be text"
+            )));
+        }
+    };
+
+    if pad.is_empty() {
+        Err(RustqlError::TypeMismatch(format!(
+            "{name} pad argument cannot be empty"
+        )))
+    } else {
+        Ok(pad)
+    }
+}
+
 pub(super) fn evaluate_scalar_function(
     name: &ScalarFunctionType,
     args: &[Expression],
@@ -28,7 +60,7 @@ pub(super) fn evaluate_scalar_function(
             )),
         },
         ScalarFunctionType::Length => match evaluated_args.first() {
-            Some(Value::Text(s)) => Ok(Value::Integer(s.len() as i64)),
+            Some(Value::Text(s)) => Ok(Value::Integer(s.chars().count() as i64)),
             Some(Value::Null) => Ok(Value::Null),
             _ => Err(RustqlError::TypeMismatch(
                 "LENGTH requires a text argument".to_string(),
@@ -36,7 +68,7 @@ pub(super) fn evaluate_scalar_function(
         },
         ScalarFunctionType::Substring => {
             let s = match evaluated_args.first() {
-                Some(Value::Text(s)) => s.clone(),
+                Some(Value::Text(s)) => s.as_str(),
                 Some(Value::Null) => return Ok(Value::Null),
                 _ => {
                     return Err(RustqlError::TypeMismatch(
@@ -52,24 +84,20 @@ pub(super) fn evaluate_scalar_function(
                     ));
                 }
             };
-            let chars: Vec<char> = s.chars().collect();
-            if start >= chars.len() {
-                return Ok(Value::Text(String::new()));
-            }
-            let len = match evaluated_args.get(2) {
-                Some(Value::Integer(l)) => *l as usize,
-                None => chars.len() - start,
+            let chars = s.chars().skip(start);
+            let result: String = match evaluated_args.get(2) {
+                Some(Value::Integer(l)) => chars.take(*l as usize).collect(),
+                None => chars.collect(),
                 _ => {
                     return Err(RustqlError::TypeMismatch(
                         "SUBSTRING length must be an integer".to_string(),
                     ));
                 }
             };
-            let result: String = chars.iter().skip(start).take(len).collect();
             Ok(Value::Text(result))
         }
         ScalarFunctionType::Abs => match evaluated_args.first() {
-            Some(Value::Integer(i)) => Ok(Value::Integer(i.abs())),
+            Some(Value::Integer(i)) => checked_i64_abs(*i, "ABS").map(Value::Integer),
             Some(Value::Float(f)) => Ok(Value::Float(f.abs())),
             Some(Value::Null) => Ok(Value::Null),
             _ => Err(RustqlError::TypeMismatch(
@@ -147,7 +175,7 @@ pub(super) fn evaluate_scalar_function(
             for arg in &evaluated_args {
                 match arg {
                     Value::Null => {}
-                    other => result.push_str(&format_value(other)),
+                    other => append_formatted_value(&mut result, other),
                 }
             }
             Ok(Value::Text(result))
@@ -416,42 +444,38 @@ pub(super) fn evaluate_scalar_function(
             }
         }
         ScalarFunctionType::Greatest => {
-            let non_null: Vec<&Value> = evaluated_args
+            let mut non_null = evaluated_args
                 .iter()
-                .filter(|v| !matches!(v, Value::Null))
-                .collect();
-            if non_null.is_empty() {
-                Ok(Value::Null)
-            } else {
-                let mut max = non_null[0];
-                for v in &non_null[1..] {
-                    if (*v).cmp(max) == std::cmp::Ordering::Greater {
-                        max = *v;
+                .filter(|value| !matches!(value, Value::Null));
+            if let Some(mut max) = non_null.next() {
+                for value in non_null {
+                    if value.cmp(max) == std::cmp::Ordering::Greater {
+                        max = value;
                     }
                 }
                 Ok(max.clone())
+            } else {
+                Ok(Value::Null)
             }
         }
         ScalarFunctionType::Least => {
-            let non_null: Vec<&Value> = evaluated_args
+            let mut non_null = evaluated_args
                 .iter()
-                .filter(|v| !matches!(v, Value::Null))
-                .collect();
-            if non_null.is_empty() {
-                Ok(Value::Null)
-            } else {
-                let mut min = non_null[0];
-                for v in &non_null[1..] {
-                    if (*v).cmp(min) == std::cmp::Ordering::Less {
-                        min = *v;
+                .filter(|value| !matches!(value, Value::Null));
+            if let Some(mut min) = non_null.next() {
+                for value in non_null {
+                    if value.cmp(min) == std::cmp::Ordering::Less {
+                        min = value;
                     }
                 }
                 Ok(min.clone())
+            } else {
+                Ok(Value::Null)
             }
         }
         ScalarFunctionType::Lpad => {
             let s = match evaluated_args.first() {
-                Some(Value::Text(s)) => s.clone(),
+                Some(Value::Text(s)) => s.as_str(),
                 Some(Value::Null) => return Ok(Value::Null),
                 _ => {
                     return Err(RustqlError::TypeMismatch(
@@ -459,30 +483,15 @@ pub(super) fn evaluate_scalar_function(
                     ));
                 }
             };
-            let len = match evaluated_args.get(1) {
-                Some(Value::Integer(i)) => *i as usize,
-                _ => {
-                    return Err(RustqlError::TypeMismatch(
-                        "LPAD requires an integer second argument".to_string(),
-                    ));
-                }
-            };
-            let pad = match evaluated_args.get(2) {
-                Some(Value::Text(p)) => p.clone(),
-                None => " ".to_string(),
-                _ => {
-                    return Err(RustqlError::TypeMismatch(
-                        "LPAD pad argument must be text".to_string(),
-                    ));
-                }
-            };
+            let len = string_function_length("LPAD", evaluated_args.get(1))?;
+            let pad = string_function_pad("LPAD", evaluated_args.get(2))?;
             let chars: Vec<char> = s.chars().collect();
             if chars.len() >= len {
                 Ok(Value::Text(chars[..len].iter().collect()))
             } else {
                 let needed = len - chars.len();
                 let pad_chars: Vec<char> = pad.chars().collect();
-                let mut result = String::new();
+                let mut result = String::with_capacity(s.len().max(len));
                 for i in 0..needed {
                     result.push(pad_chars[i % pad_chars.len()]);
                 }
@@ -492,7 +501,7 @@ pub(super) fn evaluate_scalar_function(
         }
         ScalarFunctionType::Rpad => {
             let s = match evaluated_args.first() {
-                Some(Value::Text(s)) => s.clone(),
+                Some(Value::Text(s)) => s.as_str(),
                 Some(Value::Null) => return Ok(Value::Null),
                 _ => {
                     return Err(RustqlError::TypeMismatch(
@@ -500,30 +509,16 @@ pub(super) fn evaluate_scalar_function(
                     ));
                 }
             };
-            let len = match evaluated_args.get(1) {
-                Some(Value::Integer(i)) => *i as usize,
-                _ => {
-                    return Err(RustqlError::TypeMismatch(
-                        "RPAD requires an integer second argument".to_string(),
-                    ));
-                }
-            };
-            let pad = match evaluated_args.get(2) {
-                Some(Value::Text(p)) => p.clone(),
-                None => " ".to_string(),
-                _ => {
-                    return Err(RustqlError::TypeMismatch(
-                        "RPAD pad argument must be text".to_string(),
-                    ));
-                }
-            };
+            let len = string_function_length("RPAD", evaluated_args.get(1))?;
+            let pad = string_function_pad("RPAD", evaluated_args.get(2))?;
             let chars: Vec<char> = s.chars().collect();
             if chars.len() >= len {
                 Ok(Value::Text(chars[..len].iter().collect()))
             } else {
                 let needed = len - chars.len();
                 let pad_chars: Vec<char> = pad.chars().collect();
-                let mut result: String = chars.into_iter().collect();
+                let mut result = String::with_capacity(s.len().max(len));
+                result.extend(chars);
                 for i in 0..needed {
                     result.push(pad_chars[i % pad_chars.len()]);
                 }
@@ -532,7 +527,7 @@ pub(super) fn evaluate_scalar_function(
         }
         ScalarFunctionType::LeftFn => {
             let s = match evaluated_args.first() {
-                Some(Value::Text(s)) => s.clone(),
+                Some(Value::Text(s)) => s.as_str(),
                 Some(Value::Null) => return Ok(Value::Null),
                 _ => {
                     return Err(RustqlError::TypeMismatch(
@@ -540,20 +535,13 @@ pub(super) fn evaluate_scalar_function(
                     ));
                 }
             };
-            let n = match evaluated_args.get(1) {
-                Some(Value::Integer(i)) => *i as usize,
-                _ => {
-                    return Err(RustqlError::TypeMismatch(
-                        "LEFT requires an integer second argument".to_string(),
-                    ));
-                }
-            };
+            let n = string_function_length("LEFT", evaluated_args.get(1))?;
             let result: String = s.chars().take(n).collect();
             Ok(Value::Text(result))
         }
         ScalarFunctionType::RightFn => {
             let s = match evaluated_args.first() {
-                Some(Value::Text(s)) => s.clone(),
+                Some(Value::Text(s)) => s.as_str(),
                 Some(Value::Null) => return Ok(Value::Null),
                 _ => {
                     return Err(RustqlError::TypeMismatch(
@@ -561,14 +549,7 @@ pub(super) fn evaluate_scalar_function(
                     ));
                 }
             };
-            let n = match evaluated_args.get(1) {
-                Some(Value::Integer(i)) => *i as usize,
-                _ => {
-                    return Err(RustqlError::TypeMismatch(
-                        "RIGHT requires an integer second argument".to_string(),
-                    ));
-                }
-            };
+            let n = string_function_length("RIGHT", evaluated_args.get(1))?;
             let chars: Vec<char> = s.chars().collect();
             let start = chars.len().saturating_sub(n);
             let result: String = chars[start..].iter().collect();
@@ -583,7 +564,7 @@ pub(super) fn evaluate_scalar_function(
         },
         ScalarFunctionType::Repeat => {
             let s = match evaluated_args.first() {
-                Some(Value::Text(s)) => s.clone(),
+                Some(Value::Text(s)) => s.as_str(),
                 Some(Value::Null) => return Ok(Value::Null),
                 _ => {
                     return Err(RustqlError::TypeMismatch(
@@ -591,14 +572,7 @@ pub(super) fn evaluate_scalar_function(
                     ));
                 }
             };
-            let n = match evaluated_args.get(1) {
-                Some(Value::Integer(i)) => *i as usize,
-                _ => {
-                    return Err(RustqlError::TypeMismatch(
-                        "REPEAT requires an integer second argument".to_string(),
-                    ));
-                }
-            };
+            let n = string_function_length("REPEAT", evaluated_args.get(1))?;
             Ok(Value::Text(s.repeat(n)))
         }
         ScalarFunctionType::Log => {
@@ -1030,15 +1004,9 @@ pub(super) fn evaluate_scalar_function(
             let a = evaluate_value_expression_with_db(&args[0], columns, row, db)?;
             let b = evaluate_value_expression_with_db(&args[1], columns, row, db)?;
             match (a, b) {
-                (Value::Integer(mut a), Value::Integer(mut b)) => {
-                    a = a.abs();
-                    b = b.abs();
-                    while b != 0 {
-                        let t = b;
-                        b = a % b;
-                        a = t;
-                    }
-                    Ok(Value::Integer(a))
+                (Value::Integer(a), Value::Integer(b)) => {
+                    checked_u64_to_i64(unsigned_gcd(a.unsigned_abs(), b.unsigned_abs()), "GCD")
+                        .map(Value::Integer)
                 }
                 _ => Ok(Value::Null),
             }
@@ -1048,18 +1016,18 @@ pub(super) fn evaluate_scalar_function(
             let b = evaluate_value_expression_with_db(&args[1], columns, row, db)?;
             match (a, b) {
                 (Value::Integer(a), Value::Integer(b)) => {
-                    if a == 0 && b == 0 {
+                    if a == 0 || b == 0 {
                         Ok(Value::Integer(0))
                     } else {
-                        let mut ga = a.abs();
-                        let mut gb = b.abs();
-                        let prod = ga * gb;
-                        while gb != 0 {
-                            let t = gb;
-                            gb = ga % gb;
-                            ga = t;
-                        }
-                        Ok(Value::Integer(prod / ga))
+                        let abs_a = a.unsigned_abs();
+                        let abs_b = b.unsigned_abs();
+                        let gcd = unsigned_gcd(abs_a, abs_b);
+                        let lcm = (abs_a / gcd).checked_mul(abs_b).ok_or_else(|| {
+                            RustqlError::TypeMismatch(
+                                "LCM result is outside the i64 range".to_string(),
+                            )
+                        })?;
+                        checked_u64_to_i64(lcm, "LCM").map(Value::Integer)
                     }
                 }
                 _ => Ok(Value::Null),
@@ -1161,4 +1129,25 @@ pub(super) fn evaluate_scalar_function(
             }
         }
     }
+}
+
+fn checked_i64_abs(value: i64, function: &str) -> Result<i64, RustqlError> {
+    value.checked_abs().ok_or_else(|| {
+        RustqlError::TypeMismatch(format!("{} result is outside the i64 range", function))
+    })
+}
+
+fn unsigned_gcd(mut a: u64, mut b: u64) -> u64 {
+    while b != 0 {
+        let t = b;
+        b = a % b;
+        a = t;
+    }
+    a
+}
+
+fn checked_u64_to_i64(value: u64, function: &str) -> Result<i64, RustqlError> {
+    i64::try_from(value).map_err(|_| {
+        RustqlError::TypeMismatch(format!("{} result is outside the i64 range", function))
+    })
 }

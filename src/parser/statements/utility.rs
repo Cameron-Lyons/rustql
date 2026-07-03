@@ -86,13 +86,57 @@ impl Parser {
         self.consume(Token::Begin)?;
         let mut statements = Vec::new();
         while *self.current_token() != Token::End && *self.current_token() != Token::Eof {
+            if *self.current_token() == Token::Semicolon {
+                self.advance();
+                continue;
+            }
+
             let stmt = self.parse_statement()?;
             statements.push(stmt);
             if *self.current_token() == Token::Semicolon {
                 self.advance();
+            } else if *self.current_token() != Token::End && *self.current_token() != Token::Eof {
+                return Err(RustqlError::ParseError(format!(
+                    "Expected semicolon or END in DO block, found {:?}",
+                    self.current_token()
+                )));
             }
         }
         self.consume(Token::End)?;
         Ok(Statement::Do { statements })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lexer::tokenize;
+    use crate::parser::parse;
+
+    fn parse_sql(sql: &str) -> Result<Statement, RustqlError> {
+        parse(tokenize(sql).expect("SQL should lex"))
+    }
+
+    #[test]
+    fn do_block_requires_statement_separators() {
+        let error = parse_sql("DO BEGIN SELECT 1 SELECT 2 END")
+            .expect_err("DO block should reject adjacent statements without separators");
+
+        assert!(
+            error
+                .to_string()
+                .contains("Expected semicolon or END in DO block")
+        );
+    }
+
+    #[test]
+    fn do_block_allows_empty_and_trailing_statements() {
+        let statement = parse_sql("DO BEGIN ; SELECT 1;; SELECT 2; END")
+            .expect("DO block should allow empty and trailing statement slots");
+
+        let Statement::Do { statements } = statement else {
+            panic!("expected DO statement");
+        };
+        assert_eq!(statements.len(), 2);
     }
 }
