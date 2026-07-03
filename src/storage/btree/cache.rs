@@ -12,8 +12,8 @@ pub(super) struct PageCache {
 impl PageCache {
     pub(super) fn new() -> Self {
         PageCache {
-            pages: HashMap::new(),
-            access_order: VecDeque::new(),
+            pages: HashMap::with_capacity(MAX_CACHE_SIZE),
+            access_order: VecDeque::with_capacity(MAX_CACHE_SIZE),
             hits: 0,
             misses: 0,
         }
@@ -169,5 +169,13 @@ mod tests {
         assert!(!cache.pages.contains_key(&1));
         assert!(cache.pages.contains_key(&(MAX_CACHE_SIZE as u64)));
         assert_eq!(cache.stats(), (1, 0, MAX_CACHE_SIZE));
+    }
+
+    #[test]
+    fn page_cache_preallocates_for_cache_limit() {
+        let cache = PageCache::new();
+
+        assert!(cache.pages.capacity() >= MAX_CACHE_SIZE);
+        assert!(cache.access_order.capacity() >= MAX_CACHE_SIZE);
     }
 }

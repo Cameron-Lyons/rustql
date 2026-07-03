@@ -1,7 +1,10 @@
 use super::*;
 
 impl<'a> QueryPlanner<'a> {
-    pub(super) fn plan_constant_select(&self, stmt: &SelectStatement) -> PlanNode {
+    pub(super) fn plan_constant_select(
+        &self,
+        stmt: &SelectStatement,
+    ) -> Result<PlanNode, RustqlError> {
         let mut plan = PlanNode::OneRow {
             cost: 0.01,
             rows: 1,
@@ -10,6 +13,12 @@ impl<'a> QueryPlanner<'a> {
         if let Some(ref where_clause) = stmt.where_clause {
             plan = self.plan_filter(plan, where_clause.clone());
         }
+
+        let planned_order_by = stmt
+            .order_by
+            .as_ref()
+            .map(|order_by| self.resolve_order_by_aliases(stmt, order_by))
+            .transpose()?;
 
         let (limit, with_ties) = match stmt.fetch.as_ref() {
             Some(fetch) => (fetch.count, fetch.with_ties),
@@ -22,11 +31,11 @@ impl<'a> QueryPlanner<'a> {
                 limit,
                 offset,
                 with_ties,
-                stmt.order_by.clone().unwrap_or_default(),
+                planned_order_by.unwrap_or_default(),
             );
         }
 
-        plan
+        Ok(plan)
     }
 
     pub(super) fn plan_filter(&self, input: PlanNode, condition: Expression) -> PlanNode {
@@ -117,13 +126,8 @@ impl<'a> QueryPlanner<'a> {
         let input_rows = self.estimate_rows(&input);
         let base_cost = self.estimate_cost(&input);
 
-        let grouping_multiplier = grouping_sets
-            .as_ref()
-            .map(|sets| sets.len().max(1))
-            .unwrap_or(1);
-        let output_rows = ((input_rows as f64 * AGGREGATE_GROUP_OUTPUT_SELECTIVITY).max(1.0)
-            as usize)
-            * grouping_multiplier;
+        let output_rows =
+            estimate_aggregate_output_rows(input_rows, &group_by, grouping_sets.as_deref());
         let cost = self.estimate_aggregate_cost(input_rows, group_by.len(), aggregates.len());
 
         PlanNode::Aggregate {
@@ -135,5 +139,91 @@ impl<'a> QueryPlanner<'a> {
             cost: base_cost + cost,
             rows: output_rows,
         }
+    }
+}
+
+fn estimate_aggregate_output_rows(
+    input_rows: usize,
+    group_by: &[Expression],
+    grouping_sets: Option<&[Vec<Expression>]>,
+) -> usize {
+    if input_rows == 0 {
+        return match grouping_sets {
+            Some(sets) => sets.iter().filter(|set| set.is_empty()).count(),
+            None if group_by.is_empty() => 1,
+            None => 0,
+        };
+    }
+
+    let grouping_multiplier = grouping_sets.map(|sets| sets.len().max(1)).unwrap_or(1);
+    ((input_rows as f64 * AGGREGATE_GROUP_OUTPUT_SELECTIVITY).max(1.0) as usize)
+        * grouping_multiplier
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::database::Database;
+
+    fn empty_input() -> PlanNode {
+        PlanNode::SeqScan {
+            table: "items".to_string(),
+            output_label: None,
+            filter: None,
+            cost: 0.0,
+            rows: 0,
+        }
+    }
+
+    fn aggregate_rows(plan: PlanNode) -> usize {
+        match plan {
+            PlanNode::Aggregate { rows, .. } => rows,
+            other => panic!("expected aggregate plan, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn grouped_aggregate_over_empty_input_estimates_zero_rows() {
+        let db = Database::new();
+        let planner = QueryPlanner::new(&db);
+
+        let plan = planner.plan_aggregate(
+            empty_input(),
+            vec![Expression::Column("category".to_string())],
+            None,
+            Vec::new(),
+            None,
+        );
+
+        assert_eq!(aggregate_rows(plan), 0);
+    }
+
+    #[test]
+    fn global_aggregate_over_empty_input_estimates_single_row() {
+        let db = Database::new();
+        let planner = QueryPlanner::new(&db);
+
+        let plan = planner.plan_aggregate(empty_input(), Vec::new(), None, Vec::new(), None);
+
+        assert_eq!(aggregate_rows(plan), 1);
+    }
+
+    #[test]
+    fn empty_grouping_set_over_empty_input_estimates_single_row() {
+        let db = Database::new();
+        let planner = QueryPlanner::new(&db);
+
+        let plan = planner.plan_aggregate(
+            empty_input(),
+            vec![Expression::Column("category".to_string())],
+            Some(vec![
+                vec![Expression::Column("category".to_string())],
+                vec![],
+            ]),
+            Vec::new(),
+            None,
+        );
+
+        assert_eq!(aggregate_rows(plan), 1);
     }
 }

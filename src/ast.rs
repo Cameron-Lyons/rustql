@@ -1,3 +1,4 @@
+use serde::de::{self, EnumAccess, VariantAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use std::{cmp::Ordering, fmt};
 
@@ -592,7 +593,7 @@ pub enum UnaryOperator {
     Minus,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub enum Value {
     Null,
     Integer(i64),
@@ -602,6 +603,175 @@ pub enum Value {
     Date(String),
     Time(String),
     DateTime(String),
+}
+
+const VALUE_VARIANTS: &[&str] = &[
+    "Null", "Integer", "Float", "Text", "Boolean", "Date", "Time", "DateTime",
+];
+
+impl Serialize for Value {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            Value::Null => serializer.serialize_unit_variant("Value", 0, "Null"),
+            Value::Integer(value) => {
+                serializer.serialize_newtype_variant("Value", 1, "Integer", value)
+            }
+            Value::Float(value) => {
+                let value = format!("{value:?}");
+                serializer.serialize_newtype_variant("Value", 2, "Float", &value)
+            }
+            Value::Text(value) => serializer.serialize_newtype_variant("Value", 3, "Text", value),
+            Value::Boolean(value) => {
+                serializer.serialize_newtype_variant("Value", 4, "Boolean", value)
+            }
+            Value::Date(value) => serializer.serialize_newtype_variant("Value", 5, "Date", value),
+            Value::Time(value) => serializer.serialize_newtype_variant("Value", 6, "Time", value),
+            Value::DateTime(value) => {
+                serializer.serialize_newtype_variant("Value", 7, "DateTime", value)
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Value {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_enum("Value", VALUE_VARIANTS, ValueVisitor)
+    }
+}
+
+struct ValueVisitor;
+
+impl<'de> Visitor<'de> for ValueVisitor {
+    type Value = Value;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a SQL value")
+    }
+
+    fn visit_enum<A>(self, data: A) -> Result<Self::Value, A::Error>
+    where
+        A: EnumAccess<'de>,
+    {
+        let (variant, value) = data.variant::<ValueVariant>()?;
+        match variant {
+            ValueVariant::Null => {
+                value.unit_variant()?;
+                Ok(Value::Null)
+            }
+            ValueVariant::Integer => Ok(Value::Integer(value.newtype_variant::<i64>()?)),
+            ValueVariant::Float => Ok(Value::Float(value.newtype_variant::<StoredFloat>()?.0)),
+            ValueVariant::Text => Ok(Value::Text(value.newtype_variant::<String>()?)),
+            ValueVariant::Boolean => Ok(Value::Boolean(value.newtype_variant::<bool>()?)),
+            ValueVariant::Date => Ok(Value::Date(value.newtype_variant::<String>()?)),
+            ValueVariant::Time => Ok(Value::Time(value.newtype_variant::<String>()?)),
+            ValueVariant::DateTime => Ok(Value::DateTime(value.newtype_variant::<String>()?)),
+        }
+    }
+}
+
+enum ValueVariant {
+    Null,
+    Integer,
+    Float,
+    Text,
+    Boolean,
+    Date,
+    Time,
+    DateTime,
+}
+
+impl<'de> Deserialize<'de> for ValueVariant {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_identifier(ValueVariantVisitor)
+    }
+}
+
+struct ValueVariantVisitor;
+
+impl<'de> Visitor<'de> for ValueVariantVisitor {
+    type Value = ValueVariant;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a SQL value variant")
+    }
+
+    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        match value {
+            "Null" => Ok(ValueVariant::Null),
+            "Integer" => Ok(ValueVariant::Integer),
+            "Float" => Ok(ValueVariant::Float),
+            "Text" => Ok(ValueVariant::Text),
+            "Boolean" => Ok(ValueVariant::Boolean),
+            "Date" => Ok(ValueVariant::Date),
+            "Time" => Ok(ValueVariant::Time),
+            "DateTime" => Ok(ValueVariant::DateTime),
+            _ => Err(de::Error::unknown_variant(value, VALUE_VARIANTS)),
+        }
+    }
+}
+
+struct StoredFloat(f64);
+
+impl<'de> Deserialize<'de> for StoredFloat {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_any(StoredFloatVisitor)
+    }
+}
+
+struct StoredFloatVisitor;
+
+impl<'de> Visitor<'de> for StoredFloatVisitor {
+    type Value = StoredFloat;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a float as a number or round-trippable string")
+    }
+
+    fn visit_f64<E>(self, value: f64) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        Ok(StoredFloat(value))
+    }
+
+    fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        Ok(StoredFloat(value as f64))
+    }
+
+    fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        Ok(StoredFloat(value as f64))
+    }
+
+    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        value
+            .parse::<f64>()
+            .map(StoredFloat)
+            .map_err(de::Error::custom)
+    }
 }
 
 impl Value {
