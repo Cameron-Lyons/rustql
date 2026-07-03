@@ -13,8 +13,8 @@ mod value;
 
 pub(crate) use cast::coerce_value_for_type;
 pub use compare::{
-    apply_arithmetic, compare_order_values, compare_values, compare_values_for_sort,
-    compare_values_same_type, format_value,
+    append_formatted_value, apply_arithmetic, compare_order_values, compare_values,
+    compare_values_for_sort, compare_values_same_type, format_value,
 };
 pub use predicate::{evaluate_expression, evaluate_predicate_value};
 pub(crate) use row_identity::{
