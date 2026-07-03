@@ -47,6 +47,29 @@ fn test_merge_when_matched_update() {
 }
 
 #[test]
+fn test_merge_update_rejects_duplicate_assignment_targets() {
+    let _g = setup();
+    execute_sql("CREATE TABLE merge_update_dups (id INTEGER, val INTEGER)").unwrap();
+    execute_sql("INSERT INTO merge_update_dups VALUES (1, 10)").unwrap();
+    execute_sql("CREATE TABLE merge_update_dup_source (id INTEGER, new_val INTEGER)").unwrap();
+    execute_sql("INSERT INTO merge_update_dup_source VALUES (1, 20)").unwrap();
+
+    let err = execute_sql(
+        "MERGE INTO merge_update_dups USING merge_update_dup_source
+         ON merge_update_dups.id = merge_update_dup_source.id
+         WHEN MATCHED THEN UPDATE SET val = new_val, val = 30",
+    )
+    .unwrap_err();
+    assert!(err.contains("Assignment target 'val' specified more than once"));
+
+    assert_rows(
+        "SELECT id, val FROM merge_update_dups",
+        &["id", "val"],
+        vec![vec![Value::Integer(1), Value::Integer(10)]],
+    );
+}
+
+#[test]
 fn test_merge_when_matched_update_set_default() {
     let _g = setup();
     execute_sql("CREATE TABLE merge_default (id INTEGER, label TEXT DEFAULT 'fallback', qty INTEGER DEFAULT 5)").unwrap();
@@ -236,6 +259,34 @@ fn test_merge_insert_applies_auto_increment_generated_columns_and_indexes() {
         "SELECT id, total FROM merge_insert_runtime WHERE total = 12",
         &["id", "total"],
         vec![vec![Value::Integer(1), Value::Integer(12)]],
+    );
+}
+
+#[test]
+fn test_merge_insert_rejects_auto_increment_overflow() {
+    let _g = setup();
+    execute_sql("CREATE TABLE merge_auto_overflow (id INTEGER AUTO_INCREMENT, label TEXT)")
+        .unwrap();
+    execute_sql("INSERT INTO merge_auto_overflow VALUES (9223372036854775807, 'max')").unwrap();
+    execute_sql("CREATE TABLE merge_auto_overflow_source (label TEXT)").unwrap();
+    execute_sql("INSERT INTO merge_auto_overflow_source VALUES ('next')").unwrap();
+
+    let err = execute_sql(
+        "MERGE INTO merge_auto_overflow USING merge_auto_overflow_source
+         ON merge_auto_overflow.label = merge_auto_overflow_source.label
+         WHEN NOT MATCHED THEN INSERT (label)
+         VALUES (merge_auto_overflow_source.label)",
+    )
+    .unwrap_err();
+
+    assert!(err.contains("AUTO_INCREMENT value overflow"), "{err}");
+    assert_rows(
+        "SELECT id, label FROM merge_auto_overflow",
+        &["id", "label"],
+        vec![vec![
+            Value::Integer(i64::MAX),
+            Value::Text("max".to_string()),
+        ]],
     );
 }
 
@@ -650,6 +701,21 @@ fn test_from_values_single_column() {
 }
 
 #[test]
+fn test_from_values_rejects_extra_column_aliases() {
+    let _g = setup();
+    let result = execute_sql("SELECT * FROM (VALUES (1, 'Alice')) AS t(id, name, extra)");
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("too many columns"));
+}
+
+#[test]
+fn test_from_values_allows_partial_column_aliases() {
+    let _g = setup();
+    let result = execute_sql("SELECT id, column2 FROM (VALUES (1, 'Alice')) AS t(id)").unwrap();
+    assert!(result.contains("Alice"), "got: {:?}", result);
+}
+
+#[test]
 fn test_partial_index() {
     let _g = setup();
     execute_sql("CREATE TABLE pidx_test (id INTEGER, status TEXT, val INTEGER)").unwrap();
@@ -877,6 +943,24 @@ fn test_scalar_gcd_zero() {
 }
 
 #[test]
+fn test_scalar_gcd_minimum_integer_with_unit() {
+    let _g = setup();
+    let result = execute_sql("SELECT GCD(-9223372036854775808, 1) AS val").unwrap();
+    assert!(
+        result.contains("1"),
+        "Expected gcd(i64::MIN,1)=1, got: {:?}",
+        result
+    );
+}
+
+#[test]
+fn test_scalar_gcd_rejects_unrepresentable_result() {
+    let _g = setup();
+    let error = execute_sql("SELECT GCD(-9223372036854775808, 0) AS val").unwrap_err();
+    assert!(error.contains("GCD result is outside the i64 range"));
+}
+
+#[test]
 fn test_scalar_lcm() {
     let _g = setup();
     let result = execute_sql("SELECT LCM(4, 6) AS val").unwrap();
@@ -896,6 +980,13 @@ fn test_scalar_lcm_zero() {
         "Expected lcm(0,0)=0, got: {:?}",
         result
     );
+}
+
+#[test]
+fn test_scalar_lcm_rejects_unrepresentable_result() {
+    let _g = setup();
+    let error = execute_sql("SELECT LCM(9223372036854775807, 2) AS val").unwrap_err();
+    assert!(error.contains("LCM result is outside the i64 range"));
 }
 
 #[test]

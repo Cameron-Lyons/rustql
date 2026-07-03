@@ -134,39 +134,44 @@ fn compute_windowed_aggregate(
     let default_expr = Expression::Column("*".to_string());
     let expr = args.first().unwrap_or(&default_expr);
 
-    let frame_len = frame_end - frame_start + 1;
-    let mut values: Vec<Value> = Vec::with_capacity(frame_len);
-    for &row_idx in &sorted_indices[frame_start..=frame_end] {
-        let val = evaluate_value_expression(expr, columns, rows[row_idx]).unwrap_or(Value::Null);
-        values.push(val);
-    }
+    let frame_indices = &sorted_indices[frame_start..=frame_end];
 
     match agg_type {
         AggregateFunctionType::Count => {
             if matches!(expr, Expression::Column(name) if name == "*") {
-                Value::Integer(values.len() as i64)
+                Value::Integer(frame_indices.len() as i64)
             } else {
-                let count = values.iter().filter(|v| !matches!(v, Value::Null)).count();
+                let count = frame_indices
+                    .iter()
+                    .filter(|&&row_idx| {
+                        !matches!(
+                            evaluate_value_expression(expr, columns, rows[row_idx])
+                                .unwrap_or(Value::Null),
+                            Value::Null
+                        )
+                    })
+                    .count();
                 Value::Integer(count as i64)
             }
         }
         AggregateFunctionType::Sum => {
-            let nums = numeric_values(&values);
-            if nums.is_empty() {
+            let summary = numeric_summary_for_frame(expr, rows, frame_indices, columns);
+            if summary.is_empty() {
                 Value::Null
             } else {
-                Value::Float(nums.iter().sum())
+                Value::Float(summary.sum)
             }
         }
         AggregateFunctionType::Avg => {
-            let nums = numeric_values(&values);
-            if nums.is_empty() {
+            let summary = numeric_summary_for_frame(expr, rows, frame_indices, columns);
+            if summary.is_empty() {
                 Value::Null
             } else {
-                Value::Float(nums.iter().sum::<f64>() / nums.len() as f64)
+                Value::Float(summary.average())
             }
         }
         AggregateFunctionType::Min => {
+            let values = frame_values(expr, rows, frame_indices, columns);
             let mut min_val: Option<Value> = None;
             for val in values {
                 if matches!(&val, Value::Null) {
@@ -186,6 +191,7 @@ fn compute_windowed_aggregate(
             min_val.unwrap_or(Value::Null)
         }
         AggregateFunctionType::Max => {
+            let values = frame_values(expr, rows, frame_indices, columns);
             let mut max_val: Option<Value> = None;
             for val in values {
                 if matches!(&val, Value::Null) {
@@ -205,22 +211,23 @@ fn compute_windowed_aggregate(
             max_val.unwrap_or(Value::Null)
         }
         AggregateFunctionType::Variance => {
-            let nums = numeric_values(&values);
-            if nums.is_empty() {
+            let summary = numeric_summary_for_frame(expr, rows, frame_indices, columns);
+            if summary.is_empty() {
                 Value::Null
             } else {
-                Value::Float(variance(&nums))
+                Value::Float(summary.variance())
             }
         }
         AggregateFunctionType::Stddev => {
-            let nums = numeric_values(&values);
-            if nums.is_empty() {
+            let summary = numeric_summary_for_frame(expr, rows, frame_indices, columns);
+            if summary.is_empty() {
                 Value::Null
             } else {
-                Value::Float(variance(&nums).sqrt())
+                Value::Float(summary.variance().sqrt())
             }
         }
         AggregateFunctionType::GroupConcat => {
+            let values = frame_values(expr, rows, frame_indices, columns);
             let parts: Vec<String> = values
                 .iter()
                 .filter(|v| !matches!(v, Value::Null))
@@ -233,6 +240,7 @@ fn compute_windowed_aggregate(
             }
         }
         AggregateFunctionType::BoolAnd => {
+            let values = frame_values(expr, rows, frame_indices, columns);
             let mut result = true;
             let mut has_value = false;
             for val in &values {
@@ -260,6 +268,7 @@ fn compute_windowed_aggregate(
             }
         }
         AggregateFunctionType::BoolOr => {
+            let values = frame_values(expr, rows, frame_indices, columns);
             let mut result = false;
             let mut has_value = false;
             for val in &values {
@@ -287,6 +296,7 @@ fn compute_windowed_aggregate(
             }
         }
         AggregateFunctionType::Median => {
+            let values = frame_values(expr, rows, frame_indices, columns);
             let mut nums = numeric_values(&values);
             if nums.is_empty() {
                 return Value::Null;
@@ -300,6 +310,7 @@ fn compute_windowed_aggregate(
             }
         }
         AggregateFunctionType::Mode => {
+            let values = frame_values(expr, rows, frame_indices, columns);
             let mut counts: BTreeMap<Value, (usize, usize)> = BTreeMap::new();
             let mut seen_order = 0usize;
             for val in values {
@@ -327,6 +338,7 @@ fn compute_windowed_aggregate(
             best.map(|(val, _, _)| val).unwrap_or(Value::Null)
         }
         AggregateFunctionType::PercentileCont => {
+            let values = frame_values(expr, rows, frame_indices, columns);
             let mut nums = numeric_values(&values);
             if nums.is_empty() {
                 return Value::Null;
@@ -348,6 +360,7 @@ fn compute_windowed_aggregate(
             }
         }
         AggregateFunctionType::PercentileDisc => {
+            let values = frame_values(expr, rows, frame_indices, columns);
             let mut sorted_vals: Vec<Value> = values
                 .into_iter()
                 .filter(|v| !matches!(v, Value::Null))
@@ -364,6 +377,68 @@ fn compute_windowed_aggregate(
     }
 }
 
+fn frame_values(
+    expr: &Expression,
+    rows: &[&Vec<Value>],
+    frame_indices: &[usize],
+    columns: &[ColumnDefinition],
+) -> Vec<Value> {
+    frame_indices
+        .iter()
+        .map(|&row_idx| {
+            evaluate_value_expression(expr, columns, rows[row_idx]).unwrap_or(Value::Null)
+        })
+        .collect()
+}
+
+#[derive(Default)]
+struct NumericSummary {
+    count: usize,
+    sum: f64,
+    mean: f64,
+    m2: f64,
+}
+
+impl NumericSummary {
+    fn push(&mut self, value: f64) {
+        self.count += 1;
+        self.sum += value;
+        let delta = value - self.mean;
+        self.mean += delta / self.count as f64;
+        let delta2 = value - self.mean;
+        self.m2 += delta * delta2;
+    }
+
+    fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    fn average(&self) -> f64 {
+        self.sum / self.count as f64
+    }
+
+    fn variance(&self) -> f64 {
+        self.m2 / self.count as f64
+    }
+}
+
+fn numeric_summary_for_frame(
+    expr: &Expression,
+    rows: &[&Vec<Value>],
+    frame_indices: &[usize],
+    columns: &[ColumnDefinition],
+) -> NumericSummary {
+    let mut summary = NumericSummary::default();
+    for &row_idx in frame_indices {
+        match evaluate_value_expression(expr, columns, rows[row_idx]).unwrap_or(Value::Null) {
+            Value::Integer(n) => summary.push(n as f64),
+            Value::Float(f) => summary.push(f),
+            _ => {}
+        }
+    }
+    summary
+}
+
 fn numeric_values(values: &[Value]) -> Vec<f64> {
     values
         .iter()
@@ -375,9 +450,50 @@ fn numeric_values(values: &[Value]) -> Vec<f64> {
         .collect()
 }
 
-fn variance(nums: &[f64]) -> f64 {
-    let mean = nums.iter().sum::<f64>() / nums.len() as f64;
-    nums.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / nums.len() as f64
+fn evaluate_non_negative_window_arg(
+    name: &str,
+    args: &[Expression],
+    arg_idx: usize,
+    default: usize,
+    columns: &[ColumnDefinition],
+    row: &[Value],
+) -> Result<usize, RustqlError> {
+    let Some(expr) = args.get(arg_idx) else {
+        return Ok(default);
+    };
+
+    match evaluate_value_expression(expr, columns, row)? {
+        Value::Integer(value) if value >= 0 => Ok(value as usize),
+        Value::Integer(_) => Err(RustqlError::TypeMismatch(format!(
+            "{name} offset cannot be negative"
+        ))),
+        _ => Err(RustqlError::TypeMismatch(format!(
+            "{name} offset must be an integer"
+        ))),
+    }
+}
+
+fn evaluate_positive_window_arg(
+    name: &str,
+    args: &[Expression],
+    arg_idx: usize,
+    default: usize,
+    columns: &[ColumnDefinition],
+    row: &[Value],
+) -> Result<usize, RustqlError> {
+    let Some(expr) = args.get(arg_idx) else {
+        return Ok(default);
+    };
+
+    match evaluate_value_expression(expr, columns, row)? {
+        Value::Integer(value) if value > 0 => Ok(value as usize),
+        Value::Integer(_) => Err(RustqlError::TypeMismatch(format!(
+            "{name} argument must be positive"
+        ))),
+        _ => Err(RustqlError::TypeMismatch(format!(
+            "{name} argument must be an integer"
+        ))),
+    }
 }
 
 fn evaluate_window_function_outputs(
@@ -474,21 +590,12 @@ fn evaluate_window_function_outputs(
                         }
                     }
                     WindowFunctionType::Lag => {
-                        let offset = if args.len() > 1 {
-                            match evaluate_value_expression(
-                                &args[1],
-                                columns,
-                                rows[sorted_indices[0]],
-                            ) {
-                                Ok(Value::Integer(n)) => n as usize,
-                                _ => 1,
-                            }
-                        } else {
-                            1
-                        };
+                        let first_row = rows[sorted_indices[0]];
+                        let offset = evaluate_non_negative_window_arg(
+                            "LAG", args, 1, 1, columns, first_row,
+                        )?;
                         let default_val = if args.len() > 2 {
-                            evaluate_value_expression(&args[2], columns, rows[sorted_indices[0]])
-                                .unwrap_or(Value::Null)
+                            evaluate_value_expression(&args[2], columns, first_row)?
                         } else {
                             Value::Null
                         };
@@ -508,21 +615,12 @@ fn evaluate_window_function_outputs(
                         }
                     }
                     WindowFunctionType::Lead => {
-                        let offset = if args.len() > 1 {
-                            match evaluate_value_expression(
-                                &args[1],
-                                columns,
-                                rows[sorted_indices[0]],
-                            ) {
-                                Ok(Value::Integer(n)) => n as usize,
-                                _ => 1,
-                            }
-                        } else {
-                            1
-                        };
+                        let first_row = rows[sorted_indices[0]];
+                        let offset = evaluate_non_negative_window_arg(
+                            "LEAD", args, 1, 1, columns, first_row,
+                        )?;
                         let default_val = if args.len() > 2 {
-                            evaluate_value_expression(&args[2], columns, rows[sorted_indices[0]])
-                                .unwrap_or(Value::Null)
+                            evaluate_value_expression(&args[2], columns, first_row)?
                         } else {
                             Value::Null
                         };
@@ -543,18 +641,14 @@ fn evaluate_window_function_outputs(
                         }
                     }
                     WindowFunctionType::Ntile => {
-                        let n = if !args.is_empty() {
-                            match evaluate_value_expression(
-                                &args[0],
-                                columns,
-                                rows[sorted_indices[0]],
-                            ) {
-                                Ok(Value::Integer(v)) => v.max(1) as usize,
-                                _ => 1,
-                            }
-                        } else {
-                            1
-                        };
+                        let n = evaluate_positive_window_arg(
+                            "NTILE",
+                            args,
+                            0,
+                            1,
+                            columns,
+                            rows[sorted_indices[0]],
+                        )?;
                         let total = sorted_indices.len();
                         for (i, &idx) in sorted_indices.iter().enumerate() {
                             let bucket = (i * n / total) + 1;
@@ -600,18 +694,14 @@ fn evaluate_window_function_outputs(
                         }
                     }
                     WindowFunctionType::NthValue => {
-                        let n = if args.len() > 1 {
-                            match evaluate_value_expression(
-                                &args[1],
-                                columns,
-                                rows[sorted_indices[0]],
-                            ) {
-                                Ok(Value::Integer(v)) => v.max(1) as usize,
-                                _ => 1,
-                            }
-                        } else {
-                            1
-                        };
+                        let n = evaluate_positive_window_arg(
+                            "NTH_VALUE",
+                            args,
+                            1,
+                            1,
+                            columns,
+                            rows[sorted_indices[0]],
+                        )?;
                         let has_order_by = !order_by.is_empty();
                         for (pos, &idx) in sorted_indices.iter().enumerate() {
                             let (frame_start, frame_end) = resolve_frame_bounds(

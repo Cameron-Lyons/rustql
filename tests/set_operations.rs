@@ -145,6 +145,24 @@ fn test_except_all() {
 }
 
 #[test]
+fn test_set_all_duplicate_counts() {
+    let _guard = setup_test();
+    execute_sql("CREATE TABLE t1 (val INTEGER)").unwrap();
+    execute_sql("CREATE TABLE t2 (val INTEGER)").unwrap();
+    execute_sql("INSERT INTO t1 VALUES (1), (1), (2), (2), (2), (3)").unwrap();
+    execute_sql("INSERT INTO t2 VALUES (1), (2), (2), (4)").unwrap();
+
+    let intersect_rows = query_rows("SELECT val FROM t1 INTERSECT ALL SELECT val FROM t2").unwrap();
+    assert_eq!(integer_counts(&intersect_rows.rows), vec![(1, 1), (2, 2)]);
+
+    let except_rows = query_rows("SELECT val FROM t1 EXCEPT ALL SELECT val FROM t2").unwrap();
+    assert_eq!(
+        integer_counts(&except_rows.rows),
+        vec![(1, 1), (2, 1), (3, 1)]
+    );
+}
+
+#[test]
 fn test_set_ops_with_order_by() {
     let _guard = setup_test();
     execute_sql("CREATE TABLE t1 (id INTEGER)").unwrap();
@@ -231,4 +249,14 @@ fn test_all_set_operations_use_numeric_counts() {
             vec![Value::Integer(2)],
         ]
     );
+}
+
+fn integer_counts(rows: &[Vec<Value>]) -> Vec<(i64, usize)> {
+    let mut counts = std::collections::BTreeMap::new();
+    for row in rows {
+        if let Some(Value::Integer(value)) = row.first() {
+            *counts.entry(*value).or_insert(0) += 1;
+        }
+    }
+    counts.into_iter().collect()
 }
