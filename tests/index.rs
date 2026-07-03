@@ -1,5 +1,6 @@
 mod common;
 use common::*;
+use rustql::ast::Value;
 use std::sync::Mutex;
 
 static TEST_MUTEX: Mutex<()> = Mutex::new(());
@@ -91,4 +92,41 @@ fn test_index_maintenance_on_delete() {
     let result = execute_sql("SELECT * FROM users WHERE age = 30");
     assert!(result.is_ok());
     assert!(result.unwrap().contains("Bob"));
+}
+
+#[test]
+fn test_indexed_delete_returning_removes_index_entries() {
+    let _guard = setup_test();
+    execute_sql("CREATE TABLE indexed_delete_ret (id INTEGER, name TEXT)").unwrap();
+    execute_sql(
+        "INSERT INTO indexed_delete_ret VALUES
+            (1, 'one'), (2, 'two'), (3, 'three'), (4, 'four')",
+    )
+    .unwrap();
+    execute_sql("CREATE INDEX idx_indexed_delete_ret_id ON indexed_delete_ret (id)").unwrap();
+
+    let deleted =
+        query_rows("DELETE FROM indexed_delete_ret WHERE id IN (2, 4) RETURNING id, name").unwrap();
+    deleted.assert_columns(&["id", "name"]);
+    assert_eq!(
+        deleted.rows,
+        vec![
+            vec![Value::Integer(2), Value::Text("two".to_string())],
+            vec![Value::Integer(4), Value::Text("four".to_string())],
+        ]
+    );
+
+    assert_rows(
+        "SELECT id, name FROM indexed_delete_ret ORDER BY id",
+        &["id", "name"],
+        vec![
+            vec![Value::Integer(1), Value::Text("one".to_string())],
+            vec![Value::Integer(3), Value::Text("three".to_string())],
+        ],
+    );
+    assert_rows(
+        "SELECT id, name FROM indexed_delete_ret WHERE id IN (2, 4) ORDER BY id",
+        &["id", "name"],
+        vec![],
+    );
 }

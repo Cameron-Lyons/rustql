@@ -135,6 +135,21 @@ fn test_explain_fetch_with_ties() {
 }
 
 #[test]
+fn test_explain_empty_sort_has_finite_cost() {
+    let _guard = setup_test();
+
+    execute_sql("CREATE TABLE empty_scores (id INTEGER, score INTEGER)").unwrap();
+
+    let result = execute_sql("EXPLAIN SELECT id FROM empty_scores ORDER BY score");
+    assert!(result.is_ok());
+    let plan_str = result.unwrap();
+
+    assert!(plan_str.contains("Sort"));
+    assert!(!plan_str.contains("NaN"));
+    assert!(!plan_str.contains("inf"));
+}
+
+#[test]
 fn test_explain_generate_series() {
     let _guard = setup_test();
 

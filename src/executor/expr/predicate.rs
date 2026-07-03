@@ -382,61 +382,66 @@ enum LikePatternToken {
 }
 
 fn match_like(text: &str, pattern: &str, escape: Option<char>) -> Result<bool, RustqlError> {
-    let text_chars: Vec<char> = text.chars().collect();
     let pattern_tokens = compile_like_pattern(pattern, escape)?;
-    let mut memo = vec![vec![None; pattern_tokens.len() + 1]; text_chars.len() + 1];
+    let mut text_idx = 0;
+    let mut pattern_idx = 0;
+    let mut last_percent_pattern_idx = None;
+    let mut last_percent_text_idx = 0;
 
-    fn match_pattern(
-        text: &[char],
-        pattern: &[LikePatternToken],
-        text_idx: usize,
-        pattern_idx: usize,
-        memo: &mut [Vec<Option<bool>>],
-    ) -> bool {
-        let text_len = text.len();
-        let pattern_len = pattern.len();
-
-        if let Some(result) = memo[text_idx][pattern_idx] {
-            return result;
-        }
-
-        if pattern_idx == pattern_len {
-            let result = text_idx == text_len;
-            memo[text_idx][pattern_idx] = Some(result);
-            return result;
-        }
-
-        let result = match pattern[pattern_idx] {
-            LikePatternToken::AnySequence => {
-                if pattern_idx + 1 == pattern_len {
-                    true
+    while text_idx < text.len() {
+        match pattern_tokens.get(pattern_idx) {
+            Some(LikePatternToken::AnySequence) => {
+                pattern_idx += 1;
+                last_percent_pattern_idx = Some(pattern_idx);
+                last_percent_text_idx = text_idx;
+            }
+            Some(LikePatternToken::AnySingle) => {
+                let Some((_, next_text_idx)) = next_char(text, text_idx) else {
+                    return Ok(false);
+                };
+                text_idx = next_text_idx;
+                pattern_idx += 1;
+            }
+            Some(LikePatternToken::Literal(ch)) => {
+                if let Some((text_ch, next_text_idx)) = next_char(text, text_idx)
+                    && text_ch == *ch
+                {
+                    text_idx = next_text_idx;
+                    pattern_idx += 1;
+                } else if let Some(retry_pattern_idx) = last_percent_pattern_idx {
+                    let Some((_, next_text_idx)) = next_char(text, last_percent_text_idx) else {
+                        return Ok(false);
+                    };
+                    last_percent_text_idx = next_text_idx;
+                    text_idx = last_percent_text_idx;
+                    pattern_idx = retry_pattern_idx;
                 } else {
-                    let mut matched = false;
-                    for idx in text_idx..=text_len {
-                        if match_pattern(text, pattern, idx, pattern_idx + 1, memo) {
-                            matched = true;
-                            break;
-                        }
-                    }
-                    matched
+                    return Ok(false);
                 }
             }
-            LikePatternToken::AnySingle => {
-                text_idx < text_len
-                    && match_pattern(text, pattern, text_idx + 1, pattern_idx + 1, memo)
+            None => {
+                if let Some(retry_pattern_idx) = last_percent_pattern_idx {
+                    let Some((_, next_text_idx)) = next_char(text, last_percent_text_idx) else {
+                        return Ok(false);
+                    };
+                    last_percent_text_idx = next_text_idx;
+                    text_idx = last_percent_text_idx;
+                    pattern_idx = retry_pattern_idx;
+                } else {
+                    return Ok(false);
+                }
             }
-            LikePatternToken::Literal(ch) => {
-                text_idx < text_len
-                    && text[text_idx] == ch
-                    && match_pattern(text, pattern, text_idx + 1, pattern_idx + 1, memo)
-            }
-        };
-
-        memo[text_idx][pattern_idx] = Some(result);
-        result
+        }
     }
 
-    Ok(match_pattern(&text_chars, &pattern_tokens, 0, 0, &mut memo))
+    while matches!(
+        pattern_tokens.get(pattern_idx),
+        Some(LikePatternToken::AnySequence)
+    ) {
+        pattern_idx += 1;
+    }
+
+    Ok(pattern_idx == pattern_tokens.len())
 }
 
 fn compile_like_pattern(
@@ -467,6 +472,11 @@ fn compile_like_pattern(
     Ok(tokens)
 }
 
+fn next_char(text: &str, idx: usize) -> Option<(char, usize)> {
+    let ch = text.get(idx..)?.chars().next()?;
+    Some((ch, idx + ch.len_utf8()))
+}
+
 fn is_between(val: &Value, lower: &Value, upper: &Value) -> bool {
     match (val, lower, upper) {
         (Value::Integer(v), Value::Integer(l), Value::Integer(u)) => *v >= *l && *v <= *u,
@@ -485,5 +495,36 @@ fn is_between(val: &Value, lower: &Value, upper: &Value) -> bool {
         (Value::Integer(v), Value::Float(l), Value::Float(u)) => *v as f64 >= *l && *v as f64 <= *u,
         (Value::Text(v), Value::Text(l), Value::Text(u)) => v >= l && v <= u,
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::match_like;
+
+    #[test]
+    fn like_matches_literal_and_wildcards() {
+        assert!(match_like("alphabet", "alpha%", None).unwrap());
+        assert!(match_like("alphabet", "%ha%et", None).unwrap());
+        assert!(match_like("alphabet", "a_pha_et", None).unwrap());
+        assert!(!match_like("alphabet", "alpha_", None).unwrap());
+    }
+
+    #[test]
+    fn like_backtracks_after_percent() {
+        assert!(match_like("abbc", "a%bc", None).unwrap());
+        assert!(match_like("abcabc", "%abc", None).unwrap());
+        assert!(!match_like("abcabx", "%abc", None).unwrap());
+    }
+
+    #[test]
+    fn like_underscore_matches_one_unicode_scalar() {
+        let text = "na\u{ef}ve";
+
+        assert!(match_like(text, "na_ve", None).unwrap());
+        assert!(match_like(text, "na%", None).unwrap());
+        assert!(match_like(text, "n%v_", None).unwrap());
+        assert!(match_like(text, "n____", None).unwrap());
+        assert!(!match_like(text, "n_____", None).unwrap());
     }
 }
