@@ -1,5 +1,6 @@
 mod common;
 use common::*;
+use rustql::ast::Value;
 use std::sync::Mutex;
 
 static GLOBAL_TEST_LOCK: Mutex<()> = Mutex::new(());
@@ -53,6 +54,36 @@ fn test_string_agg_alias() {
     execute_sql("INSERT INTO sa_test VALUES (2, 'Bob')").unwrap();
     let result = execute_sql("SELECT STRING_AGG(name, ' | ') AS names FROM sa_test").unwrap();
     assert!(result.contains("Alice | Bob"));
+}
+
+#[test]
+fn test_filtered_aggregates_with_same_input_keep_distinct_outputs() {
+    let _lock = GLOBAL_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    reset_database();
+    execute_sql("CREATE TABLE shared_agg_inputs (val INTEGER, keep INTEGER)").unwrap();
+    execute_sql("INSERT INTO shared_agg_inputs VALUES (10, 1), (20, 1), (10, 1), (99, 0)").unwrap();
+
+    let rows = query_rows(
+        "SELECT
+            COUNT(val) FILTER (WHERE keep = 1),
+            SUM(val) FILTER (WHERE keep = 1),
+            MIN(val) FILTER (WHERE keep = 1),
+            MAX(val) FILTER (WHERE keep = 1),
+            COUNT(DISTINCT val) FILTER (WHERE keep = 1)
+         FROM shared_agg_inputs",
+    )
+    .unwrap();
+
+    assert_eq!(
+        rows.rows,
+        vec![vec![
+            Value::Integer(3),
+            Value::Float(40.0),
+            Value::Integer(10),
+            Value::Integer(20),
+            Value::Integer(2),
+        ]]
+    );
 }
 
 #[test]

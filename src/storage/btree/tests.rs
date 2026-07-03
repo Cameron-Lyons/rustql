@@ -21,6 +21,70 @@ fn remove_storage_artifacts(path: &Path) {
 }
 
 #[test]
+fn btree_page_round_trips_pointer_payloads() {
+    let mut page = BTreePage::new(42, PageKind::Leaf);
+    page.push_entry(BTreeEntry::new(Value::Integer(7), 123));
+    page.push_entry(BTreeEntry::new(Value::Text("alpha".to_string()), 456));
+
+    let bytes = page.to_bytes().expect("page should serialize");
+    let decoded = BTreePage::from_bytes(&bytes).expect("page should deserialize");
+
+    assert_eq!(decoded.header.page_id, 42);
+    assert_eq!(decoded.header.kind, PageKind::Leaf);
+    assert_eq!(decoded.header.entry_count, 2);
+    assert_eq!(decoded.entries.len(), 2);
+    assert_eq!(decoded.entries[0].key, Value::Integer(7));
+    assert_eq!(decoded.entries[0].pointer, 123);
+    assert_eq!(decoded.entries[0].inline_data, None);
+    assert_eq!(decoded.entries[1].key, Value::Text("alpha".to_string()));
+    assert_eq!(decoded.entries[1].pointer, 456);
+    assert_eq!(decoded.entries[1].inline_data, None);
+}
+
+#[test]
+fn btree_page_round_trips_inline_leaf_payloads() {
+    let mut page = BTreePage::new(43, PageKind::Leaf);
+    page.header.reserved = LEAF_INLINE_DATA_FLAG;
+    page.push_entry(BTreeEntry::with_inline_data(
+        Value::Text("row:users:1".to_string()),
+        "[1,\"Alice\"]".to_string(),
+    ));
+
+    let bytes = page.to_bytes().expect("inline page should serialize");
+    let decoded = BTreePage::from_bytes(&bytes).expect("inline page should deserialize");
+
+    assert_eq!(decoded.header.page_id, 43);
+    assert_eq!(decoded.header.kind, PageKind::Leaf);
+    assert_eq!(
+        decoded.header.reserved & LEAF_INLINE_DATA_FLAG,
+        LEAF_INLINE_DATA_FLAG
+    );
+    assert_eq!(decoded.header.entry_count, 1);
+    assert_eq!(
+        decoded.entries[0].key,
+        Value::Text("row:users:1".to_string())
+    );
+    assert_eq!(decoded.entries[0].pointer, 0);
+    assert_eq!(
+        decoded.entries[0].inline_data.as_deref(),
+        Some("[1,\"Alice\"]")
+    );
+}
+
+#[test]
+fn btree_page_rejects_oversized_payloads() {
+    let mut page = BTreePage::new(44, PageKind::Leaf);
+    page.push_entry(BTreeEntry::new(Value::Text("x".repeat(BTREE_PAGE_SIZE)), 0));
+
+    let error = page.to_bytes().expect_err("oversized page should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("BTreePage too large to fit in fixed page size")
+    );
+}
+
+#[test]
 fn btree_storage_round_trip() {
     let temp_path = std::env::temp_dir().join("rustql_btree_test.dat");
 

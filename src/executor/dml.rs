@@ -29,7 +29,7 @@ use generated::{
 
 use super::expr::{
     coerce_value_for_type, evaluate_expression, evaluate_value_expression,
-    evaluate_value_expression_with_db, rows_equal_for_sql_identity, values_equal_for_sql_identity,
+    evaluate_value_expression_with_db, values_equal_for_sql_identity,
 };
 use super::{
     ExecutionContext, SelectResult, command_result, ddl, get_database_read, get_database_write,
