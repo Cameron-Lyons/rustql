@@ -7,7 +7,7 @@ impl<'a> QueryPlanner<'a> {
             | GroupByClause::Rollup(exprs)
             | GroupByClause::Cube(exprs) => exprs.clone(),
             GroupByClause::GroupingSets(sets) => {
-                let mut output = Vec::new();
+                let mut output = Vec::with_capacity(sets.iter().map(Vec::len).sum());
                 for set in sets {
                     for expr in set {
                         if !output.iter().any(|existing| existing == expr) {
@@ -27,7 +27,7 @@ impl<'a> QueryPlanner<'a> {
         match group_by {
             GroupByClause::Simple(_) => None,
             GroupByClause::Rollup(exprs) => {
-                let mut sets = Vec::new();
+                let mut sets = Vec::with_capacity(exprs.len() + 1);
                 for i in (0..=exprs.len()).rev() {
                     sets.push(exprs[..i].to_vec());
                 }
@@ -35,11 +35,12 @@ impl<'a> QueryPlanner<'a> {
             }
             GroupByClause::Cube(exprs) => {
                 let n = exprs.len();
-                let mut sets = Vec::new();
-                for mask in (0..(1u32 << n)).rev() {
-                    let mut set = Vec::new();
+                let set_count = 1usize << n;
+                let mut sets = Vec::with_capacity(set_count);
+                for mask in (0..set_count).rev() {
+                    let mut set = Vec::with_capacity(n);
                     for (i, expr) in exprs.iter().enumerate() {
-                        if mask & (1u32 << (n - 1 - i)) != 0 {
+                        if mask & (1usize << (n - 1 - i)) != 0 {
                             set.push(expr.clone());
                         }
                     }
