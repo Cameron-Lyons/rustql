@@ -51,10 +51,10 @@ impl<'a> PlanExecutor<'a> {
     ) -> Result<ExecutionResult, RustqlError> {
         let mut rows = input.rows;
 
-        if offset < rows.len() {
-            rows = rows.split_off(offset);
-        } else {
+        if offset >= rows.len() {
             rows.clear();
+        } else if offset > 0 {
+            rows.drain(..offset);
         }
 
         if rows.len() > limit {
@@ -68,13 +68,13 @@ impl<'a> PlanExecutor<'a> {
                 )?;
                 let mut extended_limit = limit;
                 while extended_limit < rows.len() {
-                    let values = self.extract_order_values(
+                    if !self.row_matches_order_boundary(
                         order_by,
                         &input.columns,
                         &column_defs,
+                        &boundary_values,
                         &rows[extended_limit],
-                    )?;
-                    if !order_values_equal(&values, &boundary_values) {
+                    )? {
                         break;
                     }
                     extended_limit += 1;
@@ -98,22 +98,7 @@ impl<'a> PlanExecutor<'a> {
         input: ExecutionResult,
         distinct_on: &[Expression],
     ) -> Result<ExecutionResult, RustqlError> {
-        let column_defs: Vec<ColumnDefinition> = input
-            .columns
-            .iter()
-            .map(|name| ColumnDefinition {
-                name: name.clone(),
-                data_type: DataType::Text,
-                nullable: true,
-                primary_key: false,
-                unique: false,
-                default_value: None,
-                foreign_key: None,
-                check: None,
-                auto_increment: false,
-                generated: None,
-            })
-            .collect();
+        let column_defs = column_definitions_from_names(&input.columns);
 
         let mut seen = SqlRowSet::new();
         let mut rows = Vec::with_capacity(input.rows.len());
@@ -288,12 +273,22 @@ impl<'a> PlanExecutor<'a> {
             .map(|order_expr| self.get_sort_value(&order_expr.expr, columns, column_defs, row))
             .collect()
     }
-}
 
-fn order_values_equal(left: &[Value], right: &[Value]) -> bool {
-    left.len() == right.len()
-        && left
-            .iter()
-            .zip(right)
-            .all(|(left, right)| compare_values_for_sort(left, right) == Ordering::Equal)
+    fn row_matches_order_boundary(
+        &self,
+        order_by: &[OrderByExpr],
+        columns: &[String],
+        column_defs: &[ColumnDefinition],
+        boundary_values: &[Value],
+        row: &[Value],
+    ) -> Result<bool, RustqlError> {
+        debug_assert_eq!(order_by.len(), boundary_values.len());
+        for (order_expr, boundary_value) in order_by.iter().zip(boundary_values) {
+            let value = self.get_sort_value(&order_expr.expr, columns, column_defs, row)?;
+            if compare_order_values(&value, boundary_value, order_expr) != Ordering::Equal {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
 }
