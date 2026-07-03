@@ -50,8 +50,8 @@ impl BTreeStorageEngine {
             let mut cache = self.page_cache.write().map_err(|e| {
                 RustqlError::StorageError(format!("Failed to acquire cache write lock: {}", e))
             })?;
-            if let Some(page) = cache.get(&page_id) {
-                return Ok(page.clone());
+            if let Some(page) = cache.get_cloned(page_id) {
+                return Ok(page);
             }
         }
 
