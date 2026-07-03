@@ -171,10 +171,10 @@ impl Engine {
 
     #[allow(deprecated)]
     pub fn open(options: EngineOptions) -> Result<Self, RustqlError> {
-        let (database, storage) = match &options.storage {
+        let (database, storage) = match options.storage {
             StorageMode::Memory => (Database::new(), None),
             StorageMode::Json { path } => {
-                let storage = Arc::new(crate::storage::JsonStorageEngine::new(path.clone()));
+                let storage = Arc::new(crate::storage::JsonStorageEngine::new(path));
                 let database = storage.load()?;
                 (
                     database,
@@ -182,7 +182,7 @@ impl Engine {
                 )
             }
             StorageMode::BTree { path } | StorageMode::Disk { path } => {
-                let storage = Arc::new(crate::storage::BTreeStorageEngine::new(path.clone()));
+                let storage = Arc::new(crate::storage::BTreeStorageEngine::new(path));
                 let database = storage.load()?;
                 (
                     database,

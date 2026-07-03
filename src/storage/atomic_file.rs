@@ -64,11 +64,20 @@ pub(super) fn cleanup_temp_file(temp_path: &Path) {
 
 pub(super) fn atomic_write(path: &Path, data: &[u8]) -> Result<(), RustqlError> {
     let temp_path = storage_temp_path(path);
+    atomic_write_with_temp_path(path, &temp_path, data)
+}
+
+fn atomic_write_with_temp_path(
+    path: &Path,
+    temp_path: &Path,
+    data: &[u8],
+) -> Result<(), RustqlError> {
+    let mut temp_created = false;
     let result = (|| {
         let mut file = fs::OpenOptions::new()
             .create_new(true)
             .write(true)
-            .open(&temp_path)
+            .open(temp_path)
             .map_err(|e| {
                 RustqlError::StorageError(format!(
                     "Failed to create temporary storage file '{}': {}",
@@ -76,6 +85,7 @@ pub(super) fn atomic_write(path: &Path, data: &[u8]) -> Result<(), RustqlError> 
                     e
                 ))
             })?;
+        temp_created = true;
 
         file.write_all(data).map_err(|e| {
             RustqlError::StorageError(format!(
@@ -93,11 +103,58 @@ pub(super) fn atomic_write(path: &Path, data: &[u8]) -> Result<(), RustqlError> 
         })?;
         drop(file);
 
-        rename_synced(&temp_path, path)
+        rename_synced(temp_path, path)
     })();
 
-    if result.is_err() {
-        cleanup_temp_file(&temp_path);
+    if result.is_err() && temp_created {
+        cleanup_temp_file(temp_path);
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io;
+
+    fn unique_test_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "rustql_atomic_file_test_{}_{}_{}",
+            name,
+            std::process::id(),
+            TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&dir).expect("failed to create test directory");
+        dir
+    }
+
+    fn cleanup_test_dir(dir: &Path) {
+        match fs::remove_dir_all(dir) {
+            Ok(()) => {}
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+            Err(err) => panic!(
+                "failed to remove test directory '{}': {}",
+                dir.display(),
+                err
+            ),
+        }
+    }
+
+    #[test]
+    fn atomic_write_preserves_preexisting_temp_file_on_create_collision() {
+        let dir = unique_test_dir("collision");
+        let target_path = dir.join("database.json");
+        let temp_path = dir.join("database.json.tmp");
+        fs::write(&temp_path, b"owned by another writer").expect("failed to seed temp file");
+
+        let result = atomic_write_with_temp_path(&target_path, &temp_path, b"new data");
+
+        assert!(result.is_err());
+        assert_eq!(
+            fs::read(&temp_path).expect("preexisting temp file should remain"),
+            b"owned by another writer"
+        );
+        assert!(!target_path.exists());
+        cleanup_test_dir(&dir);
+    }
 }
