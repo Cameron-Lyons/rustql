@@ -457,28 +457,14 @@ impl Parser {
 
         let limit = if *self.current_token() == Token::Limit {
             self.advance();
-            match self.advance() {
-                Token::Number(n) => Some(n as usize),
-                _ => {
-                    return Err(RustqlError::ParseError(
-                        "Expected number after LIMIT".to_string(),
-                    ));
-                }
-            }
+            Some(self.parse_non_negative_count("LIMIT")?)
         } else {
             None
         };
 
         let offset = if *self.current_token() == Token::Offset {
             self.advance();
-            match self.advance() {
-                Token::Number(n) => Some(n as usize),
-                _ => {
-                    return Err(RustqlError::ParseError(
-                        "Expected number after OFFSET".to_string(),
-                    ));
-                }
-            }
+            Some(self.parse_non_negative_count("OFFSET")?)
         } else {
             None
         };
@@ -488,14 +474,7 @@ impl Parser {
             if *self.current_token() == Token::First || *self.current_token() == Token::Next {
                 self.advance();
             }
-            let count = match self.advance() {
-                Token::Number(n) => n as usize,
-                _ => {
-                    return Err(RustqlError::ParseError(
-                        "Expected number after FETCH FIRST/NEXT".to_string(),
-                    ));
-                }
-            };
+            let count = self.parse_non_negative_count("FETCH FIRST/NEXT")?;
             if *self.current_token() == Token::Row || *self.current_token() == Token::Rows {
                 self.advance();
             }
@@ -579,6 +558,20 @@ impl Parser {
             window_definitions,
             from_values,
         })
+    }
+
+    fn parse_non_negative_count(&mut self, context: &str) -> Result<usize, RustqlError> {
+        match self.advance() {
+            Token::Number(n) if n >= 0 => Ok(n as usize),
+            Token::Number(_) => Err(RustqlError::ParseError(format!(
+                "{} count cannot be negative",
+                context
+            ))),
+            _ => Err(RustqlError::ParseError(format!(
+                "Expected number after {}",
+                context
+            ))),
+        }
     }
 
     pub(super) fn parse_columns(&mut self) -> Result<Vec<Column>, RustqlError> {
