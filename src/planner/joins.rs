@@ -57,8 +57,9 @@ impl<'a> QueryPlanner<'a> {
                 Some(right_label.clone())
             };
 
-            let mut pushable = Vec::new();
-            let mut kept = Vec::new();
+            let predicate_count = remaining_predicates.len();
+            let mut pushable = Vec::with_capacity(predicate_count);
+            let mut kept = Vec::with_capacity(predicate_count);
             for pred in remaining_predicates {
                 let refs = self.referenced_tables(&pred);
                 if can_push_join_predicates

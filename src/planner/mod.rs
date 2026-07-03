@@ -130,8 +130,9 @@ impl<'a> QueryPlanner<'a> {
             if has_outer_join {
                 (None, conjuncts)
             } else {
-                let mut base_preds = Vec::new();
-                let mut rest = Vec::new();
+                let predicate_count = conjuncts.len();
+                let mut base_preds = Vec::with_capacity(predicate_count);
+                let mut rest = Vec::with_capacity(predicate_count);
 
                 for conj in conjuncts {
                     let refs = self.referenced_tables(&conj);
