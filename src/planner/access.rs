@@ -140,7 +140,7 @@ impl<'a> QueryPlanner<'a> {
             self.plan_cte_access(cte_idx, cte, output_label)?
         } else {
             if let Some(table) = db.get_table(source_name) {
-                let stats = self.collect_table_stats(source_name, table, db);
+                let stats = self.collect_table_stats(table);
                 return self.plan_table_access(
                     source_name,
                     table,

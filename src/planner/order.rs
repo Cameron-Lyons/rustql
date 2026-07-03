@@ -5,13 +5,15 @@ impl<'a> QueryPlanner<'a> {
         &self,
         stmt: &SelectStatement,
         order_by: &[OrderByExpr],
-    ) -> Vec<OrderByExpr> {
+    ) -> Result<Vec<OrderByExpr>, RustqlError> {
         order_by
             .iter()
-            .map(|item| OrderByExpr {
-                expr: self.resolve_order_by_alias(stmt, &item.expr),
-                asc: item.asc,
-                nulls_first: item.nulls_first,
+            .map(|item| {
+                Ok(OrderByExpr {
+                    expr: self.resolve_order_by_alias(stmt, &item.expr)?,
+                    asc: item.asc,
+                    nulls_first: item.nulls_first,
+                })
             })
             .collect()
     }
@@ -20,7 +22,7 @@ impl<'a> QueryPlanner<'a> {
         &self,
         stmt: &SelectStatement,
         expr: &Expression,
-    ) -> Expression {
+    ) -> Result<Expression, RustqlError> {
         self.resolve_order_by_expression(stmt, expr, true)
     }
 
@@ -29,48 +31,54 @@ impl<'a> QueryPlanner<'a> {
         stmt: &SelectStatement,
         expr: &Expression,
         allow_ordinal: bool,
-    ) -> Expression {
-        if allow_ordinal
-            && let Expression::Value(Value::Integer(position)) = expr
-            && let Some(resolved) = self.select_ordinal_expression(stmt, *position)
-        {
-            return resolved;
+    ) -> Result<Expression, RustqlError> {
+        if allow_ordinal && let Expression::Value(Value::Integer(position)) = expr {
+            if *position < 1 || *position as usize > self.select_ordinal_count(stmt)? {
+                return Err(RustqlError::ParseError(format!(
+                    "ORDER BY position {} is not in select list",
+                    position
+                )));
+            }
+
+            if let Some(resolved) = self.select_ordinal_expression(stmt, *position) {
+                return Ok(resolved);
+            }
         }
 
         if let Expression::Column(name) = expr
             && let Some(resolved) = self.select_alias_expression(stmt, name)
         {
-            return resolved;
+            return Ok(resolved);
         }
 
-        match expr {
+        Ok(match expr {
             Expression::BinaryOp { left, op, right } => Expression::BinaryOp {
-                left: Box::new(self.resolve_order_by_expression(stmt, left, false)),
+                left: Box::new(self.resolve_order_by_expression(stmt, left, false)?),
                 op: op.clone(),
-                right: Box::new(self.resolve_order_by_expression(stmt, right, false)),
+                right: Box::new(self.resolve_order_by_expression(stmt, right, false)?),
             },
             Expression::UnaryOp { op, expr } => Expression::UnaryOp {
                 op: op.clone(),
-                expr: Box::new(self.resolve_order_by_expression(stmt, expr, false)),
+                expr: Box::new(self.resolve_order_by_expression(stmt, expr, false)?),
             },
             Expression::In { left, values } => Expression::In {
-                left: Box::new(self.resolve_order_by_expression(stmt, left, false)),
+                left: Box::new(self.resolve_order_by_expression(stmt, left, false)?),
                 values: values
                     .iter()
                     .map(|value| self.resolve_order_by_expression(stmt, value, false))
-                    .collect(),
+                    .collect::<Result<Vec<_>, _>>()?,
             },
             Expression::IsNull { expr, not } => Expression::IsNull {
-                expr: Box::new(self.resolve_order_by_expression(stmt, expr, false)),
+                expr: Box::new(self.resolve_order_by_expression(stmt, expr, false)?),
                 not: *not,
             },
             Expression::Any { left, op, subquery } => Expression::Any {
-                left: Box::new(self.resolve_order_by_expression(stmt, left, false)),
+                left: Box::new(self.resolve_order_by_expression(stmt, left, false)?),
                 op: op.clone(),
                 subquery: subquery.clone(),
             },
             Expression::All { left, op, subquery } => Expression::All {
-                left: Box::new(self.resolve_order_by_expression(stmt, left, false)),
+                left: Box::new(self.resolve_order_by_expression(stmt, left, false)?),
                 op: op.clone(),
                 subquery: subquery.clone(),
             },
@@ -79,10 +87,10 @@ impl<'a> QueryPlanner<'a> {
                 args: args
                     .iter()
                     .map(|arg| self.resolve_order_by_expression(stmt, arg, false))
-                    .collect(),
+                    .collect::<Result<Vec<_>, _>>()?,
             },
             Expression::Cast { expr, data_type } => Expression::Cast {
-                expr: Box::new(self.resolve_order_by_expression(stmt, expr, false)),
+                expr: Box::new(self.resolve_order_by_expression(stmt, expr, false)?),
                 data_type: data_type.clone(),
             },
             Expression::Case {
@@ -92,27 +100,35 @@ impl<'a> QueryPlanner<'a> {
             } => Expression::Case {
                 operand: operand
                     .as_ref()
-                    .map(|expr| Box::new(self.resolve_order_by_expression(stmt, expr, false))),
+                    .map(|expr| {
+                        self.resolve_order_by_expression(stmt, expr, false)
+                            .map(Box::new)
+                    })
+                    .transpose()?,
                 when_clauses: when_clauses
                     .iter()
                     .map(|(condition, result)| {
-                        (
-                            self.resolve_order_by_expression(stmt, condition, false),
-                            self.resolve_order_by_expression(stmt, result, false),
-                        )
+                        Ok((
+                            self.resolve_order_by_expression(stmt, condition, false)?,
+                            self.resolve_order_by_expression(stmt, result, false)?,
+                        ))
                     })
-                    .collect(),
+                    .collect::<Result<Vec<_>, RustqlError>>()?,
                 else_clause: else_clause
                     .as_ref()
-                    .map(|expr| Box::new(self.resolve_order_by_expression(stmt, expr, false))),
+                    .map(|expr| {
+                        self.resolve_order_by_expression(stmt, expr, false)
+                            .map(Box::new)
+                    })
+                    .transpose()?,
             },
             Expression::IsDistinctFrom { left, right, not } => Expression::IsDistinctFrom {
-                left: Box::new(self.resolve_order_by_expression(stmt, left, false)),
-                right: Box::new(self.resolve_order_by_expression(stmt, right, false)),
+                left: Box::new(self.resolve_order_by_expression(stmt, left, false)?),
+                right: Box::new(self.resolve_order_by_expression(stmt, right, false)?),
                 not: *not,
             },
             _ => expr.clone(),
-        }
+        })
     }
 
     pub(super) fn select_ordinal_expression(
@@ -130,6 +146,14 @@ impl<'a> QueryPlanner<'a> {
             Column::Function(agg) => Some(Expression::Function(agg.clone())),
             Column::All | Column::Subquery(_) => None,
         }
+    }
+
+    fn select_ordinal_count(&self, stmt: &SelectStatement) -> Result<usize, RustqlError> {
+        if matches!(stmt.columns.first(), Some(Column::All)) {
+            return Ok(self.infer_select_output_columns(stmt)?.len());
+        }
+
+        Ok(stmt.columns.len())
     }
 
     pub(super) fn select_alias_expression(
