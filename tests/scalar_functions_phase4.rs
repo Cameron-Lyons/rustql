@@ -61,6 +61,13 @@ fn test_lpad() {
 }
 
 #[test]
+fn test_lpad_empty_pad_errors() {
+    let _guard = setup_test();
+
+    assert!(execute_sql("SELECT LPAD('hi', 5, '')").is_err());
+}
+
+#[test]
 fn test_rpad() {
     let _guard = setup_test();
     execute_sql("CREATE TABLE t (id INTEGER, name TEXT)").unwrap();
@@ -68,6 +75,13 @@ fn test_rpad() {
 
     let result = execute_sql("SELECT RPAD(name, 5, '*') FROM t").unwrap();
     assert!(result.contains("hi***"));
+}
+
+#[test]
+fn test_rpad_empty_pad_errors() {
+    let _guard = setup_test();
+
+    assert!(execute_sql("SELECT RPAD('hi', 5, '')").is_err());
 }
 
 #[test]
@@ -108,6 +122,21 @@ fn test_repeat() {
 
     let result = execute_sql("SELECT REPEAT(name, 3) FROM t").unwrap();
     assert!(result.contains("ababab"));
+}
+
+#[test]
+fn test_string_functions_reject_negative_lengths() {
+    let _guard = setup_test();
+
+    for sql in [
+        "SELECT LPAD('hi', -1, '*')",
+        "SELECT RPAD('hi', -1, '*')",
+        "SELECT LEFT('hi', -1)",
+        "SELECT RIGHT('hi', -1)",
+        "SELECT REPEAT('hi', -1)",
+    ] {
+        assert!(execute_sql(sql).is_err(), "expected error for {sql}");
+    }
 }
 
 #[test]

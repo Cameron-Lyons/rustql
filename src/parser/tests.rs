@@ -1,4 +1,4 @@
-use super::parse_script;
+use super::{parse, parse_script, parse_spanned};
 
 struct Lcg(u64);
 
@@ -44,4 +44,14 @@ fn parser_fuzz_inputs_do_not_panic() {
             "parser panicked on fuzz case {case}: {sql:?}"
         );
     }
+}
+
+#[test]
+fn parser_matches_spanned_and_unspanned_entry_points() {
+    let sql = "SELECT id, name FROM users WHERE id = 1 ORDER BY name";
+
+    let unspanned = parse(crate::lexer::tokenize(sql).unwrap()).unwrap();
+    let spanned = parse_spanned(crate::lexer::tokenize_spanned(sql).unwrap()).unwrap();
+
+    assert_eq!(unspanned, spanned);
 }
