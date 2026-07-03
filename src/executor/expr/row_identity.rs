@@ -41,10 +41,10 @@ pub(crate) struct SqlRowMultiset {
 }
 
 impl SqlRowMultiset {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn with_capacity(capacity: usize) -> Self {
         Self {
             non_numeric_counts: BTreeMap::new(),
-            numeric_counts: Vec::new(),
+            numeric_counts: Vec::with_capacity(capacity),
         }
     }
 
