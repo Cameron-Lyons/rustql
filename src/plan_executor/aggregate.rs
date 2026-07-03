@@ -114,6 +114,23 @@ struct HavingContext<'a> {
     group_rows: &'a [&'a [Value]],
 }
 
+struct AggregateInputPlan {
+    shared_inputs: Vec<usize>,
+}
+
+impl AggregateInputPlan {
+    fn new(aggregates: &[AggregateFunction]) -> Self {
+        let mut shared_inputs = vec![0usize; aggregates.len()];
+        for (idx, aggregate) in aggregates.iter().enumerate() {
+            shared_inputs[idx] = aggregates[..idx]
+                .iter()
+                .position(|candidate| aggregate_input_signature_matches(candidate, aggregate))
+                .unwrap_or(idx);
+        }
+        Self { shared_inputs }
+    }
+}
+
 impl<'a> PlanExecutor<'a> {
     pub(super) fn execute_aggregate(
         &self,
@@ -170,6 +187,7 @@ impl<'a> PlanExecutor<'a> {
             .collect();
 
         let mut result_rows = Vec::new();
+        let aggregate_input_plan = AggregateInputPlan::new(aggregates);
 
         if let Some(grouping_sets) = grouping_sets {
             for set in grouping_sets {
@@ -195,8 +213,12 @@ impl<'a> PlanExecutor<'a> {
                         }
                     }
 
-                    let aggregate_values =
-                        self.compute_group_aggregate_values(aggregates, &group.rows, &column_defs)?;
+                    let aggregate_values = self.compute_group_aggregate_values(
+                        aggregates,
+                        &aggregate_input_plan,
+                        &group.rows,
+                        &column_defs,
+                    )?;
                     result_row.extend(aggregate_values.iter().cloned());
 
                     if let Some(having_expr) = having {
@@ -226,8 +248,12 @@ impl<'a> PlanExecutor<'a> {
                 let AggregateGroup { key, rows } = group;
                 let mut result_row = Vec::with_capacity(key.len() + aggregates.len());
                 result_row.extend(key);
-                let aggregate_values =
-                    self.compute_group_aggregate_values(aggregates, &rows, &column_defs)?;
+                let aggregate_values = self.compute_group_aggregate_values(
+                    aggregates,
+                    &aggregate_input_plan,
+                    &rows,
+                    &column_defs,
+                )?;
                 result_row.extend(aggregate_values.iter().cloned());
 
                 if let Some(having_expr) = having {
@@ -284,24 +310,17 @@ impl<'a> PlanExecutor<'a> {
     fn compute_group_aggregate_values(
         &self,
         aggregates: &[AggregateFunction],
+        input_plan: &AggregateInputPlan,
         rows: &[&[Value]],
         columns: &[ColumnDefinition],
     ) -> Result<Vec<Value>, RustqlError> {
-        let mut shared_inputs = vec![0usize; aggregates.len()];
-        for (idx, aggregate) in aggregates.iter().enumerate() {
-            shared_inputs[idx] = aggregates[..idx]
-                .iter()
-                .position(|candidate| aggregate_input_signature_matches(candidate, aggregate))
-                .unwrap_or(idx);
-        }
-
         let mut prepared_inputs: Vec<Option<PreparedAggregateInput>> =
             Vec::with_capacity(aggregates.len());
         prepared_inputs.resize_with(aggregates.len(), || None);
 
         let mut values = Vec::with_capacity(aggregates.len());
         for (idx, aggregate) in aggregates.iter().enumerate() {
-            let input_idx = shared_inputs[idx];
+            let input_idx = input_plan.shared_inputs[idx];
             if prepared_inputs[input_idx].is_none() {
                 prepared_inputs[input_idx] =
                     Some(self.prepare_aggregate_input(&aggregates[input_idx], rows, columns)?);
@@ -465,24 +484,18 @@ impl<'a> PlanExecutor<'a> {
                 Ok(max_val.unwrap_or(Value::Null))
             }
             AggregateFunctionType::Variance => {
-                let values = numeric_values(&input.values, "VARIANCE requires numeric values")?;
-                if values.is_empty() {
+                let summary = numeric_summary(&input.values, "VARIANCE requires numeric values")?;
+                if summary.is_empty() {
                     return Ok(Value::Null);
                 }
-                let mean = values.iter().sum::<f64>() / values.len() as f64;
-                let variance =
-                    values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / values.len() as f64;
-                Ok(Value::Float(variance))
+                Ok(Value::Float(summary.variance()))
             }
             AggregateFunctionType::Stddev => {
-                let values = numeric_values(&input.values, "STDDEV requires numeric values")?;
-                if values.is_empty() {
+                let summary = numeric_summary(&input.values, "STDDEV requires numeric values")?;
+                if summary.is_empty() {
                     return Ok(Value::Null);
                 }
-                let mean = values.iter().sum::<f64>() / values.len() as f64;
-                let variance =
-                    values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / values.len() as f64;
-                Ok(Value::Float(variance.sqrt()))
+                Ok(Value::Float(summary.variance().sqrt()))
             }
             AggregateFunctionType::GroupConcat => {
                 let sep = agg.separator.as_deref().unwrap_or(",");
@@ -776,6 +789,43 @@ fn numeric_values(values: &[Value], error: &str) -> Result<Vec<f64>, RustqlError
             _ => Err(RustqlError::AggregateError(error.to_string())),
         })
         .collect()
+}
+
+#[derive(Default)]
+struct NumericSummary {
+    count: usize,
+    mean: f64,
+    m2: f64,
+}
+
+impl NumericSummary {
+    fn push(&mut self, value: f64) {
+        self.count += 1;
+        let delta = value - self.mean;
+        self.mean += delta / self.count as f64;
+        let delta2 = value - self.mean;
+        self.m2 += delta * delta2;
+    }
+
+    fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    fn variance(&self) -> f64 {
+        self.m2 / self.count as f64
+    }
+}
+
+fn numeric_summary(values: &[Value], error: &str) -> Result<NumericSummary, RustqlError> {
+    let mut summary = NumericSummary::default();
+    for value in values {
+        match value {
+            Value::Integer(i) => summary.push(*i as f64),
+            Value::Float(f) => summary.push(*f),
+            _ => return Err(RustqlError::AggregateError(error.to_string())),
+        }
+    }
+    Ok(summary)
 }
 
 fn format_value_string(value: &Value) -> String {
