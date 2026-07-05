@@ -1,4 +1,5 @@
 use super::*;
+use crate::executor::expr::compare_values;
 use std::collections::HashMap;
 
 impl<'a> PlanExecutor<'a> {
@@ -277,6 +278,8 @@ impl<'a> PlanExecutor<'a> {
             left_is_build,
             condition,
             combined_columns: &combined_columns,
+            left_column_count: left.columns.len(),
+            key_equality: hash_join_key_equality(condition, &combined_columns),
         };
 
         for probe_row in &probe.rows {
@@ -354,18 +357,40 @@ impl<'a> PlanExecutor<'a> {
     ) -> Result<(), RustqlError> {
         for &build_row_idx in build_row_indices {
             let build_row = &context.build.rows[build_row_idx];
-            let combined_row = if context.left_is_build {
-                combine_rows(build_row, probe_row)
+            let (left_row, right_row) = if context.left_is_build {
+                (build_row.as_slice(), probe_row)
             } else {
-                combine_rows(probe_row, build_row)
+                (probe_row, build_row.as_slice())
             };
 
-            if self.evaluate_expression(
-                context.condition,
-                context.combined_columns,
-                &combined_row,
-            )? {
-                joined_rows.push(combined_row);
+            if let Some((left_value_idx, right_value_idx)) = context.key_equality {
+                let left_value = combined_cell(
+                    left_row,
+                    right_row,
+                    context.left_column_count,
+                    left_value_idx,
+                );
+                let right_value = combined_cell(
+                    left_row,
+                    right_row,
+                    context.left_column_count,
+                    right_value_idx,
+                );
+                if !matches!(left_value, Value::Null)
+                    && !matches!(right_value, Value::Null)
+                    && compare_values(left_value, &BinaryOperator::Equal, right_value)?
+                {
+                    joined_rows.push(combine_rows(left_row, right_row));
+                }
+            } else {
+                let combined_row = combine_rows(left_row, right_row);
+                if self.evaluate_expression(
+                    context.condition,
+                    context.combined_columns,
+                    &combined_row,
+                )? {
+                    joined_rows.push(combined_row);
+                }
             }
         }
 
@@ -477,6 +502,65 @@ struct HashJoinMatchContext<'a> {
     left_is_build: bool,
     condition: &'a Expression,
     combined_columns: &'a [ColumnDefinition],
+    left_column_count: usize,
+    key_equality: Option<(usize, usize)>,
+}
+
+fn combined_cell<'a>(
+    left_row: &'a [Value],
+    right_row: &'a [Value],
+    left_column_count: usize,
+    index: usize,
+) -> &'a Value {
+    if index < left_column_count {
+        &left_row[index]
+    } else {
+        &right_row[index - left_column_count]
+    }
+}
+
+/// Pre-resolves a `column = column` join condition to combined-row cell
+/// indices so each candidate pair can be checked without building the
+/// combined row or re-resolving column names. Returns None for conditions
+/// the generic evaluator must handle.
+fn hash_join_key_equality(
+    condition: &Expression,
+    combined_columns: &[ColumnDefinition],
+) -> Option<(usize, usize)> {
+    if let Expression::BinaryOp {
+        left,
+        op: BinaryOperator::Equal,
+        right,
+    } = condition
+        && let (Expression::Column(left_col), Expression::Column(right_col)) =
+            (left.as_ref(), right.as_ref())
+        && left_col != "*"
+        && right_col != "*"
+    {
+        let left_idx = resolve_combined_column(combined_columns, left_col)?;
+        let right_idx = resolve_combined_column(combined_columns, right_col)?;
+        return Some((left_idx, right_idx));
+    }
+    None
+}
+
+/// Mirrors the expression evaluator's column resolution (exact name first,
+/// then unqualified-suffix matching) so the fast path picks the same cells
+/// the evaluator would.
+fn resolve_combined_column(columns: &[ColumnDefinition], name: &str) -> Option<usize> {
+    if let Some(idx) = columns.iter().position(|c| c.name == name) {
+        return Some(idx);
+    }
+    if name.contains('.') {
+        let col_name = name.split('.').next_back().unwrap_or(name);
+        columns.iter().position(|c| {
+            c.name == col_name || c.name.split('.').next_back().unwrap_or(&c.name) == col_name
+        })
+    } else {
+        columns
+            .iter()
+            .position(|c| c.name.split('.').next_back().unwrap_or(&c.name) == name)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
