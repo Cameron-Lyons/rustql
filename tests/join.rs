@@ -757,3 +757,82 @@ fn test_join_group_by_order_by_expression() {
     assert_eq!(rows.len(), 1);
     assert!(rows[0].contains("Alice"));
 }
+
+#[test]
+fn test_non_equi_join_compares_columns() {
+    let _guard = setup_test();
+
+    execute_sql("CREATE TABLE bids (id INTEGER, amount INTEGER)").unwrap();
+    execute_sql("CREATE TABLE asks (id INTEGER, threshold INTEGER)").unwrap();
+
+    execute_sql("INSERT INTO bids VALUES (1, 10), (2, 50), (3, 90)").unwrap();
+    execute_sql("INSERT INTO asks VALUES (1, 40), (2, 80)").unwrap();
+
+    let rows = query_rows(
+        "SELECT bids.id, asks.id \
+         FROM bids JOIN asks ON bids.amount > asks.threshold \
+         ORDER BY bids.id, asks.id",
+    )
+    .unwrap();
+
+    assert_eq!(
+        rows.rows,
+        vec![
+            vec![Value::Integer(2), Value::Integer(1)],
+            vec![Value::Integer(3), Value::Integer(1)],
+            vec![Value::Integer(3), Value::Integer(2)],
+        ]
+    );
+}
+
+#[test]
+fn test_left_join_null_keys_never_match() {
+    let _guard = setup_test();
+
+    execute_sql("CREATE TABLE users (id INTEGER, name TEXT)").unwrap();
+    execute_sql("CREATE TABLE orders (user_id INTEGER, product TEXT)").unwrap();
+
+    execute_sql("INSERT INTO users VALUES (1, 'Alice'), (NULL, 'Ghost')").unwrap();
+    execute_sql("INSERT INTO orders VALUES (1, 'Laptop'), (NULL, 'Orphan')").unwrap();
+
+    let rows = query_rows(
+        "SELECT users.name, orders.product \
+         FROM users LEFT JOIN orders ON users.id = orders.user_id \
+         ORDER BY users.name",
+    )
+    .unwrap();
+
+    assert_eq!(
+        rows.rows,
+        vec![
+            vec![Value::Text("Alice".into()), Value::Text("Laptop".into())],
+            vec![Value::Text("Ghost".into()), Value::Null],
+        ]
+    );
+}
+
+#[test]
+fn test_full_join_not_equal_condition() {
+    let _guard = setup_test();
+
+    execute_sql("CREATE TABLE lhs (id INTEGER)").unwrap();
+    execute_sql("CREATE TABLE rhs (id INTEGER)").unwrap();
+
+    execute_sql("INSERT INTO lhs VALUES (1), (2)").unwrap();
+    execute_sql("INSERT INTO rhs VALUES (2)").unwrap();
+
+    let rows = query_rows(
+        "SELECT lhs.id, rhs.id \
+         FROM lhs FULL JOIN rhs ON lhs.id != rhs.id \
+         ORDER BY lhs.id",
+    )
+    .unwrap();
+
+    assert_eq!(
+        rows.rows,
+        vec![
+            vec![Value::Integer(1), Value::Integer(2)],
+            vec![Value::Integer(2), Value::Null],
+        ]
+    );
+}
