@@ -940,7 +940,7 @@ fn test_full_join_uses_hash_join_and_preserves_both_sides() {
 }
 
 #[test]
-fn test_left_join_extra_condition_stays_on_nested_loop() {
+fn test_left_join_extra_condition_uses_hash_join_and_enforces_full_condition() {
     let _guard = setup_test();
 
     execute_sql("CREATE TABLE users (id INTEGER, name TEXT)").unwrap();
@@ -955,7 +955,7 @@ fn test_left_join_extra_condition_stays_on_nested_loop() {
                  ORDER BY users.name";
 
     let plan = execute_sql(&format!("EXPLAIN {query}")).unwrap();
-    assert!(plan.contains("Nested Loop Left Join"));
+    assert!(plan.contains("Hash Left Join"));
 
     let rows = query_rows(query).unwrap();
     assert_eq!(
@@ -963,6 +963,88 @@ fn test_left_join_extra_condition_stays_on_nested_loop() {
         vec![
             vec![Value::Text("Alice".into()), Value::Integer(500)],
             vec![Value::Text("Bob".into()), Value::Null],
+        ]
+    );
+}
+
+#[test]
+fn test_multi_equality_join_uses_hash_join() {
+    let _guard = setup_test();
+
+    execute_sql("CREATE TABLE lhs (grp INTEGER, sub INTEGER, amount INTEGER)").unwrap();
+    execute_sql("CREATE TABLE rhs (grp INTEGER, sub INTEGER, label TEXT)").unwrap();
+
+    execute_sql("INSERT INTO lhs VALUES (1, 1, 10), (1, 2, 20), (2, 1, 30)").unwrap();
+    execute_sql("INSERT INTO rhs VALUES (1, 1, 'a'), (1, 3, 'b'), (2, 1, 'c')").unwrap();
+
+    let query = "SELECT lhs.amount, rhs.label \
+                 FROM lhs JOIN rhs ON lhs.grp = rhs.grp AND lhs.sub = rhs.sub \
+                 ORDER BY lhs.amount";
+
+    let plan = execute_sql(&format!("EXPLAIN {query}")).unwrap();
+    assert!(plan.contains("Hash Join"));
+
+    let rows = query_rows(query).unwrap();
+    assert_eq!(
+        rows.rows,
+        vec![
+            vec![Value::Integer(10), Value::Text("a".into())],
+            vec![Value::Integer(30), Value::Text("c".into())],
+        ]
+    );
+}
+
+#[test]
+fn test_using_join_uses_hash_join() {
+    let _guard = setup_test();
+
+    execute_sql("CREATE TABLE users (id INTEGER, name TEXT)").unwrap();
+    execute_sql("CREATE TABLE orders (id INTEGER, product TEXT)").unwrap();
+
+    execute_sql("INSERT INTO users VALUES (1, 'Alice'), (2, 'Bob')").unwrap();
+    execute_sql("INSERT INTO orders VALUES (1, 'Laptop'), (3, 'Mouse')").unwrap();
+
+    let query = "SELECT users.name, orders.product \
+                 FROM users JOIN orders USING (id) \
+                 ORDER BY users.name";
+
+    let plan = execute_sql(&format!("EXPLAIN {query}")).unwrap();
+    assert!(plan.contains("Hash Join"));
+
+    let rows = query_rows(query).unwrap();
+    assert_eq!(
+        rows.rows,
+        vec![vec![
+            Value::Text("Alice".into()),
+            Value::Text("Laptop".into())
+        ]]
+    );
+}
+
+#[test]
+fn test_full_join_multi_equality_preserves_both_sides() {
+    let _guard = setup_test();
+
+    execute_sql("CREATE TABLE lhs (grp INTEGER, sub INTEGER, name TEXT)").unwrap();
+    execute_sql("CREATE TABLE rhs (grp INTEGER, sub INTEGER, label TEXT)").unwrap();
+
+    execute_sql("INSERT INTO lhs VALUES (1, 1, 'one'), (2, 9, 'two')").unwrap();
+    execute_sql("INSERT INTO rhs VALUES (1, 1, 'uno'), (2, 8, 'dos')").unwrap();
+
+    let query = "SELECT lhs.name, rhs.label \
+                 FROM lhs FULL JOIN rhs ON lhs.grp = rhs.grp AND lhs.sub = rhs.sub \
+                 ORDER BY lhs.name, rhs.label";
+
+    let plan = execute_sql(&format!("EXPLAIN {query}")).unwrap();
+    assert!(plan.contains("Hash Full Join"));
+
+    let rows = query_rows(query).unwrap();
+    assert_eq!(
+        rows.rows,
+        vec![
+            vec![Value::Text("one".into()), Value::Text("uno".into())],
+            vec![Value::Text("two".into()), Value::Null],
+            vec![Value::Null, Value::Text("dos".into())],
         ]
     );
 }

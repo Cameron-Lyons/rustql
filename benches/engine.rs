@@ -291,6 +291,11 @@ fn bench_definitions() -> Vec<BenchDefinition> {
             prepare: prepare_outer_join,
         },
         BenchDefinition {
+            name: "multi_key_join",
+            description: "Memory benchmark for an inner join on two equality key columns.",
+            prepare: prepare_multi_key_join,
+        },
+        BenchDefinition {
             name: "lateral_top1",
             description: "Memory benchmark for LEFT JOIN LATERAL top-1 lookups per outer row.",
             prepare: prepare_lateral_top1,
@@ -567,6 +572,40 @@ fn prepare_outer_join(profile: BenchProfile) -> PreparedBench {
                  LEFT JOIN bench_tags ON bench_events.id = bench_tags.event_id";
     PreparedBench {
         scale: format!("{rows}x{} rows", rows / 2),
+        run: Box::new(move || {
+            let mut session = engine.session();
+            black_box(session.execute_one(query).unwrap());
+        }),
+    }
+}
+
+fn prepare_multi_key_join(profile: BenchProfile) -> PreparedBench {
+    let rows = profile.nested_join_rows();
+    let engine = open_memory_engine();
+
+    {
+        let mut session = engine.session();
+        session
+            .execute_script(
+                "
+                CREATE TABLE bench_ml (grp INTEGER, sub INTEGER, amount INTEGER);
+                CREATE TABLE bench_mr (grp INTEGER, sub INTEGER, factor INTEGER);
+                ",
+            )
+            .unwrap();
+        insert_rows(&mut session, "bench_ml", rows, |index| {
+            format!("({}, {}, {})", index % 50, index % 20, 10 + (index % 900))
+        });
+        insert_rows(&mut session, "bench_mr", rows, |index| {
+            format!("({}, {}, {})", index % 50, index % 20, index % 7)
+        });
+    }
+
+    let query = "SELECT COUNT(*) AS total, SUM(bench_ml.amount) AS total_amount \
+                 FROM bench_ml \
+                 JOIN bench_mr ON bench_ml.grp = bench_mr.grp AND bench_ml.sub = bench_mr.sub";
+    PreparedBench {
+        scale: format!("{rows}x{rows} rows"),
         run: Box::new(move || {
             let mut session = engine.session();
             black_box(session.execute_one(query).unwrap());

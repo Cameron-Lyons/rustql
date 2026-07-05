@@ -82,14 +82,17 @@ impl<'a> QueryPlanner<'a> {
                 self.join_condition_for_plan(&join, &left_columns, &right_columns, &right_label);
             let join_plan = if matches!(
                 join.join_type,
-                JoinType::Inner | JoinType::Left | JoinType::Right | JoinType::Full
-            ) && join.using_columns.is_none()
-                && self.is_hash_joinable(
-                    &join_condition,
-                    &left_columns,
-                    &right_columns,
-                    &right_label,
-                ) {
+                JoinType::Inner
+                    | JoinType::Left
+                    | JoinType::Right
+                    | JoinType::Full
+                    | JoinType::Natural
+            ) && self.is_hash_joinable(
+                &join_condition,
+                &left_columns,
+                &right_columns,
+                &right_label,
+            ) {
                 self.plan_hash_join(
                     current_plan,
                     right_plan,
@@ -302,14 +305,34 @@ impl<'a> QueryPlanner<'a> {
     }
 
     pub(super) fn is_equality_join(&self, condition: &Expression) -> bool {
-        if let Expression::BinaryOp { op, .. } = condition {
-            matches!(op, BinaryOperator::Equal)
-        } else {
-            false
-        }
+        self.extract_conjuncts(condition).iter().any(|conjunct| {
+            matches!(
+                conjunct,
+                Expression::BinaryOp {
+                    op: BinaryOperator::Equal,
+                    ..
+                }
+            )
+        })
     }
 
+    /// A join is hash joinable when any top-level AND conjunct is a
+    /// `column = column` equality across the two sides: that conjunct
+    /// prefilters candidate pairs, and every candidate is re-verified
+    /// against the full condition.
     fn is_hash_joinable(
+        &self,
+        condition: &Expression,
+        left_columns: &[ColumnDefinition],
+        right_columns: &[ColumnDefinition],
+        right_label: &str,
+    ) -> bool {
+        self.extract_conjuncts(condition).iter().any(|conjunct| {
+            self.is_hash_joinable_equality(conjunct, left_columns, right_columns, right_label)
+        })
+    }
+
+    fn is_hash_joinable_equality(
         &self,
         condition: &Expression,
         left_columns: &[ColumnDefinition],

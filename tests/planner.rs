@@ -195,7 +195,7 @@ fn test_explain_natural_join() {
     let plan_str = result.unwrap();
 
     assert!(plan_str.contains("Query Plan"));
-    assert!(plan_str.contains("Nested Loop Natural Join"));
+    assert!(plan_str.contains("Hash Natural Join"));
 }
 
 #[test]
