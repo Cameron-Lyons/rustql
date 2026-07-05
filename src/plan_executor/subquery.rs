@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::HashMap;
 
 pub(super) fn execute_planned_select(
     db: &dyn DatabaseCatalog,
@@ -334,6 +335,349 @@ fn collect_table_column_names(
             output.insert(format!("{}.{}", label, column.name));
         }
     }
+}
+
+/// Binding plan for executing a LATERAL subquery without the temp-table outer
+/// scope: every outer column reference is replaced with the current outer
+/// row's literal value, so the planner sees constant predicates and can use
+/// indexes on the inner table.
+pub(super) struct LateralValueBinding {
+    /// Column-reference strings in the subquery mapped to outer-row indices.
+    references: HashMap<String, usize>,
+}
+
+impl LateralValueBinding {
+    pub(super) fn is_correlated(&self) -> bool {
+        !self.references.is_empty()
+    }
+
+    pub(super) fn bind(&self, subquery: &SelectStatement, outer_row: &[Value]) -> SelectStatement {
+        let mut bound = subquery.clone();
+        for column in &mut bound.columns {
+            self.bind_column(column, outer_row);
+        }
+        if let Some(where_clause) = bound.where_clause.as_mut() {
+            self.bind_expression(where_clause, outer_row);
+        }
+        if let Some(group_by) = bound.group_by.as_mut() {
+            self.bind_group_by(group_by, outer_row);
+        }
+        if let Some(having) = bound.having.as_mut() {
+            self.bind_expression(having, outer_row);
+        }
+        if let Some(distinct_on) = bound.distinct_on.as_mut() {
+            for expr in distinct_on {
+                self.bind_expression(expr, outer_row);
+            }
+        }
+        if let Some(order_by) = bound.order_by.as_mut() {
+            for item in order_by {
+                self.bind_expression(&mut item.expr, outer_row);
+            }
+        }
+        for join in &mut bound.joins {
+            if let Some(on) = join.on.as_mut() {
+                self.bind_expression(on, outer_row);
+            }
+        }
+        bound
+    }
+
+    fn bind_column(&self, column: &mut Column, outer_row: &[Value]) {
+        match column {
+            Column::Named { name, alias } => {
+                if let Some(&index) = self.references.get(name.as_str()) {
+                    let label = alias
+                        .clone()
+                        .unwrap_or_else(|| unqualified_column_name(name).to_string());
+                    *column = Column::Expression {
+                        expr: Expression::Value(outer_row_value(outer_row, index)),
+                        alias: Some(label),
+                    };
+                }
+            }
+            Column::Function(aggregate) => {
+                self.bind_expression(&mut aggregate.expr, outer_row);
+                if let Some(filter) = aggregate.filter.as_mut() {
+                    self.bind_expression(filter, outer_row);
+                }
+            }
+            Column::Expression { expr, .. } => self.bind_expression(expr, outer_row),
+            Column::All | Column::Subquery(_) => {}
+        }
+    }
+
+    fn bind_group_by(&self, group_by: &mut GroupByClause, outer_row: &[Value]) {
+        match group_by {
+            GroupByClause::Simple(exprs)
+            | GroupByClause::Rollup(exprs)
+            | GroupByClause::Cube(exprs) => {
+                for expr in exprs {
+                    self.bind_expression(expr, outer_row);
+                }
+            }
+            GroupByClause::GroupingSets(sets) => {
+                for set in sets {
+                    for expr in set {
+                        self.bind_expression(expr, outer_row);
+                    }
+                }
+            }
+        }
+    }
+
+    fn bind_expression(&self, expr: &mut Expression, outer_row: &[Value]) {
+        match expr {
+            Expression::Column(name) => {
+                if let Some(&index) = self.references.get(name.as_str()) {
+                    *expr = Expression::Value(outer_row_value(outer_row, index));
+                }
+            }
+            Expression::BinaryOp { left, right, .. }
+            | Expression::IsDistinctFrom { left, right, .. } => {
+                self.bind_expression(left, outer_row);
+                self.bind_expression(right, outer_row);
+            }
+            Expression::UnaryOp { expr, .. }
+            | Expression::IsNull { expr, .. }
+            | Expression::Cast { expr, .. } => self.bind_expression(expr, outer_row),
+            Expression::In { left, values } => {
+                self.bind_expression(left, outer_row);
+                for value in values {
+                    self.bind_expression(value, outer_row);
+                }
+            }
+            Expression::Any { left, .. } | Expression::All { left, .. } => {
+                self.bind_expression(left, outer_row);
+            }
+            Expression::Function(aggregate) => {
+                self.bind_expression(&mut aggregate.expr, outer_row);
+                if let Some(filter) = aggregate.filter.as_mut() {
+                    self.bind_expression(filter, outer_row);
+                }
+            }
+            Expression::Case {
+                operand,
+                when_clauses,
+                else_clause,
+            } => {
+                if let Some(operand) = operand {
+                    self.bind_expression(operand, outer_row);
+                }
+                for (condition, result) in when_clauses {
+                    self.bind_expression(condition, outer_row);
+                    self.bind_expression(result, outer_row);
+                }
+                if let Some(else_clause) = else_clause {
+                    self.bind_expression(else_clause, outer_row);
+                }
+            }
+            Expression::ScalarFunction { args, .. } => {
+                for arg in args {
+                    self.bind_expression(arg, outer_row);
+                }
+            }
+            Expression::WindowFunction {
+                args,
+                partition_by,
+                order_by,
+                ..
+            } => {
+                for arg in args {
+                    self.bind_expression(arg, outer_row);
+                }
+                for expr in partition_by {
+                    self.bind_expression(expr, outer_row);
+                }
+                for item in order_by {
+                    self.bind_expression(&mut item.expr, outer_row);
+                }
+            }
+            Expression::Subquery(_)
+            | Expression::Exists(_)
+            | Expression::Value(_)
+            | Expression::Default => {}
+        }
+    }
+}
+
+fn outer_row_value(outer_row: &[Value], index: usize) -> Value {
+    outer_row.get(index).cloned().unwrap_or(Value::Null)
+}
+
+/// Decide whether a LATERAL subquery can run by binding outer references to
+/// literal values. Returns `None` for shapes where the rewrite is not known
+/// to be safe (nested subqueries, CTEs, set operations, derived tables, ...);
+/// callers fall back to the temp-table outer scope in that case.
+pub(super) fn lateral_value_binding(
+    db: &dyn DatabaseCatalog,
+    subquery: &SelectStatement,
+    outer_columns: &[ColumnDefinition],
+) -> Option<LateralValueBinding> {
+    if !subquery.ctes.is_empty()
+        || subquery.from_subquery.is_some()
+        || subquery.from_function.is_some()
+        || subquery.from_values.is_some()
+        || subquery.set_op.is_some()
+        || !subquery.window_definitions.is_empty()
+    {
+        return None;
+    }
+    if subquery
+        .joins
+        .iter()
+        .any(|join| join.lateral || join.subquery.is_some())
+    {
+        return None;
+    }
+
+    let local_columns = subquery_local_column_names(db, subquery);
+    let mut references = HashMap::new();
+
+    for column in &subquery.columns {
+        match column {
+            Column::Named { name, .. } => {
+                if !record_outer_reference(name, outer_columns, &local_columns, &mut references) {
+                    return None;
+                }
+            }
+            Column::All | Column::Function(_) | Column::Expression { .. } => {}
+            Column::Subquery(_) => return None,
+        }
+    }
+
+    for expr in subquery_expression_refs(subquery) {
+        if !scan_expression_references(expr, outer_columns, &local_columns, &mut references) {
+            return None;
+        }
+    }
+
+    Some(LateralValueBinding { references })
+}
+
+/// Collect outer references from `expr` into `references`. Returns `false`
+/// when the expression contains a construct the literal-binding rewrite does
+/// not cover (nested subqueries) or an outer reference that cannot be
+/// resolved to a single outer column.
+fn scan_expression_references(
+    expr: &Expression,
+    outer_columns: &[ColumnDefinition],
+    local_columns: &HashSet<String>,
+    references: &mut HashMap<String, usize>,
+) -> bool {
+    match expr {
+        Expression::Column(name) => {
+            record_outer_reference(name, outer_columns, local_columns, references)
+        }
+        Expression::Subquery(_)
+        | Expression::Exists(_)
+        | Expression::Any { .. }
+        | Expression::All { .. } => false,
+        Expression::BinaryOp { left, right, .. }
+        | Expression::IsDistinctFrom { left, right, .. } => {
+            scan_expression_references(left, outer_columns, local_columns, references)
+                && scan_expression_references(right, outer_columns, local_columns, references)
+        }
+        Expression::UnaryOp { expr, .. }
+        | Expression::IsNull { expr, .. }
+        | Expression::Cast { expr, .. } => {
+            scan_expression_references(expr, outer_columns, local_columns, references)
+        }
+        Expression::In { left, values } => {
+            scan_expression_references(left, outer_columns, local_columns, references)
+                && values.iter().all(|value| {
+                    scan_expression_references(value, outer_columns, local_columns, references)
+                })
+        }
+        Expression::Function(aggregate) => {
+            scan_expression_references(&aggregate.expr, outer_columns, local_columns, references)
+                && aggregate.filter.as_deref().is_none_or(|filter| {
+                    scan_expression_references(filter, outer_columns, local_columns, references)
+                })
+        }
+        Expression::Case {
+            operand,
+            when_clauses,
+            else_clause,
+        } => {
+            operand.as_deref().is_none_or(|operand| {
+                scan_expression_references(operand, outer_columns, local_columns, references)
+            }) && when_clauses.iter().all(|(condition, result)| {
+                scan_expression_references(condition, outer_columns, local_columns, references)
+                    && scan_expression_references(result, outer_columns, local_columns, references)
+            }) && else_clause.as_deref().is_none_or(|else_clause| {
+                scan_expression_references(else_clause, outer_columns, local_columns, references)
+            })
+        }
+        Expression::ScalarFunction { args, .. } => args
+            .iter()
+            .all(|arg| scan_expression_references(arg, outer_columns, local_columns, references)),
+        Expression::WindowFunction {
+            args,
+            partition_by,
+            order_by,
+            ..
+        } => {
+            args.iter().chain(partition_by.iter()).all(|expr| {
+                scan_expression_references(expr, outer_columns, local_columns, references)
+            }) && order_by.iter().all(|item| {
+                scan_expression_references(&item.expr, outer_columns, local_columns, references)
+            })
+        }
+        Expression::Value(_) | Expression::Default => true,
+    }
+}
+
+fn record_outer_reference(
+    reference: &str,
+    outer_columns: &[ColumnDefinition],
+    local_columns: &HashSet<String>,
+    references: &mut HashMap<String, usize>,
+) -> bool {
+    if !column_needs_outer_scope(reference, local_columns, outer_columns) {
+        return true;
+    }
+    match resolve_outer_column_index(reference, outer_columns, local_columns) {
+        Some(index) => {
+            references.insert(reference.to_string(), index);
+            true
+        }
+        None => false,
+    }
+}
+
+/// Resolution mirror of [`column_needs_outer_scope`]: exact qualified matches
+/// win, then local shadowing, then unqualified matches against the outer row.
+fn resolve_outer_column_index(
+    reference: &str,
+    outer_columns: &[ColumnDefinition],
+    local_columns: &HashSet<String>,
+) -> Option<usize> {
+    if reference.contains('.') {
+        if let Some(index) = outer_columns
+            .iter()
+            .position(|column| column.name == reference)
+        {
+            return Some(index);
+        }
+        if local_columns.contains(reference) {
+            return None;
+        }
+        let unqualified = unqualified_column_name(reference);
+        return outer_columns
+            .iter()
+            .position(|column| unqualified_column_name(&column.name) == unqualified);
+    }
+
+    if local_columns.contains(reference)
+        || local_columns.contains(unqualified_column_name(reference))
+    {
+        return None;
+    }
+    let unqualified = unqualified_column_name(reference);
+    outer_columns.iter().position(|column| {
+        column.name == reference || unqualified_column_name(&column.name) == unqualified
+    })
 }
 
 pub(super) fn lateral_subquery_with_outer_scope(
