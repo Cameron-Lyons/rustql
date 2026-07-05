@@ -238,9 +238,16 @@ impl<'a> PlanExecutor<'a> {
         &self,
         left: ExecutionResult,
         right: ExecutionResult,
+        join_type: &JoinType,
         condition: &Expression,
     ) -> Result<ExecutionResult, RustqlError> {
-        let left_is_build = left.rows.len() <= right.rows.len();
+        // The preserved side probes so its unmatched rows are emitted inline;
+        // FULL joins additionally track matched build rows for a final pass.
+        let left_is_build = match join_type {
+            JoinType::Left => false,
+            JoinType::Right => true,
+            _ => left.rows.len() <= right.rows.len(),
+        };
         let (build, probe, build_cols, probe_cols) = if left_is_build {
             (&left, &right, &left.columns, &right.columns)
         } else {
@@ -276,8 +283,14 @@ impl<'a> PlanExecutor<'a> {
             }
         }
 
-        let mut joined_rows =
-            Vec::with_capacity(hash_join_row_capacity(build.rows.len(), probe.rows.len()));
+        let probe_is_preserved = !matches!(join_type, JoinType::Inner);
+        let mut matched_build =
+            matches!(join_type, JoinType::Full).then(|| vec![false; build.rows.len()]);
+        let mut joined_rows = Vec::with_capacity(hash_join_row_capacity(
+            build.rows.len(),
+            probe.rows.len(),
+            join_type,
+        ));
         let joined_columns = joined_column_names(&left.columns, &right.columns);
         let combined_columns = combined_column_definitions(&left.columns, &right.columns);
         let match_context = HashJoinMatchContext {
@@ -290,17 +303,19 @@ impl<'a> PlanExecutor<'a> {
         };
 
         for probe_row in &probe.rows {
+            let mut has_match = false;
             if probe_key_idx < probe_row.len() {
                 match join_key(&probe_row[probe_key_idx]) {
                     Some(JoinKey::Integer(probe_key) | JoinKey::Float(probe_key)) => {
                         if let Some(build_row_indices) =
                             integer_table.get(&numeric_key_bits(probe_key))
                         {
-                            self.append_hash_join_matches(
+                            has_match |= self.append_hash_join_matches(
                                 &match_context,
                                 probe_row,
                                 build_row_indices,
                                 &mut joined_rows,
+                                matched_build.as_deref_mut(),
                             )?;
                         }
 
@@ -310,11 +325,12 @@ impl<'a> PlanExecutor<'a> {
                             && let Some(build_row_indices) =
                                 integer_table.get(&numeric_key_bits(nearest_integer))
                         {
-                            self.append_hash_join_matches(
+                            has_match |= self.append_hash_join_matches(
                                 &match_context,
                                 probe_row,
                                 build_row_indices,
                                 &mut joined_rows,
+                                matched_build.as_deref_mut(),
                             )?;
                         }
 
@@ -325,26 +341,48 @@ impl<'a> PlanExecutor<'a> {
                                 .range(lower..=upper)
                                 .map(|(_, row_indices)| row_indices)
                             {
-                                self.append_hash_join_matches(
+                                has_match |= self.append_hash_join_matches(
                                     &match_context,
                                     probe_row,
                                     build_row_indices,
                                     &mut joined_rows,
+                                    matched_build.as_deref_mut(),
                                 )?;
                             }
                         }
                     }
                     Some(JoinKey::NonNumeric(probe_key)) => {
                         if let Some(build_row_indices) = non_numeric_table.get(&probe_key) {
-                            self.append_hash_join_matches(
+                            has_match |= self.append_hash_join_matches(
                                 &match_context,
                                 probe_row,
                                 build_row_indices,
                                 &mut joined_rows,
+                                matched_build.as_deref_mut(),
                             )?;
                         }
                     }
                     None => {}
+                }
+            }
+
+            if probe_is_preserved && !has_match {
+                joined_rows.push(if left_is_build {
+                    combine_row_with_left_nulls(left.columns.len(), probe_row)
+                } else {
+                    combine_row_with_right_nulls(probe_row, right.columns.len())
+                });
+            }
+        }
+
+        if let Some(matched_build) = matched_build {
+            for (build_row_idx, build_row) in build.rows.iter().enumerate() {
+                if !matched_build[build_row_idx] {
+                    joined_rows.push(if left_is_build {
+                        combine_row_with_right_nulls(build_row, right.columns.len())
+                    } else {
+                        combine_row_with_left_nulls(left.columns.len(), build_row)
+                    });
                 }
             }
         }
@@ -361,7 +399,9 @@ impl<'a> PlanExecutor<'a> {
         probe_row: &[Value],
         build_row_indices: &[usize],
         joined_rows: &mut Vec<Vec<Value>>,
-    ) -> Result<(), RustqlError> {
+        mut matched_build: Option<&mut [bool]>,
+    ) -> Result<bool, RustqlError> {
+        let mut has_match = false;
         for &build_row_idx in build_row_indices {
             let build_row = &context.build.rows[build_row_idx];
             let (left_row, right_row) = if context.left_is_build {
@@ -370,9 +410,12 @@ impl<'a> PlanExecutor<'a> {
                 (probe_row, build_row.as_slice())
             };
 
-            if let Some(comparison) = &context.key_comparison {
+            let matches = if let Some(comparison) = &context.key_comparison {
                 if comparison.matches(left_row, right_row, context.left_column_count)? {
                     joined_rows.push(combine_rows(left_row, right_row));
+                    true
+                } else {
+                    false
                 }
             } else {
                 let combined_row = combine_rows(left_row, right_row);
@@ -382,11 +425,21 @@ impl<'a> PlanExecutor<'a> {
                     &combined_row,
                 )? {
                     joined_rows.push(combined_row);
+                    true
+                } else {
+                    false
+                }
+            };
+
+            if matches {
+                has_match = true;
+                if let Some(matched_build) = matched_build.as_deref_mut() {
+                    matched_build[build_row_idx] = true;
                 }
             }
         }
 
-        Ok(())
+        Ok(has_match)
     }
 
     fn extract_join_keys(
@@ -447,8 +500,17 @@ fn lateral_join_row_capacity(left_row_count: usize, join_type: &JoinType) -> usi
     }
 }
 
-fn hash_join_row_capacity(build_row_count: usize, probe_row_count: usize) -> usize {
-    build_row_count.min(probe_row_count)
+fn hash_join_row_capacity(
+    build_row_count: usize,
+    probe_row_count: usize,
+    join_type: &JoinType,
+) -> usize {
+    match join_type {
+        JoinType::Full => build_row_count.max(probe_row_count),
+        // The probe side is the preserved side for LEFT and RIGHT joins.
+        JoinType::Left | JoinType::Right => probe_row_count,
+        _ => build_row_count.min(probe_row_count),
+    }
 }
 
 fn should_track_unmatched_right_rows(join_type: &JoinType) -> bool {

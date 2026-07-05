@@ -91,6 +91,7 @@ pub enum PlanNode {
     HashJoin {
         left: Box<PlanNode>,
         right: Box<PlanNode>,
+        join_type: JoinType,
         condition: Expression,
         cost: f64,
         rows: usize,
@@ -303,11 +304,18 @@ impl PlanNode {
             PlanNode::HashJoin {
                 left,
                 right,
+                join_type,
                 condition: _,
                 cost,
                 rows,
             } => {
-                writeln!(f, "{}Hash Join", indent_str)?;
+                let join_label = match join_type {
+                    JoinType::Left => "Hash Left Join",
+                    JoinType::Right => "Hash Right Join",
+                    JoinType::Full => "Hash Full Join",
+                    _ => "Hash Join",
+                };
+                writeln!(f, "{}{}", indent_str, join_label)?;
                 writeln!(f, "{}  Cost: {:.2}, Rows: {}", indent_str, cost, rows)?;
                 left.fmt_with_indent(f, indent + 1)?;
                 right.fmt_with_indent(f, indent + 1)

@@ -214,7 +214,7 @@ fn test_explain_full_join() {
     let plan_str = result.unwrap();
 
     assert!(plan_str.contains("Query Plan"));
-    assert!(plan_str.contains("Nested Loop Full Join"));
+    assert!(plan_str.contains("Hash Full Join"));
 }
 
 #[test]
