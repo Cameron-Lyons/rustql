@@ -2238,7 +2238,7 @@ fn explain_natural_join_returns_plan() {
         QueryResult::Explain(plan) => {
             assert!(matches!(
                 plan,
-                planner::PlanNode::NestedLoopJoin {
+                planner::PlanNode::HashJoin {
                     join_type: ast::JoinType::Natural,
                     ..
                 }

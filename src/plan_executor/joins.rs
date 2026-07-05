@@ -20,18 +20,17 @@ impl<'a> PlanExecutor<'a> {
             should_track_unmatched_right_rows(join_type).then(|| vec![false; right.rows.len()]);
         let combined_columns = (!matches!(join_type, JoinType::Cross))
             .then(|| combined_column_definitions(&left.columns, &right.columns));
-        let key_comparison = combined_columns
+        let key_comparisons = combined_columns
             .as_ref()
-            .and_then(|columns| resolved_column_comparison(condition, columns));
+            .and_then(|columns| resolved_column_comparisons(condition, columns));
 
         for left_row in &left.rows {
             let mut has_match = false;
             for (right_idx, right_row) in right.rows.iter().enumerate() {
                 let combined_row = if matches!(join_type, JoinType::Cross) {
                     Some(combine_rows(left_row, right_row))
-                } else if let Some(comparison) = &key_comparison {
-                    comparison
-                        .matches(left_row, right_row, left.columns.len())?
+                } else if let Some(comparisons) = &key_comparisons {
+                    comparisons_match(comparisons, left_row, right_row, left.columns.len())?
                         .then(|| combine_rows(left_row, right_row))
                 } else {
                     let combined_columns = combined_columns.as_ref().ok_or_else(|| {
@@ -283,7 +282,8 @@ impl<'a> PlanExecutor<'a> {
             }
         }
 
-        let probe_is_preserved = !matches!(join_type, JoinType::Inner);
+        let probe_is_preserved =
+            matches!(join_type, JoinType::Left | JoinType::Right | JoinType::Full);
         let mut matched_build =
             matches!(join_type, JoinType::Full).then(|| vec![false; build.rows.len()]);
         let mut joined_rows = Vec::with_capacity(hash_join_row_capacity(
@@ -299,7 +299,7 @@ impl<'a> PlanExecutor<'a> {
             condition,
             combined_columns: &combined_columns,
             left_column_count: left.columns.len(),
-            key_comparison: resolved_column_comparison(condition, &combined_columns),
+            key_comparisons: resolved_column_comparisons(condition, &combined_columns),
         };
 
         for probe_row in &probe.rows {
@@ -410,8 +410,8 @@ impl<'a> PlanExecutor<'a> {
                 (probe_row, build_row.as_slice())
             };
 
-            let matches = if let Some(comparison) = &context.key_comparison {
-                if comparison.matches(left_row, right_row, context.left_column_count)? {
+            let matches = if let Some(comparisons) = &context.key_comparisons {
+                if comparisons_match(comparisons, left_row, right_row, context.left_column_count)? {
                     joined_rows.push(combine_rows(left_row, right_row));
                     true
                 } else {
@@ -442,32 +442,48 @@ impl<'a> PlanExecutor<'a> {
         Ok(has_match)
     }
 
+    /// Finds the first top-level AND conjunct that is a `column = column`
+    /// equality mapping onto the build and probe sides; the remaining
+    /// conjuncts are enforced by re-verifying the full condition per
+    /// candidate pair.
     fn extract_join_keys(
         &self,
         condition: &Expression,
         build_cols: &[String],
         probe_cols: &[String],
     ) -> Result<(usize, usize), RustqlError> {
-        if let Expression::BinaryOp {
-            left,
-            op: BinaryOperator::Equal,
-            right,
-        } = condition
-            && let (Expression::Column(left_col), Expression::Column(right_col)) =
-                (left.as_ref(), right.as_ref())
-        {
-            let build_idx = hash_join_column_index(build_cols, left_col);
-            let probe_idx = hash_join_column_index(probe_cols, right_col);
+        let mut pending = vec![condition];
+        while let Some(conjunct) = pending.pop() {
+            let Expression::BinaryOp { left, op, right } = conjunct else {
+                continue;
+            };
+            match op {
+                BinaryOperator::And => {
+                    pending.push(right.as_ref());
+                    pending.push(left.as_ref());
+                }
+                BinaryOperator::Equal => {
+                    let (Expression::Column(left_col), Expression::Column(right_col)) =
+                        (left.as_ref(), right.as_ref())
+                    else {
+                        continue;
+                    };
 
-            if let (Some(bi), Some(pi)) = (build_idx, probe_idx) {
-                return Ok((bi, pi));
-            }
+                    let build_idx = hash_join_column_index(build_cols, left_col);
+                    let probe_idx = hash_join_column_index(probe_cols, right_col);
 
-            let swapped_build_idx = hash_join_column_index(build_cols, right_col);
-            let swapped_probe_idx = hash_join_column_index(probe_cols, left_col);
+                    if let (Some(bi), Some(pi)) = (build_idx, probe_idx) {
+                        return Ok((bi, pi));
+                    }
 
-            if let (Some(bi), Some(pi)) = (swapped_build_idx, swapped_probe_idx) {
-                return Ok((bi, pi));
+                    let swapped_build_idx = hash_join_column_index(build_cols, right_col);
+                    let swapped_probe_idx = hash_join_column_index(probe_cols, left_col);
+
+                    if let (Some(bi), Some(pi)) = (swapped_build_idx, swapped_probe_idx) {
+                        return Ok((bi, pi));
+                    }
+                }
+                _ => {}
             }
         }
         Err(RustqlError::Internal(
@@ -557,7 +573,7 @@ struct HashJoinMatchContext<'a> {
     condition: &'a Expression,
     combined_columns: &'a [ColumnDefinition],
     left_column_count: usize,
-    key_comparison: Option<ResolvedColumnComparison>,
+    key_comparisons: Option<Vec<ResolvedColumnComparison>>,
 }
 
 fn combined_cell<'a>(
@@ -597,15 +613,25 @@ impl ResolvedColumnComparison {
     }
 }
 
-/// Pre-resolves a `column <comparison> column` join condition to combined-row
-/// cell indices. Returns None for conditions the generic evaluator must
-/// handle.
-fn resolved_column_comparison(
+/// Pre-resolves a conjunction of `column <comparison> column` conditions to
+/// combined-row cell indices. Returns None when any conjunct is a shape the
+/// generic evaluator must handle.
+fn resolved_column_comparisons(
     condition: &Expression,
     combined_columns: &[ColumnDefinition],
-) -> Option<ResolvedColumnComparison> {
-    if let Expression::BinaryOp { left, op, right } = condition
-        && matches!(
+) -> Option<Vec<ResolvedColumnComparison>> {
+    let mut comparisons = Vec::new();
+    let mut pending = vec![condition];
+    while let Some(conjunct) = pending.pop() {
+        let Expression::BinaryOp { left, op, right } = conjunct else {
+            return None;
+        };
+        if matches!(op, BinaryOperator::And) {
+            pending.push(left.as_ref());
+            pending.push(right.as_ref());
+            continue;
+        }
+        if !matches!(
             op,
             BinaryOperator::Equal
                 | BinaryOperator::NotEqual
@@ -613,21 +639,40 @@ fn resolved_column_comparison(
                 | BinaryOperator::LessThanOrEqual
                 | BinaryOperator::GreaterThan
                 | BinaryOperator::GreaterThanOrEqual
-        )
-        && let (Expression::Column(left_col), Expression::Column(right_col)) =
+        ) {
+            return None;
+        }
+        let (Expression::Column(left_col), Expression::Column(right_col)) =
             (left.as_ref(), right.as_ref())
-        && left_col != "*"
-        && right_col != "*"
-    {
-        let left_index = resolve_combined_column(combined_columns, left_col)?;
-        let right_index = resolve_combined_column(combined_columns, right_col)?;
-        return Some(ResolvedColumnComparison {
-            left_index,
+        else {
+            return None;
+        };
+        if left_col == "*" || right_col == "*" {
+            return None;
+        }
+        comparisons.push(ResolvedColumnComparison {
+            left_index: resolve_combined_column(combined_columns, left_col)?,
             op: op.clone(),
-            right_index,
+            right_index: resolve_combined_column(combined_columns, right_col)?,
         });
     }
-    None
+    Some(comparisons)
+}
+
+/// Mirrors the evaluator's AND semantics: every conjunct is evaluated (so
+/// comparison errors surface regardless of other conjuncts) and the pair
+/// matches only when all conjuncts hold.
+fn comparisons_match(
+    comparisons: &[ResolvedColumnComparison],
+    left_row: &[Value],
+    right_row: &[Value],
+    left_column_count: usize,
+) -> Result<bool, RustqlError> {
+    let mut matched = true;
+    for comparison in comparisons {
+        matched &= comparison.matches(left_row, right_row, left_column_count)?;
+    }
+    Ok(matched)
 }
 
 /// Mirrors the expression evaluator's column resolution (exact name first,

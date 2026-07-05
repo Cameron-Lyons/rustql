@@ -313,6 +313,7 @@ impl PlanNode {
                     JoinType::Left => "Hash Left Join",
                     JoinType::Right => "Hash Right Join",
                     JoinType::Full => "Hash Full Join",
+                    JoinType::Natural => "Hash Natural Join",
                     _ => "Hash Join",
                 };
                 writeln!(f, "{}{}", indent_str, join_label)?;
