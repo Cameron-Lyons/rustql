@@ -13,6 +13,7 @@ use std::collections::{BTreeMap, HashSet};
 const MAX_RECURSIVE_CTE_ITERATIONS: usize = 1000;
 
 mod aggregate;
+mod decorrelate;
 mod filter;
 mod joins;
 mod order;
@@ -22,6 +23,7 @@ mod set_ops;
 mod subquery;
 mod support;
 
+use decorrelate::*;
 use subquery::{
     OuterValueBinding, execute_planned_select, lateral_subquery_with_outer_scope,
     outer_value_binding,
