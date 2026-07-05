@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::HashMap;
 
 impl<'a> PlanExecutor<'a> {
     pub(super) fn execute_nested_loop_join(
@@ -241,13 +242,23 @@ impl<'a> PlanExecutor<'a> {
         let (build_key_idx, probe_key_idx) =
             self.extract_join_keys(condition, build_cols, probe_cols)?;
 
-        let mut numeric_table: BTreeMap<NumericJoinKey, Vec<usize>> = BTreeMap::new();
-        let mut non_numeric_table: BTreeMap<NonNumericJoinKey, Vec<usize>> = BTreeMap::new();
+        let mut integer_table: HashMap<u64, Vec<usize>> = HashMap::new();
+        let mut float_table: BTreeMap<NumericJoinKey, Vec<usize>> = BTreeMap::new();
+        let mut non_numeric_table: HashMap<NonNumericJoinKey, Vec<usize>> = HashMap::new();
         for (row_idx, row) in build.rows.iter().enumerate() {
             if build_key_idx < row.len() {
                 match join_key(&row[build_key_idx]) {
-                    Some(JoinKey::Numeric(key)) => {
-                        numeric_table.entry(key).or_default().push(row_idx);
+                    Some(JoinKey::Integer(key)) => {
+                        integer_table
+                            .entry(numeric_key_bits(key))
+                            .or_default()
+                            .push(row_idx);
+                    }
+                    Some(JoinKey::Float(key)) => {
+                        float_table
+                            .entry(NumericJoinKey(key))
+                            .or_default()
+                            .push(row_idx);
                     }
                     Some(JoinKey::NonNumeric(key)) => {
                         non_numeric_table.entry(key).or_default().push(row_idx);
@@ -271,12 +282,9 @@ impl<'a> PlanExecutor<'a> {
         for probe_row in &probe.rows {
             if probe_key_idx < probe_row.len() {
                 match join_key(&probe_row[probe_key_idx]) {
-                    Some(JoinKey::Numeric(probe_key)) => {
-                        let lower = NumericJoinKey(probe_key.0 - f64::EPSILON);
-                        let upper = NumericJoinKey(probe_key.0 + f64::EPSILON);
-                        for build_row_indices in numeric_table
-                            .range(lower..=upper)
-                            .map(|(_, row_indices)| row_indices)
+                    Some(JoinKey::Integer(probe_key) | JoinKey::Float(probe_key)) => {
+                        if let Some(build_row_indices) =
+                            integer_table.get(&numeric_key_bits(probe_key))
                         {
                             self.append_hash_join_matches(
                                 &match_context,
@@ -284,6 +292,36 @@ impl<'a> PlanExecutor<'a> {
                                 build_row_indices,
                                 &mut joined_rows,
                             )?;
+                        }
+
+                        let nearest_integer = probe_key.round();
+                        if (probe_key - nearest_integer).abs() < f64::EPSILON
+                            && numeric_key_bits(nearest_integer) != numeric_key_bits(probe_key)
+                            && let Some(build_row_indices) =
+                                integer_table.get(&numeric_key_bits(nearest_integer))
+                        {
+                            self.append_hash_join_matches(
+                                &match_context,
+                                probe_row,
+                                build_row_indices,
+                                &mut joined_rows,
+                            )?;
+                        }
+
+                        if !float_table.is_empty() {
+                            let lower = NumericJoinKey(probe_key - f64::EPSILON);
+                            let upper = NumericJoinKey(probe_key + f64::EPSILON);
+                            for build_row_indices in float_table
+                                .range(lower..=upper)
+                                .map(|(_, row_indices)| row_indices)
+                            {
+                                self.append_hash_join_matches(
+                                    &match_context,
+                                    probe_row,
+                                    build_row_indices,
+                                    &mut joined_rows,
+                                )?;
+                            }
                         }
                     }
                     Some(JoinKey::NonNumeric(probe_key)) => {
@@ -464,7 +502,7 @@ impl Ord for NumericJoinKey {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum NonNumericJoinKey {
     Text(String),
     Boolean(bool),
@@ -474,15 +512,24 @@ enum NonNumericJoinKey {
 }
 
 enum JoinKey {
-    Numeric(NumericJoinKey),
+    /// Integer key, carried as its `as f64` cast because the expression
+    /// evaluator compares all numerics through f64.
+    Integer(f64),
+    Float(f64),
     NonNumeric(NonNumericJoinKey),
+}
+
+/// Hash key for numeric build values: exact f64 bit pattern, with -0.0
+/// collapsed onto 0.0 so the two zero encodings share one table entry.
+fn numeric_key_bits(value: f64) -> u64 {
+    (value + 0.0).to_bits()
 }
 
 fn join_key(value: &Value) -> Option<JoinKey> {
     match value {
         Value::Null => None,
-        Value::Integer(value) => Some(JoinKey::Numeric(NumericJoinKey(*value as f64))),
-        Value::Float(value) if value.is_finite() => Some(JoinKey::Numeric(NumericJoinKey(*value))),
+        Value::Integer(value) => Some(JoinKey::Integer(*value as f64)),
+        Value::Float(value) if value.is_finite() => Some(JoinKey::Float(*value)),
         Value::Float(_) => None,
         Value::Text(value) => Some(JoinKey::NonNumeric(NonNumericJoinKey::Text(value.clone()))),
         Value::Boolean(value) => Some(JoinKey::NonNumeric(NonNumericJoinKey::Boolean(*value))),

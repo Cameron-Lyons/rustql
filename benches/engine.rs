@@ -273,6 +273,11 @@ fn bench_definitions() -> Vec<BenchDefinition> {
             prepare: prepare_grouped_join,
         },
         BenchDefinition {
+            name: "keyed_join",
+            description: "Memory benchmark for a high-cardinality unique-key hash join.",
+            prepare: prepare_keyed_join,
+        },
+        BenchDefinition {
             name: "lateral_top1",
             description: "Memory benchmark for LEFT JOIN LATERAL top-1 lookups per outer row.",
             prepare: prepare_lateral_top1,
@@ -479,6 +484,40 @@ fn prepare_grouped_join(profile: BenchProfile) -> PreparedBench {
                  JOIN bench_b ON bench_a.grp = bench_b.grp \
                  GROUP BY bench_a.grp \
                  ORDER BY bench_a.grp";
+    PreparedBench {
+        scale: format!("{rows}x{rows} rows"),
+        run: Box::new(move || {
+            let mut session = engine.session();
+            black_box(session.execute_one(query).unwrap());
+        }),
+    }
+}
+
+fn prepare_keyed_join(profile: BenchProfile) -> PreparedBench {
+    let rows = profile.join_rows();
+    let engine = open_memory_engine();
+
+    {
+        let mut session = engine.session();
+        session
+            .execute_script(
+                "
+                CREATE TABLE bench_orders_l (id INTEGER, amount INTEGER);
+                CREATE TABLE bench_orders_r (id INTEGER, discount INTEGER);
+                ",
+            )
+            .unwrap();
+        insert_rows(&mut session, "bench_orders_l", rows, |index| {
+            format!("({}, {})", index, 10 + (index % 900))
+        });
+        insert_rows(&mut session, "bench_orders_r", rows, |index| {
+            format!("({}, {})", index, index % 50)
+        });
+    }
+
+    let query = "SELECT COUNT(*) AS total, SUM(bench_orders_l.amount) AS total_amount \
+                 FROM bench_orders_l \
+                 JOIN bench_orders_r ON bench_orders_l.id = bench_orders_r.id";
     PreparedBench {
         scale: format!("{rows}x{rows} rows"),
         run: Box::new(move || {
