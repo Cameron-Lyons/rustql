@@ -22,11 +22,14 @@ mod set_ops;
 mod subquery;
 mod support;
 
+use subquery::{
+    LateralValueBinding, execute_planned_select, lateral_subquery_with_outer_scope,
+    lateral_value_binding,
+};
 pub(crate) use subquery::{
     evaluate_planned_scalar_subquery_with_outer, evaluate_planned_subquery_exists_with_outer,
     evaluate_planned_subquery_values_with_outer,
 };
-use subquery::{execute_planned_select, lateral_subquery_with_outer_scope};
 use support::*;
 
 #[derive(Debug)]

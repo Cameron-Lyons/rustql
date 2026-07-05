@@ -76,54 +76,153 @@ impl<'a> PlanExecutor<'a> {
         let mut joined_rows =
             Vec::with_capacity(lateral_join_row_capacity(left.rows.len(), join_type));
         let joined_columns = joined_column_names(&left.columns, right_columns);
-        let temp_table_name = format!("__lateral_outer_{}", alias);
-        let rewritten_subquery = lateral_subquery_with_outer_scope(subquery, &temp_table_name);
-        let mut scoped_db =
-            ScopedDatabase::new(self.db, temp_table_name, outer_scope_columns.clone());
         let combined_columns = combined_column_definitions(&left.columns, right_columns);
+        let mut context = LateralMatchContext {
+            right_columns,
+            combined_columns: &combined_columns,
+            condition,
+            join_type,
+            joined_rows: &mut joined_rows,
+        };
 
-        for left_row in &left.rows {
-            scoped_db.update_temp_row(left_row);
-
-            let subquery_result = match execute_planned_select(&scoped_db, &rewritten_subquery) {
-                Ok(result) => result,
-                Err(err) => {
-                    if matches!(join_type, JoinType::Left | JoinType::Full) {
-                        joined_rows
-                            .push(combine_row_with_right_nulls(left_row, right_columns.len()));
-                        continue;
-                    }
-                    return Err(err);
-                }
-            };
-
-            if subquery_result.columns.len() != right_columns.len() {
-                return Err(RustqlError::Internal(
-                    "LATERAL subquery output shape changed during execution".to_string(),
-                ));
-            }
-
-            let mut has_match = false;
-            for right_row in &subquery_result.rows {
-                let combined_row = combine_rows(left_row, right_row);
-                let include =
-                    self.evaluate_expression(condition, &combined_columns, &combined_row)?;
-
-                if include {
-                    joined_rows.push(combined_row);
-                    has_match = true;
-                }
-            }
-
-            if matches!(join_type, JoinType::Left | JoinType::Full) && !has_match {
-                joined_rows.push(combine_row_with_right_nulls(left_row, right_columns.len()));
-            }
+        if let Some(binding) = lateral_value_binding(self.db, subquery, &outer_scope_columns) {
+            self.execute_lateral_join_bound(&left, subquery, &binding, &mut context)?;
+        } else {
+            self.execute_lateral_join_scoped(
+                &left,
+                subquery,
+                alias,
+                outer_scope_columns,
+                &mut context,
+            )?;
         }
 
         Ok(ExecutionResult {
             columns: joined_columns,
             rows: joined_rows,
         })
+    }
+
+    /// Fast path: outer references are bound to the current outer row's
+    /// literal values and the subquery runs against the real catalog, so the
+    /// planner can pick index scans on the inner table. An uncorrelated
+    /// subquery is executed once and reused for every outer row.
+    fn execute_lateral_join_bound(
+        &self,
+        left: &ExecutionResult,
+        subquery: &SelectStatement,
+        binding: &LateralValueBinding,
+        context: &mut LateralMatchContext<'_, '_>,
+    ) -> Result<(), RustqlError> {
+        if left.rows.is_empty() {
+            return Ok(());
+        }
+
+        if !binding.is_correlated() {
+            match execute_planned_select(self.db, subquery) {
+                Ok(shared_result) => {
+                    for left_row in &left.rows {
+                        self.append_lateral_matches(left_row, Ok(&shared_result), context)?;
+                    }
+                }
+                Err(err) => {
+                    if !matches!(context.join_type, JoinType::Left | JoinType::Full) {
+                        return Err(err);
+                    }
+                    for left_row in &left.rows {
+                        context.joined_rows.push(combine_row_with_right_nulls(
+                            left_row,
+                            context.right_columns.len(),
+                        ));
+                    }
+                }
+            }
+            return Ok(());
+        }
+
+        for left_row in &left.rows {
+            match execute_planned_select(self.db, &binding.bind(subquery, left_row)) {
+                Ok(result) => self.append_lateral_matches(left_row, Ok(&result), context)?,
+                Err(err) => self.append_lateral_matches(left_row, Err(err), context)?,
+            }
+        }
+        Ok(())
+    }
+
+    /// Fallback path for subquery shapes the literal binding does not cover:
+    /// expose the outer row through a scoped temp table joined into the
+    /// subquery.
+    fn execute_lateral_join_scoped(
+        &self,
+        left: &ExecutionResult,
+        subquery: &SelectStatement,
+        alias: &str,
+        outer_scope_columns: Vec<ColumnDefinition>,
+        context: &mut LateralMatchContext<'_, '_>,
+    ) -> Result<(), RustqlError> {
+        let temp_table_name = format!("__lateral_outer_{}", alias);
+        let rewritten_subquery = lateral_subquery_with_outer_scope(subquery, &temp_table_name);
+        let mut scoped_db = ScopedDatabase::new(self.db, temp_table_name, outer_scope_columns);
+
+        for left_row in &left.rows {
+            scoped_db.update_temp_row(left_row);
+            match execute_planned_select(&scoped_db, &rewritten_subquery) {
+                Ok(result) => self.append_lateral_matches(left_row, Ok(&result), context)?,
+                Err(err) => self.append_lateral_matches(left_row, Err(err), context)?,
+            }
+        }
+        Ok(())
+    }
+
+    fn append_lateral_matches(
+        &self,
+        left_row: &[Value],
+        subquery_result: Result<&ExecutionResult, RustqlError>,
+        context: &mut LateralMatchContext<'_, '_>,
+    ) -> Result<(), RustqlError> {
+        let subquery_result = match subquery_result {
+            Ok(result) => result,
+            Err(err) => {
+                if matches!(context.join_type, JoinType::Left | JoinType::Full) {
+                    context.joined_rows.push(combine_row_with_right_nulls(
+                        left_row,
+                        context.right_columns.len(),
+                    ));
+                    return Ok(());
+                }
+                return Err(err);
+            }
+        };
+
+        if subquery_result.columns.len() != context.right_columns.len() {
+            return Err(RustqlError::Internal(
+                "LATERAL subquery output shape changed during execution".to_string(),
+            ));
+        }
+
+        let mut has_match = false;
+        for right_row in &subquery_result.rows {
+            let combined_row = combine_rows(left_row, right_row);
+            let include = self.evaluate_expression(
+                context.condition,
+                context.combined_columns,
+                &combined_row,
+            )?;
+
+            if include {
+                context.joined_rows.push(combined_row);
+                has_match = true;
+            }
+        }
+
+        if matches!(context.join_type, JoinType::Left | JoinType::Full) && !has_match {
+            context.joined_rows.push(combine_row_with_right_nulls(
+                left_row,
+                context.right_columns.len(),
+            ));
+        }
+
+        Ok(())
     }
 
     pub(super) fn execute_hash_join(
@@ -325,6 +424,14 @@ fn joined_column_names(left: &[String], right: &[String]) -> Vec<String> {
     columns.extend(left.iter().cloned());
     columns.extend(right.iter().cloned());
     columns
+}
+
+struct LateralMatchContext<'a, 'rows> {
+    right_columns: &'a [String],
+    combined_columns: &'a [ColumnDefinition],
+    condition: &'a Expression,
+    join_type: &'a JoinType,
+    joined_rows: &'rows mut Vec<Vec<Value>>,
 }
 
 struct HashJoinMatchContext<'a> {
