@@ -153,12 +153,13 @@ impl<'a> PlanExecutor<'a> {
             PlanNode::HashJoin {
                 left,
                 right,
+                join_type,
                 condition,
                 ..
             } => {
                 let left_result = self.execute_plan_node(left)?;
                 let right_result = self.execute_plan_node(right)?;
-                self.execute_hash_join(left_result, right_result, condition)
+                self.execute_hash_join(left_result, right_result, join_type, condition)
             }
             PlanNode::LateralJoin {
                 left,

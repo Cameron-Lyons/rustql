@@ -836,3 +836,133 @@ fn test_full_join_not_equal_condition() {
         ]
     );
 }
+
+#[test]
+fn test_left_join_uses_hash_join_and_preserves_unmatched_rows() {
+    let _guard = setup_test();
+
+    execute_sql("CREATE TABLE events (id INTEGER, name TEXT)").unwrap();
+    execute_sql("CREATE TABLE tags (event_id INTEGER, label TEXT)").unwrap();
+
+    execute_sql("INSERT INTO events VALUES (1, 'launch'), (2, 'retro'), (NULL, 'ghost')").unwrap();
+    execute_sql("INSERT INTO tags VALUES (1, 'big'), (NULL, 'orphan'), (7, 'unused')").unwrap();
+
+    let plan = execute_sql(
+        "EXPLAIN SELECT events.name, tags.label \
+         FROM events LEFT JOIN tags ON events.id = tags.event_id",
+    )
+    .unwrap();
+    assert!(plan.contains("Hash Left Join"));
+
+    let rows = query_rows(
+        "SELECT events.name, tags.label \
+         FROM events LEFT JOIN tags ON events.id = tags.event_id \
+         ORDER BY events.name",
+    )
+    .unwrap();
+
+    assert_eq!(
+        rows.rows,
+        vec![
+            vec![Value::Text("ghost".into()), Value::Null],
+            vec![Value::Text("launch".into()), Value::Text("big".into())],
+            vec![Value::Text("retro".into()), Value::Null],
+        ]
+    );
+}
+
+#[test]
+fn test_right_join_uses_hash_join_and_preserves_unmatched_rows() {
+    let _guard = setup_test();
+
+    execute_sql("CREATE TABLE events (id INTEGER, name TEXT)").unwrap();
+    execute_sql("CREATE TABLE tags (event_id INTEGER, label TEXT)").unwrap();
+
+    execute_sql("INSERT INTO events VALUES (1, 'launch'), (2, 'retro')").unwrap();
+    execute_sql("INSERT INTO tags VALUES (1, 'big'), (NULL, 'orphan'), (7, 'unused')").unwrap();
+
+    let plan = execute_sql(
+        "EXPLAIN SELECT events.name, tags.label \
+         FROM events RIGHT JOIN tags ON events.id = tags.event_id",
+    )
+    .unwrap();
+    assert!(plan.contains("Hash Right Join"));
+
+    let rows = query_rows(
+        "SELECT events.name, tags.label \
+         FROM events RIGHT JOIN tags ON events.id = tags.event_id \
+         ORDER BY tags.label",
+    )
+    .unwrap();
+
+    assert_eq!(
+        rows.rows,
+        vec![
+            vec![Value::Text("launch".into()), Value::Text("big".into())],
+            vec![Value::Null, Value::Text("orphan".into())],
+            vec![Value::Null, Value::Text("unused".into())],
+        ]
+    );
+}
+
+#[test]
+fn test_full_join_uses_hash_join_and_preserves_both_sides() {
+    let _guard = setup_test();
+
+    execute_sql("CREATE TABLE lhs (id INTEGER, name TEXT)").unwrap();
+    execute_sql("CREATE TABLE rhs (id INTEGER, label TEXT)").unwrap();
+
+    execute_sql("INSERT INTO lhs VALUES (1, 'one'), (2, 'two'), (NULL, 'left-null')").unwrap();
+    execute_sql("INSERT INTO rhs VALUES (2, 'deux'), (3, 'trois'), (NULL, 'right-null')").unwrap();
+
+    let plan =
+        execute_sql("EXPLAIN SELECT lhs.name, rhs.label FROM lhs FULL JOIN rhs ON lhs.id = rhs.id")
+            .unwrap();
+    assert!(plan.contains("Hash Full Join"));
+
+    let rows = query_rows(
+        "SELECT lhs.name, rhs.label \
+         FROM lhs FULL JOIN rhs ON lhs.id = rhs.id \
+         ORDER BY lhs.name, rhs.label",
+    )
+    .unwrap();
+
+    assert_eq!(
+        rows.rows,
+        vec![
+            vec![Value::Text("left-null".into()), Value::Null],
+            vec![Value::Text("one".into()), Value::Null],
+            vec![Value::Text("two".into()), Value::Text("deux".into())],
+            vec![Value::Null, Value::Text("right-null".into())],
+            vec![Value::Null, Value::Text("trois".into())],
+        ]
+    );
+}
+
+#[test]
+fn test_left_join_extra_condition_stays_on_nested_loop() {
+    let _guard = setup_test();
+
+    execute_sql("CREATE TABLE users (id INTEGER, name TEXT)").unwrap();
+    execute_sql("CREATE TABLE orders (user_id INTEGER, amount INTEGER)").unwrap();
+
+    execute_sql("INSERT INTO users VALUES (1, 'Alice'), (2, 'Bob')").unwrap();
+    execute_sql("INSERT INTO orders VALUES (1, 10), (1, 500), (2, 20)").unwrap();
+
+    let query = "SELECT users.name, orders.amount \
+                 FROM users LEFT JOIN orders \
+                 ON users.id = orders.user_id AND orders.amount > 100 \
+                 ORDER BY users.name";
+
+    let plan = execute_sql(&format!("EXPLAIN {query}")).unwrap();
+    assert!(plan.contains("Nested Loop Left Join"));
+
+    let rows = query_rows(query).unwrap();
+    assert_eq!(
+        rows.rows,
+        vec![
+            vec![Value::Text("Alice".into()), Value::Integer(500)],
+            vec![Value::Text("Bob".into()), Value::Null],
+        ]
+    );
+}

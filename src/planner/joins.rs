@@ -80,16 +80,22 @@ impl<'a> QueryPlanner<'a> {
 
             let join_condition =
                 self.join_condition_for_plan(&join, &left_columns, &right_columns, &right_label);
-            let join_plan = if matches!(join.join_type, JoinType::Inner)
-                && join.using_columns.is_none()
-                && !matches!(join.join_type, JoinType::Natural)
+            let join_plan = if matches!(
+                join.join_type,
+                JoinType::Inner | JoinType::Left | JoinType::Right | JoinType::Full
+            ) && join.using_columns.is_none()
                 && self.is_hash_joinable(
                     &join_condition,
                     &left_columns,
                     &right_columns,
                     &right_label,
                 ) {
-                self.plan_hash_join(current_plan, right_plan, join_condition.clone())
+                self.plan_hash_join(
+                    current_plan,
+                    right_plan,
+                    join.join_type.clone(),
+                    join_condition.clone(),
+                )
             } else {
                 self.plan_nested_loop_join(
                     current_plan,
@@ -217,16 +223,24 @@ impl<'a> QueryPlanner<'a> {
         &self,
         left: PlanNode,
         right: PlanNode,
+        join_type: JoinType,
         condition: Expression,
     ) -> PlanNode {
         let left_rows = self.estimate_rows(&left);
         let right_rows = self.estimate_rows(&right);
         let cost = self.estimate_hash_join_cost(&left, &right);
-        let estimated_output_rows = self.estimate_join_rows(left_rows, right_rows, &condition);
+        let joined_rows = self.estimate_join_rows(left_rows, right_rows, &condition);
+        let estimated_output_rows = match join_type {
+            JoinType::Left => joined_rows.max(left_rows),
+            JoinType::Right => joined_rows.max(right_rows),
+            JoinType::Full => joined_rows.max(left_rows).max(right_rows),
+            _ => joined_rows,
+        };
 
         PlanNode::HashJoin {
             left: Box::new(left),
             right: Box::new(right),
+            join_type,
             condition,
             cost,
             rows: estimated_output_rows,
