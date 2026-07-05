@@ -146,3 +146,23 @@ pub fn evaluate_value_expression_with_db(
         )),
     }
 }
+
+/// Resolves a column reference the same way expression evaluation does:
+/// exact name first, then unqualified-suffix matching. Callers use this to
+/// pre-resolve plain column expressions to cell indices once instead of
+/// re-resolving the name for every row.
+pub(crate) fn resolve_column_index(columns: &[ColumnDefinition], name: &str) -> Option<usize> {
+    if let Some(idx) = columns.iter().position(|c| c.name == name) {
+        return Some(idx);
+    }
+    if name.contains('.') {
+        let col_name = name.split('.').next_back().unwrap_or(name);
+        columns.iter().position(|c| {
+            c.name == col_name || c.name.split('.').next_back().unwrap_or(&c.name) == col_name
+        })
+    } else {
+        columns
+            .iter()
+            .position(|c| c.name.split('.').next_back().unwrap_or(&c.name) == name)
+    }
+}

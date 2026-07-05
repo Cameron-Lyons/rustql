@@ -21,4 +21,5 @@ pub(crate) use row_identity::{
     IdentityProbe, RowIdentityIndex, SqlRowMultiset, SqlRowSet, row_has_finite_numeric_value,
     rows_equal_for_sql_identity, values_equal_for_sql_identity,
 };
+pub(crate) use value::resolve_column_index;
 pub use value::{evaluate_value_expression, evaluate_value_expression_with_db};

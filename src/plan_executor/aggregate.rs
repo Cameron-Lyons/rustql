@@ -309,7 +309,7 @@ impl<'a> PlanExecutor<'a> {
             .iter()
             .map(|expr| match expr {
                 Expression::Column(name) if name != "*" => {
-                    resolve_combined_column(columns, name).ok_or(expr)
+                    resolve_column_index(columns, name).ok_or(expr)
                 }
                 _ => Err(expr),
             })
@@ -384,7 +384,7 @@ impl<'a> PlanExecutor<'a> {
         // A plain column input resolves to its cell index once instead of
         // re-resolving the name for every row.
         let input_cell = match agg.expr.as_ref() {
-            Expression::Column(name) if name != "*" => resolve_combined_column(columns, name),
+            Expression::Column(name) if name != "*" => resolve_column_index(columns, name),
             _ => None,
         };
 

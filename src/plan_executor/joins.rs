@@ -687,9 +687,9 @@ fn resolved_column_comparisons(
             return None;
         }
         comparisons.push(ResolvedColumnComparison {
-            left_index: resolve_combined_column(combined_columns, left_col)?,
+            left_index: resolve_column_index(combined_columns, left_col)?,
             op: op.clone(),
-            right_index: resolve_combined_column(combined_columns, right_col)?,
+            right_index: resolve_column_index(combined_columns, right_col)?,
         });
     }
     Some(comparisons)
