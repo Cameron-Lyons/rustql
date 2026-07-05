@@ -278,6 +278,11 @@ fn bench_definitions() -> Vec<BenchDefinition> {
             prepare: prepare_lateral_top1,
         },
         BenchDefinition {
+            name: "correlated_exists",
+            description: "Memory benchmark for correlated EXISTS and scalar subquery filters.",
+            prepare: prepare_correlated_exists,
+        },
+        BenchDefinition {
             name: "grouped_multi_aggregate",
             description: "Memory benchmark for grouped COUNT/SUM/AVG/MODE aggregation.",
             prepare: prepare_grouped_multi_aggregate,
@@ -522,6 +527,57 @@ fn prepare_lateral_top1(profile: BenchProfile) -> PreparedBench {
                      ORDER BY amount DESC \
                      FETCH FIRST 1 ROW ONLY \
                  ) AS recent \
+                 ORDER BY bench_users.id";
+    PreparedBench {
+        scale: format!("{users} users/{total_orders} orders"),
+        run: Box::new(move || {
+            let mut session = engine.session();
+            black_box(session.execute_one(query).unwrap());
+        }),
+    }
+}
+
+fn prepare_correlated_exists(profile: BenchProfile) -> PreparedBench {
+    let users = profile.lateral_users();
+    let orders_per_user = 6usize;
+    let total_orders = users * orders_per_user;
+    let engine = open_memory_engine();
+
+    {
+        let mut session = engine.session();
+        session
+            .execute_script(
+                "
+                CREATE TABLE bench_users (id INTEGER, region INTEGER);
+                CREATE TABLE bench_orders (id INTEGER, user_id INTEGER, amount INTEGER);
+                ",
+            )
+            .unwrap();
+        insert_rows(&mut session, "bench_users", users, |index| {
+            format!("({}, {})", index + 1, index % 32)
+        });
+        insert_rows(&mut session, "bench_orders", total_orders, |index| {
+            let user_id = (index / orders_per_user) + 1;
+            let ordinal = index % orders_per_user;
+            let amount = ((user_id * 37) + (ordinal * 113)) % 10_000;
+            format!("({}, {}, {})", index + 1, user_id, amount)
+        });
+        session
+            .execute_one("CREATE INDEX bench_orders_user_idx ON bench_orders (user_id)")
+            .unwrap();
+    }
+
+    let query = "SELECT bench_users.id, \
+                        (SELECT MAX(amount) \
+                         FROM bench_orders \
+                         WHERE bench_orders.user_id = bench_users.id) \
+                 FROM bench_users \
+                 WHERE EXISTS ( \
+                     SELECT 1 \
+                     FROM bench_orders \
+                     WHERE bench_orders.user_id = bench_users.id \
+                       AND bench_orders.amount > 5000 \
+                 ) \
                  ORDER BY bench_users.id";
     PreparedBench {
         scale: format!("{users} users/{total_orders} orders"),

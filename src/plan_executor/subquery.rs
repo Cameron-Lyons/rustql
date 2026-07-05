@@ -91,6 +91,10 @@ fn execute_scoped_select(
         return execute_planned_select(db, subquery);
     }
 
+    if let Some(binding) = outer_value_binding(db, subquery, outer_columns) {
+        return execute_planned_select(db, &binding.bind(subquery, outer_row));
+    }
+
     let temp_table_name = "__lateral_outer_scalar".to_string();
     let (scoped_outer_columns, outer_column_mappings) = scoped_outer_columns(outer_columns);
     let rewritten_subquery = scoped_subquery_with_outer_scope(
@@ -341,12 +345,12 @@ fn collect_table_column_names(
 /// scope: every outer column reference is replaced with the current outer
 /// row's literal value, so the planner sees constant predicates and can use
 /// indexes on the inner table.
-pub(super) struct LateralValueBinding {
+pub(super) struct OuterValueBinding {
     /// Column-reference strings in the subquery mapped to outer-row indices.
     references: HashMap<String, usize>,
 }
 
-impl LateralValueBinding {
+impl OuterValueBinding {
     pub(super) fn is_correlated(&self) -> bool {
         !self.references.is_empty()
     }
@@ -365,21 +369,13 @@ impl LateralValueBinding {
         if let Some(having) = bound.having.as_mut() {
             self.bind_expression(having, outer_row);
         }
-        if let Some(distinct_on) = bound.distinct_on.as_mut() {
-            for expr in distinct_on {
-                self.bind_expression(expr, outer_row);
-            }
-        }
         if let Some(order_by) = bound.order_by.as_mut() {
             for item in order_by {
                 self.bind_expression(&mut item.expr, outer_row);
             }
         }
-        for join in &mut bound.joins {
-            if let Some(on) = join.on.as_mut() {
-                self.bind_expression(on, outer_row);
-            }
-        }
+        // Join ON and DISTINCT ON clauses are guaranteed free of outer
+        // references by `outer_value_binding`, so they are not rewritten.
         bound
     }
 
@@ -505,15 +501,17 @@ fn outer_row_value(outer_row: &[Value], index: usize) -> Value {
     outer_row.get(index).cloned().unwrap_or(Value::Null)
 }
 
-/// Decide whether a LATERAL subquery can run by binding outer references to
-/// literal values. Returns `None` for shapes where the rewrite is not known
-/// to be safe (nested subqueries, CTEs, set operations, derived tables, ...);
-/// callers fall back to the temp-table outer scope in that case.
-pub(super) fn lateral_value_binding(
+/// Decide whether a correlated subquery can run by binding outer references
+/// to literal values. Returns `None` for shapes where the rewrite is not
+/// known to be safe (nested subqueries, CTEs, set operations, derived tables,
+/// outer references inside join ON or DISTINCT ON clauses, names that are
+/// ambiguous between the outer and inner scope, ...); callers fall back to
+/// the temp-table outer scope in that case.
+pub(super) fn outer_value_binding(
     db: &dyn DatabaseCatalog,
     subquery: &SelectStatement,
     outer_columns: &[ColumnDefinition],
-) -> Option<LateralValueBinding> {
+) -> Option<OuterValueBinding> {
     if !subquery.ctes.is_empty()
         || subquery.from_subquery.is_some()
         || subquery.from_function.is_some()
@@ -541,18 +539,74 @@ pub(super) fn lateral_value_binding(
                     return None;
                 }
             }
-            Column::All | Column::Function(_) | Column::Expression { .. } => {}
+            Column::Function(aggregate) => {
+                if !scan_expression_references(
+                    &aggregate.expr,
+                    outer_columns,
+                    &local_columns,
+                    &mut references,
+                ) {
+                    return None;
+                }
+                if let Some(filter) = aggregate.filter.as_deref()
+                    && !scan_expression_references(
+                        filter,
+                        outer_columns,
+                        &local_columns,
+                        &mut references,
+                    )
+                {
+                    return None;
+                }
+            }
+            Column::Expression { expr, .. } => {
+                if !scan_expression_references(expr, outer_columns, &local_columns, &mut references)
+                {
+                    return None;
+                }
+            }
+            Column::All => {}
             Column::Subquery(_) => return None,
         }
     }
 
-    for expr in subquery_expression_refs(subquery) {
+    let mut clause_refs: Vec<&Expression> = Vec::new();
+    if let Some(where_clause) = subquery.where_clause.as_ref() {
+        clause_refs.push(where_clause);
+    }
+    if let Some(group_by) = subquery.group_by.as_ref() {
+        clause_refs.extend(group_by.exprs());
+    }
+    if let Some(having) = subquery.having.as_ref() {
+        clause_refs.push(having);
+    }
+    if let Some(order_by) = subquery.order_by.as_ref() {
+        clause_refs.extend(order_by.iter().map(|item| &item.expr));
+    }
+    for expr in clause_refs {
         if !scan_expression_references(expr, outer_columns, &local_columns, &mut references) {
             return None;
         }
     }
 
-    Some(LateralValueBinding { references })
+    // The temp-table rewrite never substitutes outer references inside join
+    // ON or DISTINCT ON clauses; keep those subqueries on the fallback path
+    // so their resolution behavior is unchanged.
+    let mut strictly_local: Vec<&Expression> = Vec::new();
+    strictly_local.extend(subquery.joins.iter().filter_map(|join| join.on.as_ref()));
+    if let Some(distinct_on) = subquery.distinct_on.as_ref() {
+        strictly_local.extend(distinct_on);
+    }
+    for expr in strictly_local {
+        let mut disallowed = HashMap::new();
+        if !scan_expression_references(expr, outer_columns, &local_columns, &mut disallowed)
+            || !disallowed.is_empty()
+        {
+            return None;
+        }
+    }
+
+    Some(OuterValueBinding { references })
 }
 
 /// Collect outer references from `expr` into `references`. Returns `false`
@@ -636,6 +690,11 @@ fn record_outer_reference(
 ) -> bool {
     if !column_needs_outer_scope(reference, local_columns, outer_columns) {
         return true;
+    }
+    // A name that matches the outer scope but is also resolvable locally is
+    // ambiguous; leave those subqueries on the temp-table fallback path.
+    if local_columns.contains(reference) {
+        return false;
     }
     match resolve_outer_column_index(reference, outer_columns, local_columns) {
         Some(index) => {

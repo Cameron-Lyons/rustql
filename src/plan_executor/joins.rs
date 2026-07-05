@@ -85,7 +85,7 @@ impl<'a> PlanExecutor<'a> {
             joined_rows: &mut joined_rows,
         };
 
-        if let Some(binding) = lateral_value_binding(self.db, subquery, &outer_scope_columns) {
+        if let Some(binding) = outer_value_binding(self.db, subquery, &outer_scope_columns) {
             self.execute_lateral_join_bound(&left, subquery, &binding, &mut context)?;
         } else {
             self.execute_lateral_join_scoped(
@@ -111,7 +111,7 @@ impl<'a> PlanExecutor<'a> {
         &self,
         left: &ExecutionResult,
         subquery: &SelectStatement,
-        binding: &LateralValueBinding,
+        binding: &OuterValueBinding,
         context: &mut LateralMatchContext<'_, '_>,
     ) -> Result<(), RustqlError> {
         if left.rows.is_empty() {
