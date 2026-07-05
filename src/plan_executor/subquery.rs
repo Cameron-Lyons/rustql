@@ -355,6 +355,10 @@ impl OuterValueBinding {
         !self.references.is_empty()
     }
 
+    pub(super) fn outer_index_of(&self, reference: &str) -> Option<usize> {
+        self.references.get(reference).copied()
+    }
+
     pub(super) fn bind(&self, subquery: &SelectStatement, outer_row: &[Value]) -> SelectStatement {
         let mut bound = subquery.clone();
         for column in &mut bound.columns {

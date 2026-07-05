@@ -48,12 +48,14 @@ impl<'a> PlanExecutor<'a> {
             .ok_or_else(|| RustqlError::TableNotFound(table_name.to_string()))?;
 
         let mut rows = Vec::with_capacity(table.rows.len());
+        let prepared = filter.map(|filter_expr| {
+            PreparedRowFilter::new(self.db, filter_expr, &table.columns, table.rows.len())
+        });
 
         for row in &table.rows {
-            let include = if let Some(filter_expr) = filter {
-                self.evaluate_expression(filter_expr, &table.columns, row)?
-            } else {
-                true
+            let include = match &prepared {
+                Some(prepared) => prepared.include(self, &table.columns, row)?,
+                None => true,
             };
 
             if include {
@@ -92,12 +94,14 @@ impl<'a> PlanExecutor<'a> {
         };
 
         let mut rows = Vec::with_capacity(row_ids.len());
+        let prepared = filter.map(|filter_expr| {
+            PreparedRowFilter::new(self.db, filter_expr, &table.columns, row_ids.len())
+        });
         for row_id in row_ids {
             if let Some(row) = table.row_by_id(row_id) {
-                let include = if let Some(filter_expr) = filter {
-                    self.evaluate_expression(filter_expr, &table.columns, row)?
-                } else {
-                    true
+                let include = match &prepared {
+                    Some(prepared) => prepared.include(self, &table.columns, row)?,
+                    None => true,
                 };
 
                 if include {

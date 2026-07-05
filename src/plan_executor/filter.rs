@@ -8,10 +8,10 @@ impl<'a> PlanExecutor<'a> {
     ) -> Result<ExecutionResult, RustqlError> {
         let columns = column_definitions_from_names(&input.columns);
         let mut filtered_rows = Vec::with_capacity(input.rows.len());
+        let prepared = PreparedRowFilter::new(self.db, condition, &columns, input.rows.len());
 
         for row in input.rows {
-            let include = self.evaluate_expression(condition, &columns, &row)?;
-            if include {
+            if prepared.include(self, &columns, &row)? {
                 filtered_rows.push(row);
             }
         }
