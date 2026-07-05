@@ -4,8 +4,8 @@ use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
 use super::expr::{
-    compare_order_values, compare_values_for_sort, evaluate_value_expression,
-    row_has_finite_numeric_value, rows_equal_for_sql_identity,
+    IdentityProbe, RowIdentityIndex, compare_order_values, compare_values_for_sort,
+    evaluate_value_expression, row_has_finite_numeric_value, rows_equal_for_sql_identity,
 };
 
 pub(crate) const DEFAULT_PERCENTILE_FRACTION: f64 = 0.5;
@@ -46,6 +46,7 @@ pub(crate) fn format_aggregate_header(agg: &AggregateFunction) -> String {
 struct WindowPartitionGroups {
     non_numeric_groups: BTreeMap<Vec<Value>, Vec<usize>>,
     numeric_groups: Vec<(Vec<Value>, Vec<usize>)>,
+    numeric_index: RowIdentityIndex,
 }
 
 impl WindowPartitionGroups {
@@ -53,19 +54,29 @@ impl WindowPartitionGroups {
         Self {
             non_numeric_groups: BTreeMap::new(),
             numeric_groups: Vec::new(),
+            numeric_index: RowIdentityIndex::new(),
         }
     }
 
     fn insert(&mut self, key: Vec<Value>, idx: usize) {
         if row_has_finite_numeric_value(&key) {
-            if let Some((_, indices)) = self
-                .numeric_groups
-                .iter_mut()
-                .find(|(candidate, _)| rows_equal_for_sql_identity(candidate, &key))
-            {
-                indices.push(idx);
-            } else {
-                self.numeric_groups.push((key, vec![idx]));
+            let existing = match self.numeric_index.probe(&key) {
+                IdentityProbe::Hit(index) => Some(index),
+                IdentityProbe::New => None,
+                IdentityProbe::MaybeEqual => self
+                    .numeric_groups
+                    .iter()
+                    .position(|(candidate, _)| rows_equal_for_sql_identity(candidate, &key)),
+            };
+            match existing {
+                Some(index) => {
+                    self.numeric_index.record(&key, index);
+                    self.numeric_groups[index].1.push(idx);
+                }
+                None => {
+                    self.numeric_index.record(&key, self.numeric_groups.len());
+                    self.numeric_groups.push((key, vec![idx]));
+                }
             }
         } else {
             self.non_numeric_groups.entry(key).or_default().push(idx);

@@ -48,6 +48,7 @@ struct AggregateGroup<'a> {
 struct AggregateGroupCollection<'a> {
     non_numeric_groups: BTreeMap<Vec<Value>, Vec<&'a [Value]>>,
     numeric_groups: Vec<AggregateGroup<'a>>,
+    numeric_index: RowIdentityIndex,
 }
 
 impl<'a> AggregateGroupCollection<'a> {
@@ -55,22 +56,32 @@ impl<'a> AggregateGroupCollection<'a> {
         Self {
             non_numeric_groups: BTreeMap::new(),
             numeric_groups: Vec::new(),
+            numeric_index: RowIdentityIndex::new(),
         }
     }
 
     fn insert(&mut self, key: Vec<Value>, row: &'a [Value]) {
         if row_has_finite_numeric_value(&key) {
-            if let Some(group) = self
-                .numeric_groups
-                .iter_mut()
-                .find(|group| rows_equal_for_sql_identity(&group.key, &key))
-            {
-                group.rows.push(row);
-            } else {
-                self.numeric_groups.push(AggregateGroup {
-                    key,
-                    rows: vec![row],
-                });
+            let existing = match self.numeric_index.probe(&key) {
+                IdentityProbe::Hit(index) => Some(index),
+                IdentityProbe::New => None,
+                IdentityProbe::MaybeEqual => self
+                    .numeric_groups
+                    .iter()
+                    .position(|group| rows_equal_for_sql_identity(&group.key, &key)),
+            };
+            match existing {
+                Some(index) => {
+                    self.numeric_index.record(&key, index);
+                    self.numeric_groups[index].rows.push(row);
+                }
+                None => {
+                    self.numeric_index.record(&key, self.numeric_groups.len());
+                    self.numeric_groups.push(AggregateGroup {
+                        key,
+                        rows: vec![row],
+                    });
+                }
             }
         } else {
             self.non_numeric_groups.entry(key).or_default().push(row);
@@ -79,6 +90,7 @@ impl<'a> AggregateGroupCollection<'a> {
 
     fn insert_empty_group(&mut self, key: Vec<Value>) {
         if row_has_finite_numeric_value(&key) {
+            self.numeric_index.record(&key, self.numeric_groups.len());
             self.numeric_groups.push(AggregateGroup {
                 key,
                 rows: Vec::new(),
