@@ -371,3 +371,131 @@ fn test_scalar_subquery_null_outer_key() {
         ]
     );
 }
+
+#[test]
+fn test_lateral_top1_per_user() {
+    let _guard = setup_test();
+
+    execute_sql("CREATE TABLE users (id INTEGER, name TEXT)").unwrap();
+    execute_sql("CREATE TABLE orders (user_id INTEGER, amount INTEGER)").unwrap();
+
+    execute_sql("INSERT INTO users VALUES (1, 'Alice'), (2, 'Bob'), (3, 'Cara')").unwrap();
+    execute_sql("INSERT INTO orders VALUES (1, 50), (1, 900), (3, 70), (3, 20)").unwrap();
+
+    // Bob has no orders and must still appear with a NULL amount.
+    let rows = query_rows(
+        "SELECT users.name, recent.amount \
+         FROM users \
+         LEFT JOIN LATERAL ( \
+             SELECT amount FROM orders \
+             WHERE orders.user_id = users.id \
+             ORDER BY amount DESC LIMIT 1 \
+         ) AS recent \
+         ORDER BY users.name",
+    )
+    .unwrap();
+
+    assert_eq!(
+        rows.rows,
+        vec![
+            vec![Value::Text("Alice".into()), Value::Integer(900)],
+            vec![Value::Text("Bob".into()), Value::Null],
+            vec![Value::Text("Cara".into()), Value::Integer(70)],
+        ]
+    );
+}
+
+#[test]
+fn test_lateral_top2_ascending_with_local_predicate() {
+    let _guard = setup_test();
+
+    execute_sql("CREATE TABLE users (id INTEGER, name TEXT)").unwrap();
+    execute_sql("CREATE TABLE orders (user_id INTEGER, amount INTEGER)").unwrap();
+
+    execute_sql("INSERT INTO users VALUES (1, 'Alice'), (2, 'Bob')").unwrap();
+    execute_sql("INSERT INTO orders VALUES (1, 50), (1, 5), (1, 900), (1, 8), (2, 3), (2, 40)")
+        .unwrap();
+
+    let rows = query_rows(
+        "SELECT users.name, cheap.amount \
+         FROM users \
+         LEFT JOIN LATERAL ( \
+             SELECT amount FROM orders \
+             WHERE orders.user_id = users.id AND orders.amount > 4 \
+             ORDER BY amount ASC LIMIT 2 \
+         ) AS cheap \
+         ORDER BY users.name, cheap.amount",
+    )
+    .unwrap();
+
+    assert_eq!(
+        rows.rows,
+        vec![
+            vec![Value::Text("Alice".into()), Value::Integer(5)],
+            vec![Value::Text("Alice".into()), Value::Integer(8)],
+            vec![Value::Text("Bob".into()), Value::Integer(40)],
+        ]
+    );
+}
+
+#[test]
+fn test_lateral_inner_join_drops_unmatched_users() {
+    let _guard = setup_test();
+
+    execute_sql("CREATE TABLE users (id INTEGER, name TEXT)").unwrap();
+    execute_sql("CREATE TABLE orders (user_id INTEGER, amount INTEGER)").unwrap();
+
+    execute_sql("INSERT INTO users VALUES (1, 'Alice'), (2, 'Bob'), (3, 'Cara')").unwrap();
+    execute_sql("INSERT INTO orders VALUES (1, 50), (3, 70)").unwrap();
+
+    let rows = query_rows(
+        "SELECT users.name, best.amount \
+         FROM users \
+         JOIN LATERAL ( \
+             SELECT amount FROM orders \
+             WHERE orders.user_id = users.id \
+             ORDER BY amount DESC LIMIT 1 \
+         ) AS best \
+         ORDER BY users.name",
+    )
+    .unwrap();
+
+    assert_eq!(
+        rows.rows,
+        vec![
+            vec![Value::Text("Alice".into()), Value::Integer(50)],
+            vec![Value::Text("Cara".into()), Value::Integer(70)],
+        ]
+    );
+}
+
+#[test]
+fn test_lateral_top1_null_outer_key() {
+    let _guard = setup_test();
+
+    execute_sql("CREATE TABLE users (id INTEGER, name TEXT)").unwrap();
+    execute_sql("CREATE TABLE orders (user_id INTEGER, amount INTEGER)").unwrap();
+
+    execute_sql("INSERT INTO users VALUES (1, 'Alice'), (NULL, 'Ghost')").unwrap();
+    execute_sql("INSERT INTO orders VALUES (1, 50), (NULL, 900)").unwrap();
+
+    let rows = query_rows(
+        "SELECT users.name, recent.amount \
+         FROM users \
+         LEFT JOIN LATERAL ( \
+             SELECT amount FROM orders \
+             WHERE orders.user_id = users.id \
+             ORDER BY amount DESC LIMIT 1 \
+         ) AS recent \
+         ORDER BY users.name",
+    )
+    .unwrap();
+
+    assert_eq!(
+        rows.rows,
+        vec![
+            vec![Value::Text("Alice".into()), Value::Integer(50)],
+            vec![Value::Text("Ghost".into()), Value::Null],
+        ]
+    );
+}

@@ -93,7 +93,11 @@ impl<'a> PlanExecutor<'a> {
             joined_rows: &mut joined_rows,
         };
 
-        if let Some(binding) = outer_value_binding(self.db, subquery, &outer_scope_columns) {
+        if let Some(lookup) =
+            prepare_lateral_top_rows(self.db, subquery, &outer_scope_columns, left.rows.len())
+        {
+            self.execute_lateral_join_prepared(&left, &lookup, &mut context)?;
+        } else if let Some(binding) = outer_value_binding(self.db, subquery, &outer_scope_columns) {
             self.execute_lateral_join_bound(&left, subquery, &binding, &mut context)?;
         } else {
             self.execute_lateral_join_scoped(
@@ -109,6 +113,38 @@ impl<'a> PlanExecutor<'a> {
             columns: joined_columns,
             rows: joined_rows,
         })
+    }
+
+    /// Fastest path: the subquery was decorrelated into a per-key top-k
+    /// lookup table, so each outer row resolves its matches with one probe.
+    fn execute_lateral_join_prepared(
+        &self,
+        left: &ExecutionResult,
+        lookup: &LateralTopRows,
+        context: &mut LateralMatchContext<'_, '_>,
+    ) -> Result<(), RustqlError> {
+        for left_row in &left.rows {
+            let mut has_match = false;
+            for right_row in lookup.rows_for(left_row)? {
+                let combined_row = combine_rows(left_row, right_row);
+                let include = self.evaluate_expression(
+                    context.condition,
+                    context.combined_columns,
+                    &combined_row,
+                )?;
+                if include {
+                    context.joined_rows.push(combined_row);
+                    has_match = true;
+                }
+            }
+            if matches!(context.join_type, JoinType::Left | JoinType::Full) && !has_match {
+                context.joined_rows.push(combine_row_with_right_nulls(
+                    left_row,
+                    context.right_columns.len(),
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// Fast path: outer references are bound to the current outer row's
