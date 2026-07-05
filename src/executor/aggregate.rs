@@ -5,7 +5,8 @@ use std::collections::BTreeMap;
 
 use super::expr::{
     IdentityProbe, RowIdentityIndex, compare_order_values, compare_values_for_sort,
-    evaluate_value_expression, row_has_finite_numeric_value, rows_equal_for_sql_identity,
+    evaluate_value_expression, resolve_column_index, row_has_finite_numeric_value,
+    rows_equal_for_sql_identity,
 };
 
 pub(crate) const DEFAULT_PERCENTILE_FRACTION: f64 = 0.5;
@@ -532,24 +533,30 @@ fn evaluate_window_function_outputs(
             ..
         } = col
         {
+            // Plain column keys resolve to cell indices once instead of
+            // re-resolving the name for every row.
+            let order_sources: Vec<Result<usize, &Expression>> = order_by
+                .iter()
+                .map(|ob| resolve_row_value_source(&ob.expr, columns))
+                .collect();
             let order_values: Vec<Vec<Value>> = rows
                 .iter()
                 .map(|row| {
-                    order_by
+                    order_sources
                         .iter()
-                        .map(|ob| {
-                            evaluate_value_expression(&ob.expr, columns, row).unwrap_or(Value::Null)
-                        })
+                        .map(|source| evaluate_row_value_source(source, columns, row))
                         .collect()
                 })
                 .collect();
+            let partition_sources: Vec<Result<usize, &Expression>> = partition_by
+                .iter()
+                .map(|expr| resolve_row_value_source(expr, columns))
+                .collect();
             let mut partition_groups = WindowPartitionGroups::new();
             for (idx, row) in rows.iter().enumerate() {
-                let key: Vec<Value> = partition_by
+                let key: Vec<Value> = partition_sources
                     .iter()
-                    .map(|expr| {
-                        evaluate_value_expression(expr, columns, row).unwrap_or(Value::Null)
-                    })
+                    .map(|source| evaluate_row_value_source(source, columns, row))
                     .collect();
                 partition_groups.insert(key, idx);
             }
@@ -815,6 +822,29 @@ fn window_order_values_equal(
     right_row: usize,
 ) -> bool {
     order_values[left_row] == order_values[right_row]
+}
+
+/// Resolves an expression to a direct cell index when it is a plain column,
+/// mirroring the evaluator's resolution; other expressions evaluate per row.
+fn resolve_row_value_source<'e>(
+    expr: &'e Expression,
+    columns: &[ColumnDefinition],
+) -> Result<usize, &'e Expression> {
+    match expr {
+        Expression::Column(name) if name != "*" => resolve_column_index(columns, name).ok_or(expr),
+        _ => Err(expr),
+    }
+}
+
+fn evaluate_row_value_source(
+    source: &Result<usize, &Expression>,
+    columns: &[ColumnDefinition],
+    row: &[Value],
+) -> Value {
+    match source {
+        Ok(index) => row[*index].clone(),
+        Err(expr) => evaluate_value_expression(expr, columns, row).unwrap_or(Value::Null),
+    }
 }
 
 pub(crate) fn evaluate_window_functions(

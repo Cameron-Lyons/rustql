@@ -6,15 +6,42 @@ impl<'a> PlanExecutor<'a> {
         input: ExecutionResult,
         order_by: &[OrderByExpr],
     ) -> Result<ExecutionResult, RustqlError> {
+        if input.rows.is_empty() {
+            return Ok(input);
+        }
+
         let column_defs = column_definitions_from_names(&input.columns);
+        // Plain column and aggregate keys resolve to cell indices once; the
+        // per-row path re-resolves and materializes the expression for every
+        // row, so this must resolve identically (including its errors).
+        let mut key_sources: Vec<Result<usize, &Expression>> = Vec::with_capacity(order_by.len());
+        for order_expr in order_by {
+            key_sources.push(match &order_expr.expr {
+                Expression::Column(name) => Ok(find_result_column_index(&input.columns, name)
+                    .ok_or_else(|| RustqlError::ColumnNotFound(name.to_string()))?),
+                Expression::Function(agg) => Ok(find_aggregate_result_column_index(
+                    &input.columns,
+                    agg,
+                )
+                .ok_or_else(|| {
+                    RustqlError::ColumnNotFound(format!(
+                        "{} (ORDER BY)",
+                        format_aggregate_header(agg)
+                    ))
+                })?),
+                expr => Err(expr),
+            });
+        }
+
         let mut keyed_rows: Vec<(Vec<Value>, Vec<Value>)> = input
             .rows
             .into_iter()
             .map(|row| {
-                let keys = order_by
+                let keys = key_sources
                     .iter()
-                    .map(|order_expr| {
-                        self.get_sort_value(&order_expr.expr, &input.columns, &column_defs, &row)
+                    .map(|source| match source {
+                        Ok(index) => Ok(row.get(*index).cloned().unwrap_or(Value::Null)),
+                        Err(expr) => self.get_sort_value(expr, &input.columns, &column_defs, &row),
                     })
                     .collect::<Result<Vec<_>, _>>()?;
                 Ok((keys, row))

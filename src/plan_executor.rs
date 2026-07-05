@@ -5,7 +5,7 @@ use crate::executor::aggregate::{DEFAULT_PERCENTILE_FRACTION, format_aggregate_h
 use crate::executor::expr::{
     IdentityProbe, RowIdentityIndex, SqlRowMultiset, SqlRowSet, compare_order_values,
     compare_values_same_type, evaluate_expression, evaluate_value_expression_with_db,
-    row_has_finite_numeric_value, rows_equal_for_sql_identity,
+    resolve_column_index, row_has_finite_numeric_value, rows_equal_for_sql_identity,
 };
 use crate::planner::{self, PlanNode};
 use std::cmp::Ordering;
