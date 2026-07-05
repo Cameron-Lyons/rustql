@@ -489,43 +489,63 @@ struct JoinKeyTable<V> {
     representative: Option<Value>,
 }
 
+/// Marker error for keys spanning incompatible type classes; comparing such
+/// a column per row surfaces evaluator errors that depend on scan order, so
+/// those subqueries stay on the per-row path.
+struct KeyClassMismatch;
+
 impl<V> JoinKeyTable<V> {
-    /// Returns None when the keys span incompatible type classes; comparing
-    /// such a column per row surfaces evaluator errors that depend on scan
-    /// order, so those subqueries stay on the per-row path.
-    fn from_entries(entries: impl Iterator<Item = (Value, V)>) -> Option<Self> {
-        let mut table = Self {
+    fn empty() -> Self {
+        Self {
             integer_keys: HashMap::new(),
             float_keys: BTreeMap::new(),
             non_numeric_keys: HashMap::new(),
             representative: None,
-        };
+        }
+    }
+
+    /// Returns None when the keys span incompatible type classes.
+    fn from_entries(entries: impl Iterator<Item = (Value, V)>) -> Option<Self> {
+        let mut table = Self::empty();
         for (value, payload) in entries {
-            let Some(key) = join_key(&value) else {
-                // NULL and non-finite keys never satisfy the equality.
-                continue;
-            };
-            match &table.representative {
-                None => table.representative = Some(value.clone()),
-                Some(representative) => {
-                    if !same_comparison_class(representative, &value) {
-                        return None;
-                    }
-                }
-            }
-            match key {
-                JoinKey::Integer(key) => {
-                    table.integer_keys.insert(numeric_key_bits(key), payload);
-                }
-                JoinKey::Float(key) => {
-                    table.float_keys.insert(NumericJoinKey(key), payload);
-                }
-                JoinKey::NonNumeric(key) => {
-                    table.non_numeric_keys.insert(key, payload);
-                }
+            match table.slot(&value, || payload) {
+                Ok(_) => {}
+                Err(KeyClassMismatch) => return None,
             }
         }
         Some(table)
+    }
+
+    /// Returns the payload slot for a key, creating it with `default` on
+    /// first sight. NULL and non-finite keys never satisfy the correlation
+    /// equality, so they get no slot.
+    fn slot(
+        &mut self,
+        value: &Value,
+        default: impl FnOnce() -> V,
+    ) -> Result<Option<&mut V>, KeyClassMismatch> {
+        let Some(key) = join_key(value) else {
+            return Ok(None);
+        };
+        match &self.representative {
+            None => self.representative = Some(value.clone()),
+            Some(representative) => {
+                if !same_comparison_class(representative, value) {
+                    return Err(KeyClassMismatch);
+                }
+            }
+        }
+        Ok(Some(match key {
+            JoinKey::Integer(key) => self
+                .integer_keys
+                .entry(numeric_key_bits(key))
+                .or_insert_with(default),
+            JoinKey::Float(key) => self
+                .float_keys
+                .entry(NumericJoinKey(key))
+                .or_insert_with(default),
+            JoinKey::NonNumeric(key) => self.non_numeric_keys.entry(key).or_insert_with(default),
+        }))
     }
 
     /// A probe value within epsilon of two distinct stored keys would match
@@ -609,4 +629,178 @@ fn same_comparison_class(left: &Value, right: &Value) -> bool {
         }
     }
     class(left) == class(right)
+}
+
+/// Cap on LIMIT k for decorrelated LATERAL top-k subqueries; bounds the
+/// lookup table at k rows per key.
+const LATERAL_TOP_K_LIMIT: usize = 16;
+
+/// A correlated LATERAL top-k subquery hoisted out of the per-outer-row
+/// loop: the subquery runs once without its correlation conjunct, globally
+/// ordered by its ORDER BY, and the first k rows per correlation key become
+/// the lookup payload.
+pub(super) struct LateralTopRows {
+    probe_index: usize,
+    rows_by_key: JoinKeyTable<Vec<Vec<Value>>>,
+}
+
+impl LateralTopRows {
+    pub(super) fn rows_for(&self, outer_row: &[Value]) -> Result<&[Vec<Value>], RustqlError> {
+        let probe = outer_row.get(self.probe_index).unwrap_or(&Value::Null);
+        Ok(self
+            .rows_by_key
+            .lookup(probe)?
+            .map(|rows| rows.as_slice())
+            .unwrap_or(&[]))
+    }
+}
+
+/// Attempts to decorrelate a LATERAL subquery of the shape
+/// `SELECT ... WHERE key = outer [AND local ...] ORDER BY local LIMIT k`.
+/// The rewritten subquery keeps the ORDER BY, so the engine's own global
+/// sort defines per-key ordering and tie behavior; the first k rows per key
+/// reproduce the per-outer-row LIMIT. Returns None for every other shape.
+pub(super) fn prepare_lateral_top_rows(
+    db: &dyn DatabaseCatalog,
+    subquery: &SelectStatement,
+    outer_columns: &[ColumnDefinition],
+    outer_row_count: usize,
+) -> Option<LateralTopRows> {
+    if outer_row_count < DECORRELATE_MIN_OUTER_ROWS {
+        return None;
+    }
+    // FETCH FIRST k ROWS ONLY is LIMIT k; WITH TIES changes row counts.
+    let limit = match (subquery.limit, subquery.fetch.as_ref()) {
+        (Some(limit), None) => limit,
+        (None, Some(fetch)) if !fetch.with_ties => fetch.count,
+        _ => return None,
+    };
+    if limit == 0 || limit > LATERAL_TOP_K_LIMIT {
+        return None;
+    }
+    if subquery.group_by.is_some()
+        || subquery.having.is_some()
+        || subquery.distinct
+        || subquery.distinct_on.is_some()
+        || subquery.offset.is_some()
+        || subquery.order_by.is_none()
+    {
+        return None;
+    }
+    // Aggregates or window functions in the select list evaluate over a
+    // different row set once the correlation conjunct is removed.
+    if !subquery.columns.iter().all(|column| match column {
+        Column::Named { .. } => true,
+        Column::Expression { expr, .. } => !expression_contains_aggregate_or_window(expr),
+        Column::All | Column::Function(_) | Column::Subquery(_) => false,
+    }) {
+        return None;
+    }
+
+    let binding = outer_value_binding(db, subquery, outer_columns)?;
+    if !binding.is_correlated() {
+        return None;
+    }
+
+    let inner_rows = db.get_table(&subquery.from)?.rows.len();
+    if inner_rows > outer_row_count.saturating_mul(DECORRELATE_INNER_ROW_FACTOR) {
+        return None;
+    }
+
+    let where_clause = subquery.where_clause.as_ref()?;
+    let conjuncts = split_conjuncts(where_clause);
+    let (key_position, local_key, probe_index) =
+        conjuncts.iter().enumerate().find_map(|(idx, conjunct)| {
+            let (local_key, probe_index) = correlated_equality(conjunct, &binding)?;
+            Some((idx, local_key, probe_index))
+        })?;
+
+    let residual: Vec<&Expression> = conjuncts
+        .iter()
+        .enumerate()
+        .filter(|(idx, _)| *idx != key_position)
+        .map(|(_, conjunct)| *conjunct)
+        .collect();
+
+    let mut ordered_select = subquery.clone();
+    ordered_select.columns.push(Column::Named {
+        name: local_key.to_string(),
+        alias: None,
+    });
+    ordered_select.where_clause = combine_conjunct_refs(&residual);
+    ordered_select.limit = None;
+    ordered_select.fetch = None;
+
+    // The rewritten subquery must be fully local: any outer reference left
+    // outside the dropped equality conjunct makes the rewrite unsound.
+    let ordered_binding = outer_value_binding(db, &ordered_select, outer_columns)?;
+    if ordered_binding.is_correlated() {
+        return None;
+    }
+
+    let result = execute_planned_select(db, &ordered_select).ok()?;
+    if result.columns.len() != subquery.columns.len() + 1 {
+        return None;
+    }
+
+    let mut rows_by_key: JoinKeyTable<Vec<Vec<Value>>> = JoinKeyTable::empty();
+    for mut row in result.rows {
+        let key = row.pop()?;
+        let Some(rows) = rows_by_key.slot(&key, Vec::new).ok()? else {
+            continue;
+        };
+        if rows.len() < limit {
+            rows.push(row);
+        }
+    }
+    if !rows_by_key.numeric_keys_unambiguous() {
+        return None;
+    }
+
+    Some(LateralTopRows {
+        probe_index,
+        rows_by_key,
+    })
+}
+
+fn expression_contains_aggregate_or_window(expr: &Expression) -> bool {
+    match expr {
+        Expression::Function(_) | Expression::WindowFunction { .. } => true,
+        Expression::BinaryOp { left, right, .. }
+        | Expression::IsDistinctFrom { left, right, .. } => {
+            expression_contains_aggregate_or_window(left)
+                || expression_contains_aggregate_or_window(right)
+        }
+        Expression::UnaryOp { expr, .. }
+        | Expression::IsNull { expr, .. }
+        | Expression::Cast { expr, .. } => expression_contains_aggregate_or_window(expr),
+        Expression::In { left, values } => {
+            expression_contains_aggregate_or_window(left)
+                || values.iter().any(expression_contains_aggregate_or_window)
+        }
+        Expression::Any { left, .. } | Expression::All { left, .. } => {
+            expression_contains_aggregate_or_window(left)
+        }
+        Expression::Case {
+            operand,
+            when_clauses,
+            else_clause,
+        } => {
+            operand
+                .as_deref()
+                .is_some_and(expression_contains_aggregate_or_window)
+                || when_clauses.iter().any(|(condition, result)| {
+                    expression_contains_aggregate_or_window(condition)
+                        || expression_contains_aggregate_or_window(result)
+                })
+                || else_clause
+                    .as_deref()
+                    .is_some_and(expression_contains_aggregate_or_window)
+        }
+        Expression::ScalarFunction { args, .. } => {
+            args.iter().any(expression_contains_aggregate_or_window)
+        }
+        Expression::Subquery(_) | Expression::Exists(_) => true,
+        Expression::Column(_) | Expression::Value(_) | Expression::Default => false,
+    }
 }
