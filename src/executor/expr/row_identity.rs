@@ -201,15 +201,18 @@ impl SqlRowMultiset {
 
     pub(crate) fn add(&mut self, row: Vec<Value>) -> bool {
         if row_has_finite_numeric_value(&row) {
-            let existing = match self.numeric_index.probe(&row) {
-                IdentityProbe::Hit(index) => Some(index),
+            let scanned = match self.numeric_index.probe(&row) {
+                IdentityProbe::Hit(index) => {
+                    self.numeric_counts[index].1 += 1;
+                    return false;
+                }
                 IdentityProbe::New => None,
                 IdentityProbe::MaybeEqual => self
                     .numeric_counts
                     .iter()
                     .position(|(candidate, _)| rows_equal_for_sql_identity(candidate, &row)),
             };
-            match existing {
+            match scanned {
                 Some(index) => {
                     self.numeric_index.record(&row, index);
                     self.numeric_counts[index].1 += 1;

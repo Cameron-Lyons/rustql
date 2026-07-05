@@ -62,15 +62,18 @@ impl<'a> AggregateGroupCollection<'a> {
 
     fn insert(&mut self, key: Vec<Value>, row: &'a [Value]) {
         if row_has_finite_numeric_value(&key) {
-            let existing = match self.numeric_index.probe(&key) {
-                IdentityProbe::Hit(index) => Some(index),
+            let scanned = match self.numeric_index.probe(&key) {
+                IdentityProbe::Hit(index) => {
+                    self.numeric_groups[index].rows.push(row);
+                    return;
+                }
                 IdentityProbe::New => None,
                 IdentityProbe::MaybeEqual => self
                     .numeric_groups
                     .iter()
                     .position(|group| rows_equal_for_sql_identity(&group.key, &key)),
             };
-            match existing {
+            match scanned {
                 Some(index) => {
                     self.numeric_index.record(&key, index);
                     self.numeric_groups[index].rows.push(row);
@@ -300,13 +303,27 @@ impl<'a> PlanExecutor<'a> {
         exprs: &[Expression],
         columns: &[ColumnDefinition],
     ) -> Vec<AggregateGroup<'row>> {
+        // Plain column keys resolve to cell indices once instead of
+        // re-resolving the name for every row.
+        let key_sources: Vec<Result<usize, &Expression>> = exprs
+            .iter()
+            .map(|expr| match expr {
+                Expression::Column(name) if name != "*" => {
+                    resolve_combined_column(columns, name).ok_or(expr)
+                }
+                _ => Err(expr),
+            })
+            .collect();
+
         let mut groups = AggregateGroupCollection::new();
         for row in &input.rows {
-            let key: Vec<Value> = exprs
+            let key: Vec<Value> = key_sources
                 .iter()
-                .map(|expr| {
-                    self.evaluate_value_expression(expr, columns, row)
-                        .unwrap_or(Value::Null)
+                .map(|source| match source {
+                    Ok(index) => row[*index].clone(),
+                    Err(expr) => self
+                        .evaluate_value_expression(expr, columns, row)
+                        .unwrap_or(Value::Null),
                 })
                 .collect();
             groups.insert(key, row.as_slice());
@@ -364,6 +381,12 @@ impl<'a> PlanExecutor<'a> {
         let mut filtered_row_count = 0usize;
         let mut values = Vec::with_capacity(if count_star { 0 } else { rows.len() });
         let mut seen = agg.distinct.then(AggregateDistinctTracker::new);
+        // A plain column input resolves to its cell index once instead of
+        // re-resolving the name for every row.
+        let input_cell = match agg.expr.as_ref() {
+            Expression::Column(name) if name != "*" => resolve_combined_column(columns, name),
+            _ => None,
+        };
 
         for row in rows {
             if let Some(filter_expr) = agg.filter.as_deref()
@@ -377,7 +400,10 @@ impl<'a> PlanExecutor<'a> {
                 continue;
             }
 
-            let value = self.evaluate_value_expression(&agg.expr, columns, row)?;
+            let value = match input_cell {
+                Some(index) => row[index].clone(),
+                None => self.evaluate_value_expression(&agg.expr, columns, row)?,
+            };
             if matches!(value, Value::Null) {
                 continue;
             }
