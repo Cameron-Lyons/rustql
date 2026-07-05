@@ -135,11 +135,25 @@ impl<'a> PlanExecutor<'a> {
         } else {
             Vec::new()
         };
+        let prepared_subqueries: Vec<Option<PreparedScalarSubquery>> = projection_specs
+            .iter()
+            .map(|spec| match spec {
+                ProjectionSpec::Subquery { subquery, .. } if !result.rows.is_empty() => {
+                    prepare_scalar_subquery(
+                        self.db,
+                        subquery,
+                        &scalar_outer_columns,
+                        result.rows.len(),
+                    )
+                }
+                _ => None,
+            })
+            .collect();
 
         let mut projected_rows = Vec::with_capacity(result.rows.len());
         for (row_idx, row) in result.rows.iter().enumerate() {
             let mut projected_row = Vec::with_capacity(projection_specs.len());
-            for spec in &projection_specs {
+            for (spec_idx, spec) in projection_specs.iter().enumerate() {
                 let val = match spec {
                     ProjectionSpec::Named { source_index, .. }
                     | ProjectionSpec::Function { source_index, .. } => {
@@ -155,7 +169,12 @@ impl<'a> PlanExecutor<'a> {
                         self.evaluate_value_expression(expr, &column_defs, row)?
                     }
                     ProjectionSpec::Subquery { subquery, .. } => {
-                        self.evaluate_scalar_subquery(subquery, &scalar_outer_columns, row)?
+                        match &prepared_subqueries[spec_idx] {
+                            Some(prepared) => prepared.value_for(row)?,
+                            None => {
+                                self.evaluate_scalar_subquery(subquery, &scalar_outer_columns, row)?
+                            }
+                        }
                     }
                 };
                 projected_row.push(val);

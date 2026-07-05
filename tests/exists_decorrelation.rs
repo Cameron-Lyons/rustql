@@ -230,3 +230,144 @@ fn test_exists_alongside_other_predicates() {
 
     assert_eq!(rows.rows, vec![vec![Value::Text("Alice".into())]]);
 }
+
+#[test]
+fn test_scalar_max_subquery_missing_key_is_null() {
+    let _guard = setup_test();
+
+    execute_sql("CREATE TABLE users (id INTEGER, name TEXT)").unwrap();
+    execute_sql("CREATE TABLE orders (user_id INTEGER, amount INTEGER)").unwrap();
+
+    execute_sql("INSERT INTO users VALUES (1, 'Alice'), (2, 'Bob'), (3, 'Cara')").unwrap();
+    execute_sql("INSERT INTO orders VALUES (1, 50), (1, 900), (3, 70)").unwrap();
+
+    let rows = query_rows(
+        "SELECT users.name, \
+                (SELECT MAX(amount) FROM orders WHERE orders.user_id = users.id) \
+         FROM users ORDER BY users.name",
+    )
+    .unwrap();
+
+    assert_eq!(
+        rows.rows,
+        vec![
+            vec![Value::Text("Alice".into()), Value::Integer(900)],
+            vec![Value::Text("Bob".into()), Value::Null],
+            vec![Value::Text("Cara".into()), Value::Integer(70)],
+        ]
+    );
+}
+
+#[test]
+fn test_scalar_count_subquery_missing_key_is_zero() {
+    let _guard = setup_test();
+
+    execute_sql("CREATE TABLE users (id INTEGER, name TEXT)").unwrap();
+    execute_sql("CREATE TABLE orders (user_id INTEGER, amount INTEGER)").unwrap();
+
+    execute_sql("INSERT INTO users VALUES (1, 'Alice'), (2, 'Bob'), (3, 'Cara')").unwrap();
+    execute_sql("INSERT INTO orders VALUES (1, 50), (1, 900), (3, 70)").unwrap();
+
+    // COUNT over an empty group is 0, not NULL.
+    let rows = query_rows(
+        "SELECT users.name, \
+                (SELECT COUNT(*) FROM orders WHERE orders.user_id = users.id) \
+         FROM users ORDER BY users.name",
+    )
+    .unwrap();
+
+    assert_eq!(
+        rows.rows,
+        vec![
+            vec![Value::Text("Alice".into()), Value::Integer(2)],
+            vec![Value::Text("Bob".into()), Value::Integer(0)],
+            vec![Value::Text("Cara".into()), Value::Integer(1)],
+        ]
+    );
+}
+
+#[test]
+fn test_scalar_sum_subquery_with_local_predicate() {
+    let _guard = setup_test();
+
+    execute_sql("CREATE TABLE users (id INTEGER, name TEXT)").unwrap();
+    execute_sql("CREATE TABLE orders (user_id INTEGER, amount INTEGER)").unwrap();
+
+    execute_sql("INSERT INTO users VALUES (1, 'Alice'), (2, 'Bob'), (3, 'Cara')").unwrap();
+    execute_sql("INSERT INTO orders VALUES (1, 50), (1, 900), (2, 40), (3, 70), (3, 500)").unwrap();
+
+    let rows = query_rows(
+        "SELECT users.name, \
+                (SELECT SUM(amount) FROM orders \
+                 WHERE orders.user_id = users.id AND orders.amount > 60) \
+         FROM users ORDER BY users.name",
+    )
+    .unwrap();
+
+    assert_eq!(
+        rows.rows,
+        vec![
+            vec![Value::Text("Alice".into()), Value::Float(900.0)],
+            vec![Value::Text("Bob".into()), Value::Null],
+            vec![Value::Text("Cara".into()), Value::Float(570.0)],
+        ]
+    );
+}
+
+#[test]
+fn test_uncorrelated_scalar_subquery_folds_to_constant() {
+    let _guard = setup_test();
+
+    execute_sql("CREATE TABLE users (id INTEGER, name TEXT)").unwrap();
+    execute_sql("CREATE TABLE settings (max_limit INTEGER)").unwrap();
+
+    execute_sql("INSERT INTO users VALUES (1, 'Alice'), (2, 'Bob')").unwrap();
+    execute_sql("INSERT INTO settings VALUES (250)").unwrap();
+
+    let rows = query_rows(
+        "SELECT users.name, (SELECT max_limit FROM settings) \
+         FROM users ORDER BY users.name",
+    )
+    .unwrap();
+
+    assert_eq!(
+        rows.rows,
+        vec![
+            vec![Value::Text("Alice".into()), Value::Integer(250)],
+            vec![Value::Text("Bob".into()), Value::Integer(250)],
+        ]
+    );
+}
+
+#[test]
+fn test_scalar_subquery_null_outer_key() {
+    let _guard = setup_test();
+
+    execute_sql("CREATE TABLE users (id INTEGER, name TEXT)").unwrap();
+    execute_sql("CREATE TABLE orders (user_id INTEGER, amount INTEGER)").unwrap();
+
+    execute_sql("INSERT INTO users VALUES (1, 'Alice'), (NULL, 'Ghost')").unwrap();
+    execute_sql("INSERT INTO orders VALUES (1, 50), (NULL, 900)").unwrap();
+
+    // A NULL outer key matches no inner rows: MAX over empty is NULL and
+    // COUNT over empty is 0.
+    let rows = query_rows(
+        "SELECT users.name, \
+                (SELECT MAX(amount) FROM orders WHERE orders.user_id = users.id), \
+                (SELECT COUNT(*) FROM orders WHERE orders.user_id = users.id) \
+         FROM users ORDER BY users.name",
+    )
+    .unwrap();
+
+    assert_eq!(
+        rows.rows,
+        vec![
+            vec![
+                Value::Text("Alice".into()),
+                Value::Integer(50),
+                Value::Integer(1),
+            ],
+            vec![Value::Text("Ghost".into()), Value::Null, Value::Integer(0)],
+        ]
+    );
+}

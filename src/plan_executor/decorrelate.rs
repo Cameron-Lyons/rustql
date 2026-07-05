@@ -1,6 +1,6 @@
 use super::*;
 use crate::executor::expr::compare_values;
-use std::collections::BTreeSet;
+use std::collections::HashMap;
 
 /// Decorrelating a filter EXISTS scans the inner table once instead of
 /// executing the subquery per outer row; skip the rewrite when the outer side
@@ -28,13 +28,13 @@ impl PreparedFilterConjunct {
 struct ExistsProbe {
     probe_index: usize,
     negated: bool,
-    keys: JoinKeySet,
+    keys: JoinKeyTable<()>,
 }
 
 impl ExistsProbe {
     fn matches(&self, row: &[Value]) -> Result<bool, RustqlError> {
         let probe = row.get(self.probe_index).unwrap_or(&Value::Null);
-        Ok(self.keys.contains(probe)? != self.negated)
+        Ok(self.keys.lookup(probe)?.is_some() != self.negated)
     }
 }
 
@@ -258,18 +258,191 @@ fn prepare_exists_conjunct(
     }
 
     let result = execute_planned_select(db, &key_select).ok()?;
-    let keys = JoinKeySet::from_key_values(result.rows.into_iter().map(|mut row| {
-        if row.is_empty() {
+    let keys = JoinKeyTable::from_entries(result.rows.into_iter().map(|mut row| {
+        let key = if row.is_empty() {
             Value::Null
         } else {
             row.swap_remove(0)
-        }
+        };
+        (key, ())
     }))?;
 
     Some(PreparedFilterConjunct::ExistsProbe(ExistsProbe {
         probe_index,
         negated,
         keys,
+    }))
+}
+
+/// A SELECT-list scalar subquery hoisted out of the per-row projection loop:
+/// either an uncorrelated subquery evaluated once, or a correlated
+/// single-aggregate subquery turned into a grouped lookup table.
+pub(super) enum PreparedScalarSubquery {
+    Constant(Value),
+    Lookup(ScalarAggregateLookup),
+}
+
+impl PreparedScalarSubquery {
+    pub(super) fn value_for(&self, row: &[Value]) -> Result<Value, RustqlError> {
+        match self {
+            Self::Constant(value) => Ok(value.clone()),
+            Self::Lookup(lookup) => lookup.value_for(row),
+        }
+    }
+}
+
+pub(super) struct ScalarAggregateLookup {
+    probe_index: usize,
+    values: JoinKeyTable<Value>,
+    /// The aggregate's result over an empty input (e.g. 0 for COUNT, NULL
+    /// for MAX), returned for outer keys with no matching inner rows.
+    empty_value: Value,
+}
+
+impl ScalarAggregateLookup {
+    fn value_for(&self, row: &[Value]) -> Result<Value, RustqlError> {
+        let probe = row.get(self.probe_index).unwrap_or(&Value::Null);
+        Ok(self
+            .values
+            .lookup(probe)?
+            .unwrap_or(&self.empty_value)
+            .clone())
+    }
+}
+
+/// Attempts to hoist a SELECT-list scalar subquery out of the per-row
+/// projection loop. Uncorrelated subqueries evaluate once. A correlated
+/// subquery of exactly one aggregate whose only outer reference is one side
+/// of a `column = column` WHERE conjunct becomes a lookup table computed by
+/// one GROUP BY query over the correlation key; missing keys return the
+/// aggregate's empty-input value. Returns None (keeping the subquery on the
+/// per-row path) for every other shape.
+pub(super) fn prepare_scalar_subquery(
+    db: &dyn DatabaseCatalog,
+    subquery: &SelectStatement,
+    outer_columns: &[ColumnDefinition],
+    outer_row_count: usize,
+) -> Option<PreparedScalarSubquery> {
+    if subquery.columns.len() != 1 {
+        return None;
+    }
+    let binding = outer_value_binding(db, subquery, outer_columns)?;
+
+    if !binding.is_correlated() {
+        let result = execute_planned_select(db, subquery).ok()?;
+        if result.columns.len() != 1 {
+            return None;
+        }
+        return match result.rows.len() {
+            0 => Some(PreparedScalarSubquery::Constant(Value::Null)),
+            1 => result
+                .rows
+                .into_iter()
+                .next()
+                .and_then(|row| row.into_iter().next())
+                .map(PreparedScalarSubquery::Constant),
+            // More than one row is a per-row error; surface it there.
+            _ => None,
+        };
+    }
+
+    if outer_row_count < DECORRELATE_MIN_OUTER_ROWS {
+        return None;
+    }
+    // A single aggregate without grouping returns exactly one row for any
+    // key, so ORDER BY / LIMIT >= 1 / DISTINCT cannot change the result.
+    if subquery.group_by.is_some()
+        || subquery.having.is_some()
+        || subquery.distinct_on.is_some()
+        || subquery.offset.is_some()
+        || subquery.fetch.is_some()
+        || subquery.limit == Some(0)
+    {
+        return None;
+    }
+    let Some(Column::Function(aggregate)) = subquery.columns.first() else {
+        return None;
+    };
+
+    let inner_rows = db.get_table(&subquery.from)?.rows.len();
+    if inner_rows > outer_row_count.saturating_mul(DECORRELATE_INNER_ROW_FACTOR) {
+        return None;
+    }
+
+    let where_clause = subquery.where_clause.as_ref()?;
+    let conjuncts = split_conjuncts(where_clause);
+    let (key_position, local_key, probe_index) =
+        conjuncts.iter().enumerate().find_map(|(idx, conjunct)| {
+            let (local_key, probe_index) = correlated_equality(conjunct, &binding)?;
+            Some((idx, local_key, probe_index))
+        })?;
+
+    let residual: Vec<&Expression> = conjuncts
+        .iter()
+        .enumerate()
+        .filter(|(idx, _)| *idx != key_position)
+        .map(|(_, conjunct)| *conjunct)
+        .collect();
+
+    let mut grouped_select = subquery.clone();
+    grouped_select.columns = vec![
+        Column::Named {
+            name: local_key.to_string(),
+            alias: None,
+        },
+        Column::Function(aggregate.clone()),
+    ];
+    grouped_select.where_clause = combine_conjunct_refs(&residual);
+    grouped_select.group_by = Some(GroupByClause::Simple(vec![Expression::Column(
+        local_key.to_string(),
+    )]));
+    grouped_select.order_by = None;
+    grouped_select.limit = None;
+    grouped_select.distinct = false;
+
+    // The rewritten subquery must be fully local: any outer reference left
+    // outside the dropped equality conjunct makes the rewrite unsound.
+    let grouped_binding = outer_value_binding(db, &grouped_select, outer_columns)?;
+    if grouped_binding.is_correlated() {
+        return None;
+    }
+
+    // The aggregate over an empty input, computed by the real aggregate
+    // machinery so COUNT yields 0 while MAX/MIN/SUM/AVG yield NULL.
+    let mut empty_select = subquery.clone();
+    empty_select.where_clause = Some(Expression::Value(Value::Boolean(false)));
+    empty_select.order_by = None;
+    empty_select.limit = None;
+    empty_select.distinct = false;
+    let empty_result = execute_planned_select(db, &empty_select).ok()?;
+    let empty_value = match empty_result.rows.len() {
+        0 => Value::Null,
+        1 => empty_result
+            .rows
+            .into_iter()
+            .next()
+            .and_then(|row| row.into_iter().next())?,
+        _ => return None,
+    };
+
+    let grouped_result = execute_planned_select(db, &grouped_select).ok()?;
+    if grouped_result.columns.len() != 2 {
+        return None;
+    }
+    let values = JoinKeyTable::from_entries(grouped_result.rows.into_iter().filter_map(|row| {
+        let mut cells = row.into_iter();
+        let key = cells.next()?;
+        let value = cells.next()?;
+        Some((key, value))
+    }))?;
+    if !values.numeric_keys_unambiguous() {
+        return None;
+    }
+
+    Some(PreparedScalarSubquery::Lookup(ScalarAggregateLookup {
+        probe_index,
+        values,
+        empty_value,
     }))
 }
 
@@ -303,36 +476,37 @@ fn correlated_equality<'a>(
     }
 }
 
-/// Semi-join key set mirroring the hash join's build tables: integer keys by
-/// f64 bit pattern, finite float keys in an epsilon-range tree, and
-/// non-numeric keys hashed exactly.
-struct JoinKeySet {
-    integer_keys: HashSet<u64>,
-    float_keys: BTreeSet<NumericJoinKey>,
-    non_numeric_keys: HashSet<NonNumericJoinKey>,
+/// Correlation key table mirroring the hash join's build tables: integer
+/// keys by f64 bit pattern, finite float keys in an epsilon-range tree, and
+/// non-numeric keys hashed exactly. The payload is `()` for EXISTS semi-join
+/// sets and the aggregate value for scalar subquery lookups.
+struct JoinKeyTable<V> {
+    integer_keys: HashMap<u64, V>,
+    float_keys: BTreeMap<NumericJoinKey, V>,
+    non_numeric_keys: HashMap<NonNumericJoinKey, V>,
     /// One key value retained to reproduce the evaluator's type-mismatch
     /// errors when a probe value's type class is incompatible with the keys.
     representative: Option<Value>,
 }
 
-impl JoinKeySet {
+impl<V> JoinKeyTable<V> {
     /// Returns None when the keys span incompatible type classes; comparing
     /// such a column per row surfaces evaluator errors that depend on scan
     /// order, so those subqueries stay on the per-row path.
-    fn from_key_values(values: impl Iterator<Item = Value>) -> Option<Self> {
-        let mut set = Self {
-            integer_keys: HashSet::new(),
-            float_keys: BTreeSet::new(),
-            non_numeric_keys: HashSet::new(),
+    fn from_entries(entries: impl Iterator<Item = (Value, V)>) -> Option<Self> {
+        let mut table = Self {
+            integer_keys: HashMap::new(),
+            float_keys: BTreeMap::new(),
+            non_numeric_keys: HashMap::new(),
             representative: None,
         };
-        for value in values {
+        for (value, payload) in entries {
             let Some(key) = join_key(&value) else {
                 // NULL and non-finite keys never satisfy the equality.
                 continue;
             };
-            match &set.representative {
-                None => set.representative = Some(value.clone()),
+            match &table.representative {
+                None => table.representative = Some(value.clone()),
                 Some(representative) => {
                     if !same_comparison_class(representative, &value) {
                         return None;
@@ -341,58 +515,80 @@ impl JoinKeySet {
             }
             match key {
                 JoinKey::Integer(key) => {
-                    set.integer_keys.insert(numeric_key_bits(key));
+                    table.integer_keys.insert(numeric_key_bits(key), payload);
                 }
                 JoinKey::Float(key) => {
-                    set.float_keys.insert(NumericJoinKey(key));
+                    table.float_keys.insert(NumericJoinKey(key), payload);
                 }
                 JoinKey::NonNumeric(key) => {
-                    set.non_numeric_keys.insert(key);
+                    table.non_numeric_keys.insert(key, payload);
                 }
             }
         }
-        Some(set)
+        Some(table)
     }
 
-    fn contains(&self, probe: &Value) -> Result<bool, RustqlError> {
+    /// A probe value within epsilon of two distinct stored keys would match
+    /// both under evaluator equality, making a single-payload lookup
+    /// ambiguous. Returns false when any two numeric keys are that close
+    /// (including an integer and a float sharing the same f64), so map-style
+    /// users can fall back to the per-row path.
+    fn numeric_keys_unambiguous(&self) -> bool {
+        let mut numeric_keys: Vec<f64> = self
+            .integer_keys
+            .keys()
+            .map(|bits| f64::from_bits(*bits))
+            .chain(self.float_keys.keys().map(|key| key.0))
+            .collect();
+        numeric_keys.sort_by(|left, right| left.partial_cmp(right).unwrap_or(Ordering::Equal));
+        numeric_keys
+            .windows(2)
+            .all(|pair| (pair[1] - pair[0]).abs() >= 2.0 * f64::EPSILON)
+    }
+
+    /// Finds the payload for the first key equal to the probe under the
+    /// evaluator's comparison semantics, or an error for the cross-type
+    /// comparisons the evaluator rejects.
+    fn lookup(&self, probe: &Value) -> Result<Option<&V>, RustqlError> {
         let Some(representative) = &self.representative else {
-            return Ok(false);
+            return Ok(None);
         };
         if matches!(probe, Value::Null) {
-            return Ok(false);
+            return Ok(None);
         }
         if !same_comparison_class(representative, probe) {
             // Reproduce the error the evaluator would raise comparing the
             // probe value against any key of this incompatible class.
-            return compare_values(probe, &BinaryOperator::Equal, representative);
+            compare_values(probe, &BinaryOperator::Equal, representative)?;
+            return Ok(None);
         }
         let Some(key) = join_key(probe) else {
-            return Ok(false);
+            return Ok(None);
         };
         Ok(match key {
             JoinKey::Integer(key) | JoinKey::Float(key) => {
-                if self.integer_keys.contains(&numeric_key_bits(key)) {
-                    true
+                if let Some(payload) = self.integer_keys.get(&numeric_key_bits(key)) {
+                    Some(payload)
                 } else {
                     let nearest_integer = key.round();
-                    let matches_nearest = (key - nearest_integer).abs() < f64::EPSILON
-                        && numeric_key_bits(nearest_integer) != numeric_key_bits(key)
-                        && self
-                            .integer_keys
-                            .contains(&numeric_key_bits(nearest_integer));
-                    matches_nearest
-                        || (!self.float_keys.is_empty()
-                            && self
-                                .float_keys
-                                .range(
-                                    NumericJoinKey(key - f64::EPSILON)
-                                        ..=NumericJoinKey(key + f64::EPSILON),
-                                )
-                                .next()
-                                .is_some())
+                    let nearest_match = ((key - nearest_integer).abs() < f64::EPSILON
+                        && numeric_key_bits(nearest_integer) != numeric_key_bits(key))
+                    .then(|| self.integer_keys.get(&numeric_key_bits(nearest_integer)))
+                    .flatten();
+                    match nearest_match {
+                        Some(payload) => Some(payload),
+                        None => self
+                            .float_keys
+                            .range(
+                                NumericJoinKey(key - f64::EPSILON)
+                                    ..=NumericJoinKey(key + f64::EPSILON),
+                            )
+                            .map(|(_, payload)| payload)
+                            .next(),
+                    }
                 }
             }
-            JoinKey::NonNumeric(key) => self.non_numeric_keys.contains(&key),
+            JoinKey::NonNumeric(key) => self.non_numeric_keys.get(&key),
         })
     }
 }
