@@ -311,6 +311,11 @@ fn bench_definitions() -> Vec<BenchDefinition> {
             prepare: prepare_grouped_multi_aggregate,
         },
         BenchDefinition {
+            name: "high_card_group",
+            description: "Memory benchmark for aggregation grouped by a high-cardinality key.",
+            prepare: prepare_high_card_group,
+        },
+        BenchDefinition {
             name: "window_rank",
             description: "Memory benchmark for partitioned window ranking with final ordering.",
             prepare: prepare_window_rank,
@@ -706,6 +711,43 @@ fn prepare_correlated_exists(profile: BenchProfile) -> PreparedBench {
                  ORDER BY bench_users.id";
     PreparedBench {
         scale: format!("{users} users/{total_orders} orders"),
+        run: Box::new(move || {
+            let mut session = engine.session();
+            black_box(session.execute_one(query).unwrap());
+        }),
+    }
+}
+
+fn prepare_high_card_group(profile: BenchProfile) -> PreparedBench {
+    let rows = profile.aggregate_rows();
+    let rows_per_group = 5usize;
+    let engine = open_memory_engine();
+
+    {
+        let mut session = engine.session();
+        session
+            .execute_script(
+                "
+                CREATE TABLE bench_ledger (entry_id INTEGER, account INTEGER, amount INTEGER);
+                ",
+            )
+            .unwrap();
+        insert_rows(&mut session, "bench_ledger", rows, |index| {
+            format!(
+                "({}, {}, {})",
+                index,
+                index / rows_per_group,
+                10 + (index % 900)
+            )
+        });
+    }
+
+    let query = "SELECT account, COUNT(*) AS entries, SUM(amount) AS total \
+                 FROM bench_ledger \
+                 GROUP BY account \
+                 ORDER BY total DESC LIMIT 10";
+    PreparedBench {
+        scale: format!("{rows} rows/{} groups", rows / rows_per_group),
         run: Box::new(move || {
             let mut session = engine.session();
             black_box(session.execute_one(query).unwrap());
