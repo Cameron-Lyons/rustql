@@ -23,8 +23,8 @@ mod subquery;
 mod support;
 
 use subquery::{
-    LateralValueBinding, execute_planned_select, lateral_subquery_with_outer_scope,
-    lateral_value_binding,
+    OuterValueBinding, execute_planned_select, lateral_subquery_with_outer_scope,
+    outer_value_binding,
 };
 pub(crate) use subquery::{
     evaluate_planned_scalar_subquery_with_outer, evaluate_planned_subquery_exists_with_outer,
