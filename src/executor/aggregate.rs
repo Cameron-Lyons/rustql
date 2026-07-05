@@ -60,15 +60,18 @@ impl WindowPartitionGroups {
 
     fn insert(&mut self, key: Vec<Value>, idx: usize) {
         if row_has_finite_numeric_value(&key) {
-            let existing = match self.numeric_index.probe(&key) {
-                IdentityProbe::Hit(index) => Some(index),
+            let scanned = match self.numeric_index.probe(&key) {
+                IdentityProbe::Hit(index) => {
+                    self.numeric_groups[index].1.push(idx);
+                    return;
+                }
                 IdentityProbe::New => None,
                 IdentityProbe::MaybeEqual => self
                     .numeric_groups
                     .iter()
                     .position(|(candidate, _)| rows_equal_for_sql_identity(candidate, &key)),
             };
-            match existing {
+            match scanned {
                 Some(index) => {
                     self.numeric_index.record(&key, index);
                     self.numeric_groups[index].1.push(idx);

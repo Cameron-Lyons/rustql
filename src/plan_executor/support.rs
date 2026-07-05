@@ -304,3 +304,22 @@ pub(super) fn join_key(value: &Value) -> Option<JoinKey> {
         ))),
     }
 }
+
+/// Mirrors the expression evaluator's column resolution (exact name first,
+/// then unqualified-suffix matching) so the fast path picks the same cells
+/// the evaluator would.
+pub(super) fn resolve_combined_column(columns: &[ColumnDefinition], name: &str) -> Option<usize> {
+    if let Some(idx) = columns.iter().position(|c| c.name == name) {
+        return Some(idx);
+    }
+    if name.contains('.') {
+        let col_name = name.split('.').next_back().unwrap_or(name);
+        columns.iter().position(|c| {
+            c.name == col_name || c.name.split('.').next_back().unwrap_or(&c.name) == col_name
+        })
+    } else {
+        columns
+            .iter()
+            .position(|c| c.name.split('.').next_back().unwrap_or(&c.name) == name)
+    }
+}
