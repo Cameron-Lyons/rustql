@@ -116,6 +116,14 @@ impl BenchProfile {
         }
     }
 
+    fn nested_join_rows(self) -> usize {
+        match self {
+            Self::Smoke => 300,
+            Self::Default => 1_000,
+            Self::Large => 3_000,
+        }
+    }
+
     fn lateral_users(self) -> usize {
         match self {
             Self::Smoke => 500,
@@ -276,6 +284,11 @@ fn bench_definitions() -> Vec<BenchDefinition> {
             name: "keyed_join",
             description: "Memory benchmark for a high-cardinality unique-key hash join.",
             prepare: prepare_keyed_join,
+        },
+        BenchDefinition {
+            name: "outer_join",
+            description: "Memory benchmark for a LEFT OUTER JOIN executed as a nested-loop join.",
+            prepare: prepare_outer_join,
         },
         BenchDefinition {
             name: "lateral_top1",
@@ -520,6 +533,40 @@ fn prepare_keyed_join(profile: BenchProfile) -> PreparedBench {
                  JOIN bench_orders_r ON bench_orders_l.id = bench_orders_r.id";
     PreparedBench {
         scale: format!("{rows}x{rows} rows"),
+        run: Box::new(move || {
+            let mut session = engine.session();
+            black_box(session.execute_one(query).unwrap());
+        }),
+    }
+}
+
+fn prepare_outer_join(profile: BenchProfile) -> PreparedBench {
+    let rows = profile.nested_join_rows();
+    let engine = open_memory_engine();
+
+    {
+        let mut session = engine.session();
+        session
+            .execute_script(
+                "
+                CREATE TABLE bench_events (id INTEGER, amount INTEGER);
+                CREATE TABLE bench_tags (event_id INTEGER, label INTEGER);
+                ",
+            )
+            .unwrap();
+        insert_rows(&mut session, "bench_events", rows, |index| {
+            format!("({}, {})", index, 10 + (index % 900))
+        });
+        insert_rows(&mut session, "bench_tags", rows / 2, |index| {
+            format!("({}, {})", index * 2, index % 25)
+        });
+    }
+
+    let query = "SELECT COUNT(*) AS total, SUM(bench_events.amount) AS total_amount \
+                 FROM bench_events \
+                 LEFT JOIN bench_tags ON bench_events.id = bench_tags.event_id";
+    PreparedBench {
+        scale: format!("{rows}x{} rows", rows / 2),
         run: Box::new(move || {
             let mut session = engine.session();
             black_box(session.execute_one(query).unwrap());

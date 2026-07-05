@@ -20,24 +20,31 @@ impl<'a> PlanExecutor<'a> {
             should_track_unmatched_right_rows(join_type).then(|| vec![false; right.rows.len()]);
         let combined_columns = (!matches!(join_type, JoinType::Cross))
             .then(|| combined_column_definitions(&left.columns, &right.columns));
+        let key_comparison = combined_columns
+            .as_ref()
+            .and_then(|columns| resolved_column_comparison(condition, columns));
 
         for left_row in &left.rows {
             let mut has_match = false;
             for (right_idx, right_row) in right.rows.iter().enumerate() {
-                let combined_row = combine_rows(left_row, right_row);
-
-                let include = if matches!(join_type, JoinType::Cross) {
-                    true
+                let combined_row = if matches!(join_type, JoinType::Cross) {
+                    Some(combine_rows(left_row, right_row))
+                } else if let Some(comparison) = &key_comparison {
+                    comparison
+                        .matches(left_row, right_row, left.columns.len())?
+                        .then(|| combine_rows(left_row, right_row))
                 } else {
                     let combined_columns = combined_columns.as_ref().ok_or_else(|| {
                         RustqlError::Internal(
                             "Join condition evaluation is missing combined columns".to_string(),
                         )
                     })?;
+                    let combined_row = combine_rows(left_row, right_row);
                     self.evaluate_expression(condition, combined_columns, &combined_row)?
+                        .then_some(combined_row)
                 };
 
-                if include {
+                if let Some(combined_row) = combined_row {
                     joined_rows.push(combined_row);
                     has_match = true;
                     if let Some(matched_right) = matched_right.as_mut() {
@@ -279,7 +286,7 @@ impl<'a> PlanExecutor<'a> {
             condition,
             combined_columns: &combined_columns,
             left_column_count: left.columns.len(),
-            key_equality: hash_join_key_equality(condition, &combined_columns),
+            key_comparison: resolved_column_comparison(condition, &combined_columns),
         };
 
         for probe_row in &probe.rows {
@@ -363,23 +370,8 @@ impl<'a> PlanExecutor<'a> {
                 (probe_row, build_row.as_slice())
             };
 
-            if let Some((left_value_idx, right_value_idx)) = context.key_equality {
-                let left_value = combined_cell(
-                    left_row,
-                    right_row,
-                    context.left_column_count,
-                    left_value_idx,
-                );
-                let right_value = combined_cell(
-                    left_row,
-                    right_row,
-                    context.left_column_count,
-                    right_value_idx,
-                );
-                if !matches!(left_value, Value::Null)
-                    && !matches!(right_value, Value::Null)
-                    && compare_values(left_value, &BinaryOperator::Equal, right_value)?
-                {
+            if let Some(comparison) = &context.key_comparison {
+                if comparison.matches(left_row, right_row, context.left_column_count)? {
                     joined_rows.push(combine_rows(left_row, right_row));
                 }
             } else {
@@ -503,7 +495,7 @@ struct HashJoinMatchContext<'a> {
     condition: &'a Expression,
     combined_columns: &'a [ColumnDefinition],
     left_column_count: usize,
-    key_equality: Option<(usize, usize)>,
+    key_comparison: Option<ResolvedColumnComparison>,
 }
 
 fn combined_cell<'a>(
@@ -519,27 +511,59 @@ fn combined_cell<'a>(
     }
 }
 
-/// Pre-resolves a `column = column` join condition to combined-row cell
-/// indices so each candidate pair can be checked without building the
-/// combined row or re-resolving column names. Returns None for conditions
-/// the generic evaluator must handle.
-fn hash_join_key_equality(
+/// A `column <comparison> column` join condition pre-resolved to combined-row
+/// cell indices so each candidate pair can be checked without building the
+/// combined row or re-resolving column names.
+struct ResolvedColumnComparison {
+    left_index: usize,
+    op: BinaryOperator,
+    right_index: usize,
+}
+
+impl ResolvedColumnComparison {
+    /// Matches the evaluator's comparison semantics: `compare_values` treats
+    /// any NULL operand as no-match, exactly like a NULL condition result.
+    fn matches(
+        &self,
+        left_row: &[Value],
+        right_row: &[Value],
+        left_column_count: usize,
+    ) -> Result<bool, RustqlError> {
+        let left_value = combined_cell(left_row, right_row, left_column_count, self.left_index);
+        let right_value = combined_cell(left_row, right_row, left_column_count, self.right_index);
+        compare_values(left_value, &self.op, right_value)
+    }
+}
+
+/// Pre-resolves a `column <comparison> column` join condition to combined-row
+/// cell indices. Returns None for conditions the generic evaluator must
+/// handle.
+fn resolved_column_comparison(
     condition: &Expression,
     combined_columns: &[ColumnDefinition],
-) -> Option<(usize, usize)> {
-    if let Expression::BinaryOp {
-        left,
-        op: BinaryOperator::Equal,
-        right,
-    } = condition
+) -> Option<ResolvedColumnComparison> {
+    if let Expression::BinaryOp { left, op, right } = condition
+        && matches!(
+            op,
+            BinaryOperator::Equal
+                | BinaryOperator::NotEqual
+                | BinaryOperator::LessThan
+                | BinaryOperator::LessThanOrEqual
+                | BinaryOperator::GreaterThan
+                | BinaryOperator::GreaterThanOrEqual
+        )
         && let (Expression::Column(left_col), Expression::Column(right_col)) =
             (left.as_ref(), right.as_ref())
         && left_col != "*"
         && right_col != "*"
     {
-        let left_idx = resolve_combined_column(combined_columns, left_col)?;
-        let right_idx = resolve_combined_column(combined_columns, right_col)?;
-        return Some((left_idx, right_idx));
+        let left_index = resolve_combined_column(combined_columns, left_col)?;
+        let right_index = resolve_combined_column(combined_columns, right_col)?;
+        return Some(ResolvedColumnComparison {
+            left_index,
+            op: op.clone(),
+            right_index,
+        });
     }
     None
 }
